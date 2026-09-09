@@ -4076,6 +4076,97 @@ static void BalanceTeamsIfDegenerate()
 }
 static void SafeBalanceTeams() { __try { BalanceTeamsIfDegenerate(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
 
+// [2026-09-09 *** THE SCRAPRUN AUTO-END -- ROOT CAUSE, FROM THE GAME'S OWN LUAU] ------------------
+// Extracted A2/Content/LevelDefinitions/deathrun2_a2level/Scripts/gamemode.luau from the pak. The
+// end rule is explicit:
+//
+//     function PlayerLeftTeam(teamSize: number, teamIndex: number): ()
+//         if (currentState == State.RUNNING or currentState == State.OVERTIME_RUNNING) then
+//             if (teamSize == 0) then          -- the team is now EMPTY
+//                 ... GameScore:incrementScore(...)
+//                 SwitchState(State.GAME_EXIT) -- END THE MATCH
+//
+//     KillerTeamChanger.teamSizeDecreased.Listen(PlayerLeftTeam)
+//     RunnerTeamChanger.teamSizeDecreased.Listen(PlayerLeftTeam)
+//
+// So the match ends when a TEAM SIZE reaches ZERO -- exactly the intended "all runners are dead"
+// rule, not a bug in the gamemode.
+//
+// The bug is that nobody is ever ON a team here. Team membership is owned by the native
+// UTeamChangeComponent and is joined by PHYSICALLY OVERLAPPING the team-switcher volume, which
+// calls UTeamChangeComponent::HandleFiringSwitcherOverlapOnServer(PlayerIndex). Our headless server
+// never detects that overlap -- the same documented failure as the deathrun finish trigger: "our VR
+// pawns' server collision doesn't track the player (the real pose lives on AVRPawn.Entity@0x928,
+// not the pawn actor root), so the engine never detects the overlap". The roster therefore stays
+// EMPTY, so the first death fires teamSizeDecreased with teamSize=0 and the round exits instantly --
+// whichever player died, every time. That matches the report precisely.
+//
+// FIX (mirrors what this file already does for the finish trigger: detect it ourselves, then call
+// the real server-side handler so the genuine Luau path runs): if a Runner team-changer has fewer
+// members than there are live players in the world, seat the missing players by calling
+// HandleFiringSwitcherOverlapOnServer directly. That is the exact function the volume would have
+// called, so team sizes, delegates, scoreboards and Luau state all update through the normal path.
+//
+// Offsets (SDK 22284 A2_classes.hpp:9191 UTeamChangeComponent): TeamSize@0x4DC, TeamIndex@0x524.
+// AVRPawn::PlayerIndex@0x1C22.
+//
+// Deliberately conservative: only ever ADDS players to the RUNNER team (TeamIndex 0), only while the
+// roster is short, and never removes anyone. -NoSeatTeams disables it.
+static bool g_seatTeams = true;          // -NoSeatTeams
+static long g_teamSeats = 0;
+static void SeatPlayersOntoTeams()
+{
+    if (!g_seatTeams) return;
+    static ULONGLONG s_last = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (now - s_last < 2000) return;
+    s_last = now;
+
+    SDK::UClass* tcCls = SDK::UObject::FindClassFast("TeamChangeComponent");
+    SDK::UClass* pawnCls = SDK::UObject::FindClassFast("VRPawn");
+    if (!tcCls || !pawnCls) return;
+
+    // Live players (a pawn with a controller is a real connected player, not an orphan).
+    unsigned char pidx[16]; int nPlayers = 0;
+    const int32_t num = SDK::UObject::GObjects->Num();
+    for (int32_t i = 0; i < num && nPlayers < 16; ++i)
+    {
+        auto* o = SDK::UObject::GObjects->GetByIndex(i);
+        if (!o || o->IsDefaultObject() || !o->IsA(pawnCls)) continue;
+        const uintptr_t pw = reinterpret_cast<uintptr_t>(o);
+        if (!*reinterpret_cast<void**>(pw + 0x2D0)) continue;          // no controller -> orphan
+        pidx[nPlayers++] = *reinterpret_cast<unsigned char*>(pw + 0x1C22);
+    }
+    if (nPlayers == 0) return;
+
+    SDK::UFunction* fnJoin = tcCls->GetFunction("TeamChangeComponent", "HandleFiringSwitcherOverlapOnServer");
+    if (!fnJoin) return;
+
+    for (int32_t i = 0; i < num; ++i)
+    {
+        auto* o = SDK::UObject::GObjects->GetByIndex(i);
+        if (!o || o->IsDefaultObject() || !o->IsA(tcCls)) continue;
+        const uintptr_t c = reinterpret_cast<uintptr_t>(o);
+        const int teamIndex = *reinterpret_cast<int*>(c + 0x524);
+        if (teamIndex != 0) continue;                                   // Runners only
+        int teamSize = *reinterpret_cast<int*>(c + 0x4DC);
+        if (teamSize >= nPlayers) continue;                             // roster already complete
+
+        for (int k = 0; k < nPlayers && teamSize < nPlayers; ++k)
+        {
+            struct { int32_t PlayerIndex; } parms{ (int32_t)pidx[k] };
+            o->ProcessEvent(fnJoin, &parms);
+            const int after = *reinterpret_cast<int*>(c + 0x4DC);
+            if (after != teamSize) { ++g_teamSeats; teamSize = after; }
+        }
+        HxLog("[HalcyonA2][TEAMSEAT] runner team-changer %s: %d live players, roster now %d "
+              "(was short -> seated via HandleFiringSwitcherOverlapOnServer; an empty roster is what "
+              "made the first death end the round). total seats=%ld\n",
+              o->GetName().c_str(), nPlayers, teamSize, g_teamSeats);
+    }
+}
+static void SafeSeatTeams() { __try { SeatPlayersOntoTeams(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+
 static void SafeWireVRPawns()       { __try { WireVRPawnBallSimManagers(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
 
 // SPECTATOR SMOOTHNESS (direction B: VR players see the spectator pawn snap). The spectator pose rides
@@ -9185,6 +9276,7 @@ static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, v
             PROF(SafeCheckRestCurve);   // [RESTCURVE] hand-speed->restitution curve present?
             PROF(SafeDumpPawnNetState);   // [NETSTATE] are our relevancy pins actually holding?
             PROF(SafeBalanceTeams);   // [TEAMFIX] split players when a mode has no opposition
+            PROF(SafeSeatTeams);   // [TEAMSEAT] put players on the Runner roster (headless never fires the switcher overlap)
             PROF(SafeDumpReplicationGraph);   // [REPGRAPH] which node owns the player pawn class?
             // Reconcile only on player-count change: continuous reconcile re-bases the sim
             // frame counter every second (MI ~= all inputs) and rubber-bands the ball to
@@ -10598,6 +10690,7 @@ static void Main(HMODULE)
         if (wcsstr(GetCommandLineW(), L"-NoRestCurveFix")) { g_fixRestCurve = false; HxLog("[HalcyonA2] -NoRestCurveFix: will NOT restore a missing hand-speed restitution curve\n"); }
         if (wcsstr(GetCommandLineW(), L"-NoTimerGate")) { g_gateTimers = false; HxLog("[HalcyonA2] -NoTimerGate: driving ALL learned game timers again (pre-ScrapRun-fix behaviour)\n"); }
         if (wcsstr(GetCommandLineW(), L"-BalanceTeams")) { g_balanceTeams = true; HxLog("[HalcyonA2] -BalanceTeams: split players onto opposing teams when a match has them all on one side\n"); }
+        if (wcsstr(GetCommandLineW(), L"-NoSeatTeams")) { g_seatTeams = false; HxLog("[HalcyonA2] -NoSeatTeams: will NOT seat players onto the Runner team (ScrapRun will auto-end on the first death)\n"); }
         if (const wchar_t* sd = wcsstr(GetCommandLineW(), L"-SimDelay="))
         {
             const int v = _wtoi(sd + wcslen(L"-SimDelay="));
