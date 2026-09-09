@@ -4897,17 +4897,14 @@ static void __fastcall SendResults_Hook(void* pawn, void* state, void* players, 
     if (now - g_lastSendLog > 1000)
     {
         g_lastSendLog = now;
-        HxLog("[HalcyonA2][SEND] sends/s=%d missedInputs=%d (peak=%d) missedCaught=%d simFrame=%d newest=%d streams/s=%ld hits/s=%ld pins/s=%ld miss/s=%ld | gtcTicked=%ld gtcSkipStopped=%ld\n",
+        HxLog("[HalcyonA2][SEND] sends/s=%d missedInputs=%d (peak=%d) missedCaught=%d simFrame=%d newest=%d streams/s=%ld hits/s=%ld pins/s=%ld miss/s=%ld\n",
               s_sendCalls, missedInputs, g_sendMax, missedCaught,
               g_activeSimFramePtr ? *g_activeSimFramePtr : -1, g_newestInFrame,
               g_sendPhysCnt, g_sendPhysHitCnt,             // READ ONLY: [SENDPHYS] owns/resets these.
                                                            // Exchanging here consumed them first and
                                                            // made [SEND] always print streams/s=0.
               InterlockedExchange(&g_holdPins, 0),         // [HOLD] per-frame authority pins applied
-              InterlockedExchange(&g_holdMiss, 0),       // [HOLD] fresh stream, no sim-ball match
-              // [SCRAPRUN] gate counters: skipStopped>0 proves stale/stopped GameTimeComponents
-              // WERE being driven before the fix, i.e. the spurious-OnCountdownEnd mechanism is real.
-              g_gtcTicked, g_gtcSkipStopped);
+              InterlockedExchange(&g_holdMiss, 0));       // [HOLD] fresh stream, no sim-ball match
         g_sendMax = 0; s_sendCalls = 0;
     }
     // [FRAME-REBASE] Undo the ingest rebase on the way OUT: the input records shipped back to the client
@@ -8421,13 +8418,6 @@ static int32_t g_idxEnterArena  = 0;
 static int32_t g_idxHitResponse = 0;
 static int32_t g_idxSendPhys    = 0;
 static int32_t g_idxSetFreqData = 0;   // A2PlayerEntity::Server_SetFrequentData — ingest ping-correction site
-// [2026-09-09] AActor::SetNetDormancy / FlushNetDormancy are REFLECTED UFunctions (SDK 22284
-// Engine_classes.hpp:1236 / :1172), so any call to them passes through ProcessEvent and we can just
-// watch for it. This settles the dormancy hypothesis for the 1-update/s lag state WITHOUT needing to
-// reproduce the state: if nothing ever calls SetNetDormancy on a VRPawn, dormancy cannot be the
-// mechanism and the pin added in 27c4cf9 is treating the wrong thing.
-static int32_t g_idxSetDormancy   = 0;
-static int32_t g_idxFlushDormancy = 0;
 static bool    g_rpcIdxDone     = false;
 
 static void ResolveRpcIndices()
@@ -8449,14 +8439,6 @@ static void ResolveRpcIndices()
     if (auto* peCls = SDK::UObject::FindClassFast("A2PlayerEntity"))
         if (auto* f = peCls->GetFunction("A2PlayerEntity", "Server_SetFrequentData"))
             g_idxSetFreqData = f->Name.ComparisonIndex;
-    if (auto* aCls = SDK::UObject::FindClassFast("Actor"))
-    {
-        if (auto* f = aCls->GetFunction("Actor", "SetNetDormancy"))   g_idxSetDormancy   = f->Name.ComparisonIndex;
-        if (auto* f = aCls->GetFunction("Actor", "FlushNetDormancy")) g_idxFlushDormancy = f->Name.ComparisonIndex;
-    }
-    HxLog("[HalcyonA2][DORMWATCH] watching SetNetDormancy(idx=%d) / FlushNetDormancy(idx=%d) -- if neither "
-          "ever fires on a VRPawn, dormancy is NOT the 1-update/s lag mechanism\n",
-          g_idxSetDormancy, g_idxFlushDormancy);
     g_rpcIdxDone = true;
     HxLog("[HalcyonA2][RPCTRACE] name idx: HitProp=%d SpawnBall=%d EnterArena=%d HitResponse=%d\n",
           g_idxHitProp, g_idxSpawnBall, g_idxEnterArena, g_idxHitResponse);
@@ -8576,21 +8558,6 @@ static void TraceBallRpc(SDK::UObject* Context, SDK::UFunction* Function, void* 
               p->Actor ? p->Actor->GetName().c_str() : "<null>", (int)p->Success);
     }
 }
-// [DORMWATCH] Separate function: GetName() builds a std::string, which cannot live inside
-// ProcessEvent_Hook's __try scope (C2712) -- same split as SafeTraceBallRpc.
-static void DormWatch(SDK::UObject* Context, bool isSet, void* Parms)
-{
-    const int arg = (isSet && Parms) ? (int)*reinterpret_cast<unsigned char*>(Parms) : -1;
-    const unsigned char cur = *reinterpret_cast<unsigned char*>(reinterpret_cast<uintptr_t>(Context) + 0x159);
-    HxLog("[HalcyonA2][DORMWATCH] %s on %s  newValue=%d currentNetDormancy=%d\n",
-          isSet ? "SetNetDormancy" : "FlushNetDormancy",
-          Context->GetName().c_str(), arg, (int)cur);
-}
-static void SafeDormWatch(SDK::UObject* c, bool isSet, void* p)
-{
-    __try { DormWatch(c, isSet, p); } __except (EXCEPTION_EXECUTE_HANDLER) {}
-}
-
 static void SafeTraceBallRpc(SDK::UObject* c, SDK::UFunction* f, void* p)
 {
     __try { TraceBallRpc(c, f, p); } __except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -8746,13 +8713,6 @@ static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, v
                      Function->Name.ComparisonIndex == g_idxSendPhys ||
                      Function->Name.ComparisonIndex == g_idxHitResponse))
         SafeTraceBallRpc(Context, Function, Parms);
-
-    // [DORMWATCH] Log every dormancy call, with the target actor, so we can see whether the game ever
-    // puts a player pawn to sleep. POD-only compare; the log itself is rare by nature.
-    if (Function && Context && (g_idxSetDormancy || g_idxFlushDormancy) &&
-        (Function->Name.ComparisonIndex == g_idxSetDormancy ||
-         Function->Name.ComparisonIndex == g_idxFlushDormancy))
-        SafeDormWatch(Context, Function->Name.ComparisonIndex == g_idxSetDormancy, Parms);
 
     // [SNAPFIX] Correct the incoming pose RPC's Ping the instant it arrives, before the handler stores
     // it into localData -> the fragment->rep sync can never carry a 0 -> no interpolation collapse/snap.
