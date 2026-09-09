@@ -185,6 +185,65 @@ namespace AUnrealFeatures.Ares.Servers
             ["StationAnnouncement"] = "Welcome to Halcyon Ring",
         };
 
+        // [2026-09-09 REGRESSION FIX] Dropping the board keys from the served config ENTIRELY made
+        // clients CRASH ON JOIN: the BP_Promoboard_* loaders (ULiveNetvarImageLoader) expect a NetVar
+        // per board and cannot cope with it being absent. The original code's own comment said as much
+        // -- "empty on the baked default, so we serve them here" -- i.e. the game relies on the backend
+        // to supply these. Removing the third-party URL was right; removing the KEYS was not.
+        //
+        // So every board key is served again, but pointing at an image WE host (/board/_default.png)
+        // rather than someone else's server. An uploaded image still wins, because the deployment
+        // handlers TryAdd station.Config BEFORE these defaults.
+        public const string DefaultBoardFile = "_default.png";
+
+        // A 64x64 dark-grey PNG, written to the boards folder on first use. Small, neutral, and always
+        // present, so a station with nothing uploaded shows a blank plate instead of killing the client.
+        private const string DefaultBoardPngBase64 =
+            "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAWklEQVR42u3QMQEAAAjDMOZf9DDB" +
+            "RSChSc/aRAEFFFBAAQUUUEABBRRQQAEFFFBAAQUUUEABBRRQQAEFFFBAAQUUUEABBRRQQAEFFFBA" +
+            "AQUUUEABBd4WuAAB0wABtAJ4wgAAAABJRU5ErkJggg==";
+
+        internal static void EnsureDefaultBoardImage()
+        {
+            try
+            {
+                Directory.CreateDirectory(BoardUploadDir);
+                string f = Path.Combine(BoardUploadDir, DefaultBoardFile);
+                if (!File.Exists(f))
+                    File.WriteAllBytes(f, Convert.FromBase64String(DefaultBoardPngBase64));
+            }
+            catch (Exception ex) { Console.WriteLine($"[BOARD] could not write default board image: {ex.Message}"); }
+        }
+
+        // Fill in any board key the station has not overridden. `host` is the request's own Host, so the
+        // URL we hand the game server is one its CLIENTS can actually resolve.
+        internal static void AddBoardDefaults(Dictionary<string, string> cfg, string host)
+        {
+            EnsureDefaultBoardImage();
+            string baseUrl = (Environment.GetEnvironmentVariable("BOARD_PUBLIC_BASE") ?? "").TrimEnd('/');
+            if (string.IsNullOrWhiteSpace(baseUrl))
+                baseUrl = PublicBoardBase(host);
+            string url = $"{baseUrl}/board/{DefaultBoardFile}";
+            foreach (var k in BoardConfigKeys)
+                cfg.TryAdd(k, url);
+        }
+
+        // The game server fetches this config over LOOPBACK (127.0.0.1:78), so request.Host is
+        // "127.0.0.1" -- a URL the HEADSETS cannot resolve. Never hand back a loopback or private
+        // address as a board URL; fall back to the known public origin instead. BOARD_PUBLIC_BASE
+        // overrides this entirely.
+        internal static string PublicBoardBase(string host)
+        {
+            const string fallback = "https://rigel.wwiggles.org";
+            if (string.IsNullOrWhiteSpace(host)) return fallback;
+            string h = host.Split(':')[0];
+            if (h.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
+                h.StartsWith("127.") || h.StartsWith("10.") || h.StartsWith("192.168.") ||
+                h == "::1" || h.StartsWith("172.16.") || h.StartsWith("169.254."))
+                return fallback;
+            return $"https://{host}";
+        }
+
         // The server authenticates with this fixed key (launch arg -DashboardApiKey=). Lets
         // log_in_with_key succeed without a per-user key so the deployment/config fetch runs.
         private const string ServerMasterKey = "halcyon-server-key";
@@ -1039,7 +1098,7 @@ namespace AUnrealFeatures.Ares.Servers
 
             string baseUrl = (Environment.GetEnvironmentVariable("BOARD_PUBLIC_BASE") ?? "").TrimEnd('/');
             if (string.IsNullOrWhiteSpace(baseUrl))
-                baseUrl = $"https://{request.Host}";
+                baseUrl = PublicBoardBase(request.Host);   // never store a loopback URL
             string url = $"{baseUrl}/board/{fileName}";
 
             station.Config[key] = url;
@@ -2366,6 +2425,7 @@ namespace AUnrealFeatures.Ares.Servers
                 // Halcyon board/sign URLs (served even for an unknown/fixed deployment id).
                 foreach (var kv in DefaultStationConfig)
                     config.TryAdd(kv.Key, kv.Value);
+                AddBoardDefaults(config, request.Host);
             }
 
             return Results.Ok(config);
@@ -2427,6 +2487,7 @@ namespace AUnrealFeatures.Ares.Servers
                 // Halcyon board/sign URLs (a real station config, if present, overrides these).
                 foreach (var kv in DefaultStationConfig)
                     resp.Config.TryAdd(kv.Key, kv.Value);
+                AddBoardDefaults(resp.Config, request.Host);
             }
 
             return Results.Ok(resp);
@@ -2460,6 +2521,7 @@ namespace AUnrealFeatures.Ares.Servers
                 // Halcyon board/sign URLs (served even for an unknown/fixed deployment id).
                 foreach (var kv in DefaultStationConfig)
                     config.TryAdd(kv.Key, kv.Value);
+                AddBoardDefaults(config, request.Host);
             }
 
             if (includeEvent)
