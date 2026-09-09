@@ -1,0 +1,6 @@
+{
+  "enabledMcpjsonServers": [
+    "ida-pro-mcp"
+  ],
+  "enableAllProjectMcpServers": true
+}

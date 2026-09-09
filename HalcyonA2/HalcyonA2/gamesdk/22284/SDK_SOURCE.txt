@@ -1,0 +1,4 @@
+Dumper-7 v7.0.1
+Dump folder : C:\Dumper-7.4.2-22284+++A2+Release-A2
+Game binary : Nov15\A2\Binaries\Win64\A2-Win64-Shipping.exe (166,994,432 bytes)
+Generated   : 2026-09-06T20:41:39-04:00

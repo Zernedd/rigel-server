@@ -1,0 +1,36 @@
+# build output
+build/
+*.user
+*.aps
+.vs/
+
+# Dumper-7 generated SDKs, one per game build: regenerate with tools\Dump-A2.ps1, never commit
+# [2026-09-09 backup repo] The SDK for the build we actually ship (22284) IS tracked now:
+# without these headers a restored checkout cannot rebuild HalcyonA2.dll, which makes the
+# backup only half a backup. Exclude the dir CONTENTS (not the dir) so the negation works --
+# git will not descend into a directory that is itself excluded. 20996 stays out (old build).
+HalcyonA2/gamesdk/*
+!HalcyonA2/gamesdk/22284/
+HalcyonA2/dllmain.cpp.pre-port.bak
+ida/
+tools/port-result.json
+
+# dumper binary + generated mappings + game logs
+tools/Dumper7/Dumper-7.dll
+tools/Mappings/
+tools/logs/
+
+# UE4SS install that was replaced (restore source, not source code)
+backup/
+
+# built UE4SS native mod binary (built by A2EntitlementPatch.vcxproj)
+ue4ss-mods/A2EntitlementPatch/dlls/
+
+# ooz.dll is built by tools\Build-Ooz.ps1 (the wrapper source is tracked)
+tools/oodle/ooz.dll
+
+# signing key for repacked clients (generated on first build)
+tools/halcyon-debug.keystore
+# client build output
+../clientbuild/
+clientbuild/

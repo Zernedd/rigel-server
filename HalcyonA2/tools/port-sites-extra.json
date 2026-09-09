@@ -1,0 +1,11 @@
+[
+ {"name":"ReconcileSims",   "rva":"0x540D970","kind":"func","note":"ball-sim reconcile (called from PumpBallSimBuild)"},
+ {"name":"UpdateOverlaps",  "rva":"0x37A7960","kind":"func","note":"UPrimitiveComponent::UpdateOverlaps"},
+ {"name":"GoalScore",       "rva":"0x5371710","kind":"func","note":"goal score impl"},
+ {"name":"FStringAssign",   "rva":"0xFBCD70", "kind":"func","note":"FString::operator=(const FString&)"},
+ {"name":"SessionLogin",    "rva":"0x54AB570","kind":"func","note":"native dashboard login -> log_in_with_key"},
+ {"name":"PCFunc5333610",   "rva":"0x5333610","kind":"func","note":"player-controller helper called at join"},
+ {"name":"DashApiKey_Data", "rva":"0x9BD4460","kind":"data","note":"qword: game-owned dashboard api key FString Data"},
+ {"name":"DashApiKey_Num",  "rva":"0x9BD4468","kind":"data","note":"int32: its Num"},
+ {"name":"RawDataNetvarVtbl","rva":"0x7FE6540","kind":"data","note":".rdata vtable of the RawData netvar"}
+]

@@ -1,0 +1,5 @@
+{
+    "_comment": "EOS session SEED. Every entry here is registered as a live session at backend startup (EosGatewayServer.cs ~line 220) and shows up in the in-game server browser. It MUST stay empty in production - real stations add themselves via POST /register_server -> EosGatewayServer.UpsertSession(). It previously seeded a fake 'OCE_1' server at 127.0.0.1:7777, which appeared in every player's browser as an unjoinable ghost station.",
+    "count": 0,
+    "sessions": []
+}

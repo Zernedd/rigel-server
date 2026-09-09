@@ -1,0 +1,261 @@
+[
+ {
+  "name": "JwtBuild",
+  "old": "0x53fd500",
+  "new": "0x544d9b0",
+  "old_size": "0x8af",
+  "new_size": "0x8af"
+ },
+ {
+  "name": "ReqLogin",
+  "old": "0x53ef080",
+  "new": "0x543c7b0",
+  "old_size": "0x3d",
+  "new_size": "0x3d"
+ },
+ {
+  "name": "JoinBuild",
+  "old": "0x53e7730",
+  "new": "0x5432a40",
+  "old_size": "0x7c6",
+  "new_size": "0x7c6"
+ },
+ {
+  "name": "SendJoin",
+  "old": "0x52ad8b0",
+  "new": "0x52ee2e0",
+  "old_size": "0x2bf",
+  "new_size": "0x2bf"
+ },
+ {
+  "name": "SendPhysImpl",
+  "old": "0x5496650",
+  "new": "0x5503050",
+  "old_size": "0xfc",
+  "new_size": "0xfc"
+ },
+ {
+  "name": "IngestInput",
+  "old": "0x540b010",
+  "new": "0x54599b0",
+  "old_size": "0x4e0",
+  "new_size": "0x4e0"
+ },
+ {
+  "name": "SendResults",
+  "old": "0x5309c40",
+  "new": "0x534a7f0",
+  "old_size": "0x1b5",
+  "new_size": "0x1b5"
+ },
+ {
+  "name": "StepSim",
+  "old": "0x543f2d0",
+  "new": "0x54863c0",
+  "old_size": "0x1195",
+  "new_size": "0x1195"
+ },
+ {
+  "name": "NotifyLeftArena",
+  "old": "0x54962b0",
+  "new": "0x5502b00",
+  "old_size": "0x38",
+  "new_size": "0x38"
+ },
+ {
+  "name": "GolfBallInCup",
+  "old": "0x53986a0",
+  "new": "0x53dc320",
+  "old_size": "0x15",
+  "new_size": "0x15"
+ },
+ {
+  "name": "GolfOverlap",
+  "old": "0x53ad660",
+  "new": "0x53f03b0",
+  "old_size": "0x58",
+  "new_size": "0x58"
+ },
+ {
+  "name": "FNameResolve",
+  "old": "0x114e210",
+  "new": "0x114d690",
+  "old_size": "0x184",
+  "new_size": "0x184"
+ },
+ {
+  "name": "TextLayoutLeaf",
+  "old": "0x1ec13e0",
+  "new": "0x1ec07a0",
+  "old_size": "0x1e5",
+  "new_size": "0x1e5"
+ },
+ {
+  "name": "EvtDispatch",
+  "old": "0x465f820",
+  "new": "0x466a240",
+  "old_size": "0x162",
+  "new_size": "0x162"
+ },
+ {
+  "name": "GiveCheck",
+  "old": "0x46f6180",
+  "new": "0x4723aa0",
+  "old_size": "0x45e",
+  "new_size": "0x44c"
+ },
+ {
+  "name": "FetchRoles",
+  "old": "0x541cb00",
+  "new": "0x54b04e0",
+  "old_size": "0x2fc",
+  "new_size": "0x2fc"
+ },
+ {
+  "name": "IsRunningSimulate",
+  "old": "0x52dc8b0",
+  "new": "0x531ef40",
+  "old_size": "0x84",
+  "new_size": "0x84"
+ },
+ {
+  "name": "WorldGetNetMode",
+  "old": "0x4037d80",
+  "new": "0x4040990",
+  "old_size": "0x19a",
+  "new_size": "0x19a"
+ },
+ {
+  "name": "A2GetNetMode",
+  "old": "0x5473bc0",
+  "new": "0x54af360",
+  "old_size": "0xbc",
+  "new_size": "0xbc"
+ },
+ {
+  "name": "BallSimGetWorld",
+  "old": "0x3500950",
+  "new": "0x3509ab0",
+  "old_size": "0x88",
+  "new_size": "0x88"
+ },
+ {
+  "name": "GetPlayerPawn",
+  "old": "0x3d1c150",
+  "new": "0x3d24c40",
+  "old_size": "0x14",
+  "new_size": "0x14"
+ },
+ {
+  "name": "PrintString",
+  "old": "0x3a21120",
+  "new": "0x3a29b20",
+  "old_size": "0x3f2",
+  "new_size": "0x3f2"
+ },
+ {
+  "name": "DashboardInit",
+  "old": "0x541d8a0",
+  "new": "0x54b13d0",
+  "old_size": "0xc02",
+  "new_size": "0xc02"
+ },
+ {
+  "name": "ObjBuild",
+  "old": "0x46d77a0",
+  "new": "0x4716fe0",
+  "old_size": "0xbef",
+  "new_size": "0xbe9"
+ },
+ {
+  "name": "QInit",
+  "old": "0x46851c0",
+  "new": "0x4690260",
+  "old_size": "0x84",
+  "new_size": "0x84"
+ },
+ {
+  "name": "QSetQ",
+  "old": "0x4685250",
+  "new": "0x46902f0",
+  "old_size": "0x97",
+  "new_size": "0x97"
+ },
+ {
+  "name": "QReg",
+  "old": "0x4680e50",
+  "new": "0x468be60",
+  "old_size": "0x5b1",
+  "new_size": "0x5b1"
+ },
+ {
+  "name": "QSetP",
+  "old": "0x4685c30",
+  "new": "0x46910d0",
+  "old_size": "0x4c1",
+  "new_size": "0x4c1"
+ },
+ {
+  "name": "NetVarReg?0x46bc830",
+  "old": "0x46a0df0",
+  "new": "0x46bc830",
+  "old_size": "0x8c",
+  "new_size": "0x8c"
+ },
+ {
+  "name": "NetVarReg?0x47138d0",
+  "old": "0x46a0df0",
+  "new": "0x47138d0",
+  "old_size": "0x8c",
+  "new_size": "0x8c"
+ },
+ {
+  "name": "EntitlementHandler",
+  "old": "0x53dfc70",
+  "new": "0x54293d0",
+  "old_size": "0x143",
+  "new_size": "0x143"
+ },
+ {
+  "name": "ref_GIs_A",
+  "old": "0x12aa470",
+  "new": "0x12a9830",
+  "old_size": "0x113",
+  "new_size": "0x113"
+ },
+ {
+  "name": "ref_GIs_B",
+  "old": "0x1259df0",
+  "new": "0x12591b0",
+  "old_size": "0x2b5",
+  "new_size": "0x2b5"
+ },
+ {
+  "name": "ref_LogSess_C",
+  "old": "0x53cea40",
+  "new": "0x5412c30",
+  "old_size": "0x5fa",
+  "new_size": "0x615"
+ },
+ {
+  "name": "ref_vtbl_0x469f000",
+  "old": "0x469f000",
+  "new": "0x46b4b10",
+  "old_size": "0xb7",
+  "new_size": "0xb7"
+ },
+ {
+  "name": "ref_vtbl_0x46c77a0",
+  "old": "0x46c77a0",
+  "new": "0x470e080",
+  "old_size": "0x12e",
+  "new_size": "0x12e"
+ },
+ {
+  "name": "ref_vtbl_0x52d1290",
+  "old": "0x52d1290",
+  "new": "0x5313c30",
+  "old_size": "0x2be",
+  "new_size": "0x2cf"
+ }
+]

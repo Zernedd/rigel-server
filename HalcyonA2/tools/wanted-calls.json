@@ -1,0 +1,8 @@
+{
+ "SimIntegrate": "0x5434CE0",
+ "NetVarReg": "0x46A0DF0",
+ "WorldGetNetMode": "0x4037D80",
+ "A2GetNetMode": "0x5473BC0",
+ "KickPlayer": "0x5333610",
+ "ReconcileSims": "0x540D970"
+}

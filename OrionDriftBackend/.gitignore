@@ -1,0 +1,10 @@
+bin/
+obj/
+.vs/
+node_modules/
+.next/
+*.db
+*.db.meta
+logs/
+*.user
+tsconfig.tsbuildinfo

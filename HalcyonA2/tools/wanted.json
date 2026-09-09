@@ -1,0 +1,11 @@
+{
+ "GIsClient": "0x9650702",
+ "GIsServer": "0x9650703",
+ "GA2StationId_Data": "0x95579C0",
+ "GA2StationId_Num": "0x95579C8",
+ "DashClientPtr": "0x9BD44F0",
+ "LogA2StationDashboard": "0x9BD4450",
+ "LogA2SessionSubsystem": "0x9BD4170",
+ "LogA2MothershipAuth?": "0x9BD4160",
+ "RawDataNetvarVtable": "0x7FE6540"
+}

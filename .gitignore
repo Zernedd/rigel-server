@@ -1,0 +1,71 @@
+# ============================================================================
+# Rigel server backup repo -- SOURCE AND CONFIG ONLY.
+# Game builds, paks, OBBs, APKs, IDA databases and compiler intermediates are
+# tens of GB and are all re-derivable; they are deliberately not tracked.
+# The one binary we DO keep is the known-good HalcyonA2.dll (see !unignore
+# at the bottom) so a broken build can be rolled back instantly.
+# ============================================================================
+
+# --- whole trees that are game builds / decompiles / captures ---------------
+Nov15/
+PlayerNovBuild/
+specnovbuild/
+AnotherAxiom-A2-Rift/
+AndroidClient-22284/
+clientbuild/
+nov client quest/
+A2-Android-Shipping-arm64*/
+APKDECOMP/
+APKStuff/
+ida/
+Rigel/
+rigel-server-bundle/
+
+# --- the deployed game copy inside the server bundle (3.2 GB) ---------------
+rigel-server/windows/game/
+rigel-server/run/
+rigel-server/**/logs/
+
+# --- archives and huge single artifacts -------------------------------------
+*.zip
+*.rar
+*.obb
+*.apk
+*.pak
+*.ucas
+*.utoc
+*.so
+*.pdb
+*.pch
+*.ilk
+*.exp
+*.idb
+*.i64
+*.sst
+
+# --- compiler / IDE intermediates -------------------------------------------
+HalcyonA2/build/
+HalcyonA2/**/build/int/
+.vs/
+**/bin/
+**/obj/
+**/node_modules/
+**/.next/
+**/dist/
+OrionDriftBackend/logs/
+
+# --- local runtime state -----------------------------------------------------
+*.log
+*.db
+sessions.json
+production-log.db
+
+# ============================================================================
+# Keep the known-good payload binary despite HalcyonA2/build/ being ignored.
+# This is the exact DLL running on the VPS -- the rollback target.
+# ============================================================================
+!HalcyonA2/build/22284/x64/Release/HalcyonA2.dll
+
+# python bytecode
+__pycache__/
+*.pyc

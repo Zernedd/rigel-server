@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source"><UniqueIdentifier>{11111111-1111-1111-1111-111111111101}</UniqueIdentifier></Filter>
+    <Filter Include="Header Files"><UniqueIdentifier>{11111111-1111-1111-1111-111111111102}</UniqueIdentifier></Filter>
+    <Filter Include="ThirdParty\MinHook"><UniqueIdentifier>{11111111-1111-1111-1111-111111111103}</UniqueIdentifier></Filter>
+    <Filter Include="SDK"><UniqueIdentifier>{11111111-1111-1111-1111-111111111104}</UniqueIdentifier></Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="dllmain.cpp"><Filter>Source</Filter></ClCompile>
+    <ClCompile Include="pch.cpp"><Filter>Source</Filter></ClCompile>
+    <ClCompile Include="..\ThirdParty\MinHook\src\buffer.c"><Filter>ThirdParty\MinHook</Filter></ClCompile>
+    <ClCompile Include="..\ThirdParty\MinHook\src\hook.c"><Filter>ThirdParty\MinHook</Filter></ClCompile>
+    <ClCompile Include="..\ThirdParty\MinHook\src\trampoline.c"><Filter>ThirdParty\MinHook</Filter></ClCompile>
+    <ClCompile Include="..\ThirdParty\MinHook\src\hde\hde64.c"><Filter>ThirdParty\MinHook</Filter></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="pch.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="..\ThirdParty\MinHook\include\MinHook.h"><Filter>ThirdParty\MinHook</Filter></ClInclude>
+  </ItemGroup>
+</Project>
