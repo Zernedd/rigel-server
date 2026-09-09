@@ -1683,6 +1683,8 @@ static bool ReadVoipPositionalParams(int32_t& audible, int32_t& conversational, 
 // (spatial/PTT/echo) route to this one URI, so flipping it flips everyone with no double-audio.
 // Kill-switch: env GS_VOIP_POSITIONAL=0 falls back to the old group channel.
 static std::wstring g_voipChannelStr;
+static std::wstring g_voipChannelPTTStr;   // the GLOBAL (non-positional) PTT channel
+static FStringView  g_voipChannelPTT = { nullptr, 0, 0 };
 static int g_voipPositional = -1;   // -1 = unread; 1 = positional; 0 = group (from GS_VOIP_POSITIONAL)
 static void EnsureVoipChannel()
 {
@@ -1747,6 +1749,23 @@ static void EnsureVoipChannel()
     g_voipChannel.Data = g_voipChannelStr.c_str();
     g_voipChannel.Num  = static_cast<int32_t>(g_voipChannelStr.size()) + 1;   // incl null
     g_voipChannel.Max  = g_voipChannel.Num;
+
+    // [2026-09-09 *** GLOBAL VOIP / GOD VOICE] The PTT channel needs to be its OWN NON-POSITIONAL
+    // channel. Until now all three Vivox channels were aliased to the single positional URI above --
+    // this file even said so: "all three token requests (spatial/PTT/echo) route to this one URI".
+    // Vivox encodes positional-ness IN the channel name ("confctl-d" = positional, "confctl-g" =
+    // group/2D), so routing PTT through the positional URI means a god-voice broadcast is distance-
+    // attenuated like ordinary proximity chat and simply cannot be heard across the map. The PTT
+    // channel effectively did not exist; there was only the spatial one wearing its name.
+    //
+    // Give PTT a real group channel, scoped to the same server so two deployments never share it.
+    // "-g" and no !p- falloff block = everyone hears it at full volume regardless of distance.
+    g_voipChannelPTTStr = L"sip:confctl-g-20066-a2-61679-udash.halcyonptt" + safe + L"@mt2p.vivox.com";
+    g_voipChannelPTT.Data = g_voipChannelPTTStr.c_str();
+    g_voipChannelPTT.Num  = static_cast<int32_t>(g_voipChannelPTTStr.size()) + 1;
+    g_voipChannelPTT.Max  = g_voipChannelPTT.Num;
+    printf("[HalcyonA2] VOIP PTT channel (GLOBAL, non-positional): %ls\n", g_voipChannelPTTStr.c_str());
+    HxLog("[HalcyonA2][VOIPFIX] PTT/global channel = %ls\n", g_voipChannelPTTStr.c_str());
 }
 
 // sub_53E7730 — Vivox join-token builder (a1=subsystem, a2=&out, a3=AccountId FString,
@@ -1754,23 +1773,40 @@ static void EnsureVoipChannel()
 static constexpr uintptr_t JoinBuild_RVA = 0x5432A40;
 using JoinBuild_t = __int64 (__fastcall*)(void*, void*, void*, void*);
 static JoinBuild_t JoinBuild_Orig = nullptr;
+// Which of the three tokens is being minted, within one RequestChannelJoinTokens cycle.
+// ORDER VERIFIED IN IDA, and it is NOT the parameter order -- sub_14543C570 calls the builder three
+// times (0x14543c5ff, 0x14543c66a, 0x14543c6d5) and then hands the results to the sender as:
+//     sub_1452EE2E0(a1, v14, v17, v12, v19, v8, v21)
+//        spatialTok=v14 (3rd build)   pTTTok=v12 (2nd build)   echoTok=v8 (1st build)
+// i.e. the builds come out REVERSED: #1 = echo, #2 = PTT, #3 = spatial. Assuming call order matched
+// the ReceiveChannelJoinTokens parameter order would have wired the wrong channel to god voice.
+// Reset by SendJoin_Hook, which fires once after all three builds.
+static thread_local int t_joinTokenIdx = 0;
+
 static __int64 __fastcall JoinBuild_Hook(void* subsystem, void* out, void* accountId, void* /*channel*/)
 {
     EnsureVoipChannel();   // scope the channel to this server before injecting it
     std::string prev = t_voipLoginF;
     std::string acct = FStringToNarrow(accountId);
     t_voipLoginF = BuildVoipUserUri(acct);
+    // build #2 (1-based) is the PTT token -> mint it against the GLOBAL channel so the token's "t"
+    // claim matches the channel id we substitute in SendJoin_Hook. They MUST match or Vivox rejects
+    // the media connect with 20123.
+    const int idx = ++t_joinTokenIdx;
+    const bool isPTT = (idx == 2) && g_voipChannelPTT.Data && g_voipChannelPTT.Num > 0;
     // [VOIPFIX] log EVERY join (was first-only). A client that joined before the channel was built
     // silently got the static default, and there was no way to see that after the fact.
     {
-        const bool positional = g_voipChannel.Data && wcsstr(g_voipChannel.Data, L"confctl-d") != nullptr;
-        HxLog("[HalcyonA2][VOIPFIX] join-token: AccountId='%s' f='%s' %s channel='%ls'\n",
-              acct.c_str(), t_voipLoginF.c_str(), positional ? "POSITIONAL" : "GROUP(2D!)",
-              g_voipChannel.Data);
+        const wchar_t* chan = isPTT ? g_voipChannelPTT.Data : g_voipChannel.Data;
+        const bool positional = chan && wcsstr(chan, L"confctl-d") != nullptr;
+        HxLog("[HalcyonA2][VOIPFIX] join-token #%d (%s): AccountId='%s' f='%s' %s channel='%ls'\n",
+              idx, (idx == 2) ? "PTT/global" : (idx == 3 ? "spatial" : "echo"),
+              acct.c_str(), t_voipLoginF.c_str(), positional ? "POSITIONAL" : "GROUP(2D)", chan);
         printf("[HalcyonA2] VOIP join-token: AccountId='%s' %s channel='%ls'\n",
                acct.c_str(), positional ? "POSITIONAL" : "GROUP(2D!)", g_voipChannel.Data);
     }
-    __int64 r = JoinBuild_Orig(subsystem, out, accountId, &g_voipChannel);   // t = our channel
+    __int64 r = JoinBuild_Orig(subsystem, out, accountId,
+                               isPTT ? &g_voipChannelPTT : &g_voipChannel);   // t = our channel
     t_voipLoginF = prev;
     return r;
 }
@@ -1786,11 +1822,24 @@ static void* PickChannel(void* chan)   // FString*: Num@0x8. Fill only if empty.
         return &g_voipChannel;
     return chan;
 }
+// chan2 is pTTChannelId. Confirmed from the RPC signature (SDK 22284 A2_parameters.hpp:1558):
+//   ReceiveChannelJoinTokens(spatialJoinToken, spatialChannelId,
+//                            pTTJoinToken,     pTTChannelId,      <-- slot 2
+//                            echoJoinToken,    echoChannelId)
+// so the PTT channel id gets the GLOBAL channel while spatial/echo keep the positional one.
+static void* PickChannelPTT(void* chan)
+{
+    if (chan && *reinterpret_cast<int32_t*>(reinterpret_cast<uintptr_t>(chan) + 8) == 0 &&
+        g_voipChannelPTT.Data && g_voipChannelPTT.Num > 0)
+        return &g_voipChannelPTT;
+    return chan;
+}
 static __int64 __fastcall SendJoin_Hook(void* a1, void* tok1, void* chan1, void* tok2,
                                         void* chan2, void* tok3, void* chan3)
 {
     EnsureVoipChannel();   // ensure the per-server channel is built before substituting empties
-    return SendJoin_Orig(a1, tok1, PickChannel(chan1), tok2, PickChannel(chan2),
+    t_joinTokenIdx = 0;    // all three builds are done; re-arm for the next request
+    return SendJoin_Orig(a1, tok1, PickChannel(chan1), tok2, PickChannelPTT(chan2),
                          tok3, PickChannel(chan3));
 }
 
