@@ -426,9 +426,6 @@ static UpdGameState_t UpdGameState_Orig = nullptr;
 // out to be needed, upgrade to broadcasting the GameTimer onCountdownEnd delegate instead.
 static std::unordered_map<void*, unsigned long long> g_gameBeginAt;   // GSM -> GetTickCount64() at GAME_BEGIN entry
 static bool g_endTriggerFired = false;   // deathrun finish->overtime latch; re-armed at each GAME_BEGIN (see DetectRunnerAtFinish)
-// [SCRAPRUN] defined after g_gameTimers; dumps every learned clock when a match ENDS, so the
-// next 50/50 auto-end is captured with the timer state that caused it.
-static void DumpGameTimersOnEnd(unsigned char newState);
 static __int64 __fastcall UpdGameState_Hook(void* self, unsigned char newState)
 {
     static const char* const kNm[] = {
@@ -437,22 +434,6 @@ static __int64 __fastcall UpdGameState_Hook(void* self, unsigned char newState)
         "OVERTIME_COUNTDOWN","OVERTIME_RUNNING","BEGIN_PLAY" };
     const char* s = (newState < 15) ? kNm[newState] : "?";
     printf("[HalcyonA2][GSMSTATE] mgr=%p -> %u (%s)\n", self, static_cast<unsigned>(newState), s);
-    // 0 NOT_RUNNING / 6 TEAM_SCORED_ENTER / 7 TEAM_SCORED / 10 GAME_EXIT are the ways a match ends.
-    // Capture what every learned clock looked like at that instant.
-    if (newState == 0 || newState == 6 || newState == 7 || newState == 10)
-    {
-        // [2026-09-09] WHO decided to end the match? The alive-runner bookkeeping lives in the Luau
-        // conductor, which we cannot read directly, but the RETURN ADDRESS of this call says which
-        // native site drove it -- the Luau VM's dispatch shim vs. some game-native path. Printed as a
-        // GAME rva so it can be looked up in IDA against the known RVAs used elsewhere in this file.
-        const uintptr_t ret = reinterpret_cast<uintptr_t>(_ReturnAddress());
-        const uintptr_t base = GetBase();
-        printf("[HalcyonA2][GSMWHO] state->%u called from GAME +0x%llX (IDA 0x%llX)\n",
-               static_cast<unsigned>(newState),
-               (unsigned long long)(ret - base),
-               (unsigned long long)(0x140000000ull + (ret - base)));
-        DumpGameTimersOnEnd(newState);
-    }
     if (newState == 3)                    // entered GAME_BEGIN -> arm the countdown watchdog
     {
         g_gameBeginAt[self] = GetTickCount64();
@@ -498,29 +479,6 @@ using StartTimerCd_t = __int64 (__fastcall*)(void*, double);
 using GtcTick_t      = void (__fastcall*)(void*);
 static StartTimerCd_t StartTimerCd_Orig = nullptr;
 static std::unordered_set<void*> g_gameTimers;             // live UGameTimeComponent instances to drive
-// [2026-09-09 *** SCRAPRUN 50/50 AUTO-END] UGameTimeComponent field offsets (SDK 22284,
-// A2_classes.hpp:2155): ClockStartedAt@0x478, IsMainCountdown@0x488, IsSecondaryCountdown@0x489,
-// ClockEndLength@0x490, ClockPunishment@0x4B0, OnCountdownEnd@0x520.
-//
-// Why this matters: we drive TickComponent from OUR ProcessEvent dispatch, which is a DIFFERENT
-// point in the frame than the engine's own component tick. ScrapRun restarts a timer when a player
-// dies/respawns. If we tick in the window where ClockStartedAt has been rewritten but the rest of
-// the clock fields have not, the computed remaining momentarily reads <= 0 and TickComponent
-// broadcasts OnCountdownEnd -> the Luau conductor takes countdownFinishedDirections[currentState]
-// -> the match ends. Whether we land inside that window is a coin flip, which is exactly the
-// reported "50/50 chance the gamemode auto-ends on respawn".
-//
-// The set also only ever dropped entries on a vtable mismatch, so STOPPED timers were driven
-// forever -- a second way to fire a spurious countdown end.
-static const uintptr_t GTC_ClockStartedAt = 0x478;
-static const uintptr_t GTC_IsMainCd       = 0x488;
-static const uintptr_t GTC_IsSecondaryCd  = 0x489;
-static const uintptr_t GTC_ClockEndLength = 0x490;
-static bool g_gateTimers = true;            // -NoTimerGate restores the old drive-everything behaviour
-static volatile long g_gtcTicked = 0;
-static volatile long g_gtcSkipStopped = 0;  // ClockStartedAt <= 0 -> timer is not running
-static volatile long g_gtcSkipZeroLen = 0;  // ClockEndLength <= 0 -> a zero-length countdown
-
 static __int64 __fastcall StartTimerCd_Hook(void* self, double lenMs)
 {
     if (self && g_gameTimers.insert(self).second)
@@ -544,116 +502,11 @@ static void TickGameTimers()
             it = g_gameTimers.erase(it);
             continue;
         }
-        // [SCRAPRUN FIX] Only drive a timer that is actually running. A component whose
-        // ClockStartedAt is <= 0 has been reset/stopped; ticking it can only produce a spurious
-        // OnCountdownEnd, never useful progress. This deliberately does NOT gate on
-        // IsMainCountdown, because the main match clock counts UP with that flag clear and still
-        // needs driving -- gating on it would stop the match from ever ending on time.
-        if (g_gateTimers)
-        {
-            const uintptr_t c = reinterpret_cast<uintptr_t>(inst);
-            const double startedAt = *reinterpret_cast<double*>(c + GTC_ClockStartedAt);
-            const double endLen    = *reinterpret_cast<double*>(c + GTC_ClockEndLength);
-            // Not started -> ticking it can only produce a spurious OnCountdownEnd.
-            if (!(startedAt > 0.0))
-            {
-                InterlockedIncrement(&g_gtcSkipStopped);
-                ++it;
-                continue;
-            }
-            // [2026-09-09 *** THE ACTUAL SCRAPRUN AUTO-END] A countdown of length ZERO is satisfied
-            // the instant it starts, so driving it fires OnCountdownEnd EVERY TICK -> the Luau takes
-            // countdownFinishedDirections[currentState] -> RUNNING(5) jumps straight to GAME_EXIT(10).
-            // Captured live at the moment of an auto-end: SIX of eight learned clocks had
-            // endLen=0.000 with startedAt>0, so they passed the started-check and were ticked anyway.
-            // A zero-length countdown is never a real one -- never drive it.
-            if (!(endLen > 0.0))
-            {
-                InterlockedIncrement(&g_gtcSkipZeroLen);
-                ++it;
-                continue;
-            }
-        }
         tick(inst);
-        InterlockedIncrement(&g_gtcTicked);
         ++it;
     }
 }
 static void SafeTickGameTimers() { __try { TickGameTimers(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
-
-// [SCRAPRUN 50/50 AUTO-END EVIDENCE] When the conductor leaves RUNNING for an end state, print every
-// learned UGameTimeComponent. If an auto-end on respawn is caused by a spurious OnCountdownEnd, the
-// culprit clock shows up here with a just-reset ClockStartedAt and/or an elapsed that has only barely
-// crossed ClockEndLength. ticked/skipStopped say whether the new gate is doing anything.
-// SEH cannot coexist with C++ object unwinding in one frame (C2712), and the range-for below builds
-// iterators -- so the __try lives in the wrapper, exactly like SafeTickGameTimers.
-static void DumpGameTimersOnEndImpl(unsigned char newState)
-{
-    {
-        const uintptr_t base = GetBase();
-        void* const gtcVft = reinterpret_cast<void*>(base + GtcVft_RVA);
-        printf("[HalcyonA2][SCRAPEND] state->%u  timers=%d  ticked=%ld skipStopped=%ld skipZeroLen=%ld (gate=%d)\n",
-               static_cast<unsigned>(newState), static_cast<int>(g_gameTimers.size()),
-               g_gtcTicked, g_gtcSkipStopped, g_gtcSkipZeroLen, static_cast<int>(g_gateTimers));
-        for (auto* inst : g_gameTimers)
-        {
-            if (!inst || *reinterpret_cast<void**>(inst) != gtcVft) continue;
-            const uintptr_t c = reinterpret_cast<uintptr_t>(inst);
-            printf("[HalcyonA2][SCRAPEND]   gtc=%p startedAt=%.3f endLen=%.3f mainCd=%d secCd=%d\n",
-                   inst,
-                   *reinterpret_cast<double*>(c + GTC_ClockStartedAt),
-                   *reinterpret_cast<double*>(c + GTC_ClockEndLength),
-                   (int)*reinterpret_cast<unsigned char*>(c + GTC_IsMainCd),
-                   (int)*reinterpret_cast<unsigned char*>(c + GTC_IsSecondaryCd));
-        }
-
-        // [2026-09-09 *** WHY SCRAPRUN ENDS WHEN SOMEONE DIES] The user reports the match ends when
-        // ONE player dies, ~8s into RUNNING, about half the time. With only TWO players that may not
-        // be a bug at all: deathrun/scraprun splits them into RUNNERS and KILLERS, and if the single
-        // runner dies the round is legitimately over. "50/50" would then be exactly WHICH of the two
-        // died. Distinguish the two cases by dumping every player's team here.
-        // AAxPlayerState::TeamIndex @0x380 (SDK 22284 A2_classes.hpp:3645, Net+RepNotify);
-        // APawn::PlayerState @0x2B8.
-        {
-            SDK::UClass* pawnCls = SDK::UObject::FindClassFast("VRPawn");
-            if (pawnCls)
-            {
-                const int32_t num = SDK::UObject::GObjects->Num();
-                int shown = 0;
-                for (int32_t i = 0; i < num && shown < 16; ++i)
-                {
-                    auto* o = SDK::UObject::GObjects->GetByIndex(i);
-                    if (!o || o->IsDefaultObject() || !o->IsA(pawnCls)) continue;
-                    const uintptr_t pw = reinterpret_cast<uintptr_t>(o);
-                    void* ctrl = *reinterpret_cast<void**>(pw + 0x2D0);   // skip orphaned pawns
-                    if (!ctrl) continue;
-                    void* ps = *reinterpret_cast<void**>(pw + 0x2B8);
-                    int team = -999, slot = -999;
-                    if (ps)
-                    {
-                        const uintptr_t s = reinterpret_cast<uintptr_t>(ps);
-                        team = *reinterpret_cast<int*>(s + 0x380);   // AAxPlayerState::TeamIndex
-                        // [2026-09-09] TeamSlotIndex @0x384 (Net, RepNotify) is the player's identity
-                        // WITHIN a team, and the conductor tracks players by slot -- both
-                        // Server_NotifyPlayerEnteredArena and interceptionEvent(TeamIndex, slotID) are
-                        // slot-keyed. If two players share a slot the conductor sees ONE runner, and a
-                        // single death then reads as "all runners dead". This is the last unexamined
-                        // identity field, so log it next to the team.
-                        slot = *reinterpret_cast<int*>(s + 0x384);
-                    }
-                    ++shown;
-                    printf("[HalcyonA2][SCRAPEND]   player %s team=%d slot=%d ps=%p\n",
-                           o->GetName().c_str(), team, slot, ps);
-                }
-                printf("[HalcyonA2][SCRAPEND]   (players with a controller: %d)\n", shown);
-            }
-        }
-    }
-}
-static void DumpGameTimersOnEnd(unsigned char newState)
-{
-    __try { DumpGameTimersOnEndImpl(newState); } __except (EXCEPTION_EXECUTE_HANDLER) {}
-}
 
 // ★ THE GC-FLOOD FIX. sub_7FF6732AF4C0 (RVA 0x124F4C0) is a GC reference-batch COMPACTOR: it reads
 // ctx->count @+0x3C0 entries from the inline batch buffer @+0x3C8, compacts the live ones into +0x508,
@@ -2146,9 +1999,6 @@ static bool        g_pingStampEnabled = true;   // console-toggleable A/B switch
 static std::unordered_map<void*, float> g_lastGoodPing;
 static constexpr float kPingFloorMs = 100.0f;
 static volatile long g_ingestPingFixes = 0;   // [SNAPFIX] # of incoming pose RPCs whose Ping we corrected 0->ping (1Hz census)
-// [DORM] how many VRPawns we had to pull out of net dormancy, and how many needed an explicit flush.
-static long g_dormFixed   = 0;
-static long g_dormFlushed = 0;
 
 // TEAM-COLOR STAMP FIX (mirrors the ping fix). Server_SetCurrentColor writes the Mass fragment, but
 // the fragment->replicated-copy sync only carries pose (FrequentData), NOT the color, so the entity's
@@ -2509,45 +2359,6 @@ static void WireVRPawnBallSimManagers()
             *reinterpret_cast<float*>(p + 0x178) = 100.0f;    // NetUpdateFrequency — target 100Hz
             *reinterpret_cast<float*>(p + 0x17C) = 100.0f;    // MinNetUpdateFrequency — pin it (defeat adaptive down-throttle)
             *reinterpret_cast<float*>(p + 0x180) = 10.0f;     // NetPriority — win the actor budget over static objects
-
-            // [2026-09-09 *** THE "1 POS UPDATE/SEC" LAG STATE] AActor::NetDormancy @0x159
-            // (ENetDormancy, SDK 22284 Engine_classes.hpp:1121 / Engine_structs.hpp:1848:
-            //  DORM_Never=0, DORM_Awake=1, DORM_DormantAll=2, DORM_DormantPartial=3, DORM_Initial=4).
-            //
-            // A DORMANT actor is skipped by the replication driver entirely until something dirties it
-            // and calls FlushNetDormancy. A player pawn that goes dormant therefore stops sending pose
-            // updates and only trickles out the occasional forced update -- which is exactly the reported
-            // "player is only sending 1 pos upd/s". It also explains the reported WORKAROUND precisely:
-            // GRABBING the stuck player writes a replicated property on their pawn, which flushes
-            // dormancy and wakes replication back up. That is a dormancy symptom, not a bandwidth one
-            // (bandwidth was already measured and cleared: [NETRATE] showed caps at 500000, raised=0).
-            //
-            // We set every other net knob on these pawns but never touched this one. Pin it to DORM_Never
-            // so a player pawn can never be put to sleep in the first place.
-            unsigned char& dorm = *reinterpret_cast<unsigned char*>(p + 0x159);
-            if (dorm != 0)
-            {
-                const unsigned char was = dorm;
-                dorm = 0;                                     // DORM_Never
-                ++g_dormFixed;
-                // Writing the field does NOT by itself wake an actor the connection has already filed
-                // as dormant -- that needs FlushNetDormancy(). Call it so a player already stuck in the
-                // laggy state recovers without needing someone to grab them.
-                if (was == 2 || was == 3 || was == 4)
-                {
-                    static SDK::UFunction* fnFlush = nullptr;
-                    if (!fnFlush)
-                        if (SDK::UClass* ac = SDK::UObject::FindClassFast("Actor"))
-                            fnFlush = ac->GetFunction("Actor", "FlushNetDormancy");
-                    if (fnFlush)
-                    {
-                        o->ProcessEvent(fnFlush, nullptr);
-                        ++g_dormFlushed;
-                    }
-                    HxLog("[HalcyonA2][DORM] %s NetDormancy %u -> DORM_Never + FlushNetDormancy "
-                          "(this pawn was the 1-update/s lag state)\n", o->GetName().c_str(), was);
-                }
-            }
         }
 
         void** ref = reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(o) + 0x1B38);
@@ -3855,324 +3666,6 @@ static void CheckBallSimRestitutionCurve()
 }
 static void SafeCheckRestCurve() { __try { CheckBallSimRestitutionCurve(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
 
-// [2026-09-09 *** THE 1-POS-UPDATE/SEC LAG STATE, REAL LAYER] This build ships UA2ReplicationGraph
-// (SDK 22284 A2_classes.hpp:4243), a UReplicationDriver. When a replication GRAPH drives replication,
-// the per-actor knobs we pin in WireVRPawnBallSimManagers (bAlwaysRelevant, NetUpdateFrequency,
-// MinNetUpdateFrequency, NetPriority, NetCullDistanceSquared) are largely IGNORED -- the graph's nodes
-// decide relevancy and rate instead, and an actor is routed to a node BY CLASS when it registers:
-//     SpatializedClasses    @0x0570 -> GridNode3D, update frequency falls off with DISTANCE
-//     NonSpatializedClasses @0x0580
-//     AlwaysRelevantClasses @0x0590 -> AlwaysRelevantNode, full rate to everyone
-// If the VR pawn class is SPATIALIZED, a player whose grid cell is stale or far gets throttled to a
-// trickle -- which is exactly "only sending 1 pos upd/s" -- and GRABBING them fixes it because the grab
-// dirties the actor and forces an update. That also explains why setting bAlwaysRelevant on the actor
-// changed nothing: the routing decision was already made, by class, at registration.
-// DIAGNOSTIC FIRST: print the three class lists and say which bucket the VR pawn lands in. TArray is
-// {Data@0x00, Num@0x08}.
-static int g_repGraphLogged = 0;
-static int s_noGraphTries = 0;
-static const int kNoGraphGiveUp = 10;
-static void DumpReplicationGraph()
-{
-    if (g_repGraphLogged >= 2 || s_noGraphTries >= kNoGraphGiveUp) return;
-    SDK::UClass* rgCls = SDK::UObject::FindClassFast("A2ReplicationGraph");
-    if (!rgCls) return;
-    SDK::UObject* graph = nullptr;
-    const int32_t num = SDK::UObject::GObjects->Num();
-    InterlockedIncrement(&g_walks); g_objN = num;
-    for (int32_t i = 0; i < num; ++i)
-    {
-        auto* o = SDK::UObject::GObjects->GetByIndex(i);
-        if (o && !o->IsDefaultObject() && o->IsA(rgCls)) { graph = o; break; }
-    }
-    if (!graph)
-    {
-        // MEASURED 2026-09-09: the class ships in this build but NO live instance is ever created on
-        // this server -- replication uses the classic UNetDriver path, so the per-actor net flags we
-        // pin (including NetDormancy) ARE the operative layer after all. Give up after a bounded number
-        // of tries: this scan is a full ~166k-object walk and cost 12ms EVERY SECOND while it kept
-        // looking for something that is never going to appear.
-        if (++s_noGraphTries == kNoGraphGiveUp)
-            HxLog("[HalcyonA2][REPGRAPH] no live A2ReplicationGraph after %d scans -> classic UNetDriver "
-                  "replication (per-actor net flags are authoritative). Scan disabled.\n",
-                  kNoGraphGiveUp);
-        return;
-    }
-    ++g_repGraphLogged;
-    const uintptr_t g = reinterpret_cast<uintptr_t>(graph);
-    void* grid  = *reinterpret_cast<void**>(g + 0x5A0);
-    void* arNode = *reinterpret_cast<void**>(g + 0x5B0);
-    HxLog("[HalcyonA2][REPGRAPH] LIVE A2ReplicationGraph=%p GridNode3D=%p AlwaysRelevantNode=%p"
-          " -- a graph IS driving replication, so per-actor net flags are advisory only\n",
-          graph, grid, arNode);
-    const char* kName[3] = { "Spatialized", "NonSpatialized", "AlwaysRelevant" };
-    const uintptr_t kOff[3] = { 0x570, 0x580, 0x590 };
-    for (int L = 0; L < 3; ++L)
-    {
-        void** data = *reinterpret_cast<void***>(g + kOff[L]);
-        const int n = *reinterpret_cast<int*>(g + kOff[L] + 0x08);
-        HxLog("[HalcyonA2][REPGRAPH] %sClasses n=%d\n", kName[L], n);
-        for (int i = 0; data && i < n && i < 40; ++i)
-        {
-            auto* c = static_cast<SDK::UObject*>(data[i]);
-            if (!c) continue;
-            const std::string cn = c->GetName();
-            const bool isPawn = cn.find("VRPawn") != std::string::npos;
-            HxLog("[HalcyonA2][REPGRAPH]     %s%s\n", cn.c_str(),
-                  isPawn ? "   <<<<< THE PLAYER PAWN CLASS IS IN THIS BUCKET" : "");
-        }
-    }
-}
-static void SafeDumpReplicationGraph() { __try { DumpReplicationGraph(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
-
-// [2026-09-09 *** THE 1-UPDATE/SEC LAG STATE, ROUND 2] Dormancy is DISPROVEN: with the lag state
-// actually occurring, [DORMWATCH] logged ZERO calls to SetNetDormancy/FlushNetDormancy and no pawn
-// was ever found dormant. And [POSERATE] shows BOTH players sending ~46 poses/s INBOUND, so the
-// client->server direction is fine for everyone. The throttle is therefore SERVER->CLIENT relay of
-// the OTHER player's pawn.
-//
-// The user's workaround is the clue: GRABBING the stuck player fixes them, and a grab changes actor
-// ownership/attachment -- precisely what UE relevancy keys on. Relevant AActor bits (SDK 22284
-// Engine_classes.hpp:1072-1084), all in the bitfield at +0x60/+0x61:
-//     +0x60 bit0 (0x01) bNetTemporary        -- replicated once then dropped
-//     +0x60 bit2 (0x04) bOnlyRelevantToOwner -- replicate ONLY to the owning connection
-//     +0x60 bit3 (0x08) bAlwaysRelevant      -- what we pin
-//     +0x60 bit4 (0x10) bReplicateMovement
-//     +0x61 bit4 (0x10) bNetUseOwnerRelevancy
-// plus Owner @0x148, NetDormancy @0x159, NetUpdateFrequency @0x178, MinNetUpdateFrequency @0x17C.
-//
-// This dumps the LIVE values ~2s per pawn so we can see whether our pins are actually holding when a
-// player goes quiet, or whether the game is resetting them behind us.
-static void DumpPawnNetState()
-{
-    static ULONGLONG s_last = 0;
-    const ULONGLONG now = GetTickCount64();
-    if (now - s_last < 2000) return;
-    s_last = now;
-
-    SDK::UClass* pawnCls = SDK::UObject::FindClassFast("VRPawn");
-    if (!pawnCls) return;
-    const int32_t num = SDK::UObject::GObjects->Num();
-    int shown = 0;
-    for (int32_t i = 0; i < num && shown < 8; ++i)
-    {
-        auto* o = SDK::UObject::GObjects->GetByIndex(i);
-        if (!o || o->IsDefaultObject() || !o->IsA(pawnCls)) continue;
-        const uintptr_t p = reinterpret_cast<uintptr_t>(o);
-        void* ctrl = *reinterpret_cast<void**>(p + 0x2D0);
-        if (!ctrl) continue;                       // orphaned pawn, not a live player
-        ++shown;
-        const unsigned char f60 = *reinterpret_cast<unsigned char*>(p + 0x60);
-        const unsigned char f61 = *reinterpret_cast<unsigned char*>(p + 0x61);
-        auto* owner = *reinterpret_cast<SDK::UObject**>(p + 0x148);
-        HxLog("[HalcyonA2][NETSTATE] %s alwaysRel=%d onlyOwner=%d netTemp=%d repMove=%d useOwnerRel=%d "
-              "dorm=%d netUpd=%.0f minUpd=%.0f prio=%.1f cull=%.0f owner=%s\n",
-              o->GetName().c_str(),
-              (f60 >> 3) & 1, (f60 >> 2) & 1, f60 & 1, (f60 >> 4) & 1, (f61 >> 4) & 1,
-              (int)*reinterpret_cast<unsigned char*>(p + 0x159),
-              *reinterpret_cast<float*>(p + 0x178),
-              *reinterpret_cast<float*>(p + 0x17C),
-              *reinterpret_cast<float*>(p + 0x180),
-              *reinterpret_cast<float*>(p + 0x170),
-              owner ? owner->GetName().c_str() : "<null>");
-
-        // [2026-09-09 *** THE LAG STATE, ROUND 3] Relevancy and dormancy are both RULED OUT by the
-        // line above (alwaysRel=1, onlyOwner=0, dorm=0, netUpd=100 held on every pawn DURING the lag),
-        // and [POSERATE] shows both players sending ~46 poses/s INBOUND. So the server has the data
-        // and is configured to send it. The stall must be in A2's own pose pipeline:
-        //     AVRPawn.Entity@0x928 -> UA2PlayerEntity
-        //       localData@0xF0        = server's working copy from the incoming Server_SetFrequentData
-        //       VRPlayerRepData@0x308 = the Net-replicated copy actually SENT to other clients
-        //     FrequentData{ Timestamp.Seconds@0x00, Timestamp.frac@0x04, Ping@0x08, Root.pos@0x10 }
-        // If the REPLICATED copy stops advancing while localData keeps moving, the local->replicated
-        // sync is what stalls -- which would look exactly like "that player only updates once a second"
-        // to everyone else, while the server still receives them at full rate.
-        void* ent = *reinterpret_cast<void**>(p + 0x928);
-        if (ent)
-        {
-            const uintptr_t e = reinterpret_cast<uintptr_t>(ent);
-            const int   lSec = *reinterpret_cast<int*>(e + 0xF0 + 0x00);
-            const float lFrac= *reinterpret_cast<float*>(e + 0xF0 + 0x04);
-            const float lPing= *reinterpret_cast<float*>(e + 0xF0 + 0x08);
-            const double lx  = *reinterpret_cast<double*>(e + 0xF0 + 0x10);
-            const int   rSec = *reinterpret_cast<int*>(e + 0x308 + 0x00);
-            const float rFrac= *reinterpret_cast<float*>(e + 0x308 + 0x04);
-            const float rPing= *reinterpret_cast<float*>(e + 0x308 + 0x08);
-            const double rx  = *reinterpret_cast<double*>(e + 0x308 + 0x10);
-            HxLog("[HalcyonA2][FREQSYNC] %s local(t=%d.%03d ping=%.0f x=%.0f) rep(t=%d.%03d ping=%.0f x=%.0f) "
-                  "lag=%.3fs dx=%.0f\n",
-                  o->GetName().c_str(),
-                  lSec, (int)(lFrac * 1000.0f), lPing, lx,
-                  rSec, (int)(rFrac * 1000.0f), rPing, rx,
-                  (double)(lSec - rSec) + (double)(lFrac - rFrac), lx - rx);
-        }
-    }
-}
-static void SafeDumpPawnNetState() { __try { DumpPawnNetState(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
-
-// [2026-09-09 *** SCRAPRUN ENDS THE INSTANT ANYONE DIES] Measured with two players in a live
-// ScrapRun match: BOTH were on TeamIndex 0, and nobody was ever on team 1.
-//     player BP_VRPawn_C_2147475198 team=0
-//     player BP_VRPawn_C_2147460499 team=0
-// (A player outside a match reads team=-1, so -1 is "unassigned" and 0 is a real team -- they ARE
-// being assigned, just both to the same side.)
-//
-// In deathrun/scraprun team 0 is the RUNNERS; the rest of this file keys on exactly that ("we only
-// latch on a genuine team-0 Runner", "the Luau re-checks team==0 && RUNNING"). So the match had two
-// runners and ZERO killers. If the conductor's end condition is "all runners dead OR all killers
-// dead", the second half is VACUOUSLY TRUE with no killers -- so the first death that triggers an
-// evaluation ends the round instantly. That matches the report exactly: 4 rounds, ended immediately,
-// regardless of WHICH player died.
-//
-// Fix: when a match has 2+ live players all sharing a TeamIndex, split them alternately via the
-// game's own AAxPlayerState::SetTeamIndex (a reflected UFunction, so its RepNotify fires and clients
-// are actually told) rather than poking the field. OPT-IN via -BalanceTeams: a mode where sharing a
-// team is legitimate must not have players forced apart.
-static bool g_balanceTeams = false;      // -BalanceTeams
-static long g_teamFixes = 0;
-static void BalanceTeamsIfDegenerate()
-{
-    if (!g_balanceTeams) return;
-    static ULONGLONG s_last = 0;
-    const ULONGLONG now = GetTickCount64();
-    if (now - s_last < 3000) return;
-    s_last = now;
-
-    SDK::UClass* pawnCls = SDK::UObject::FindClassFast("VRPawn");
-    if (!pawnCls) return;
-
-    SDK::UObject* states[16]; int nStates = 0; int firstTeam = -999; bool allSame = true;
-    const int32_t num = SDK::UObject::GObjects->Num();
-    for (int32_t i = 0; i < num && nStates < 16; ++i)
-    {
-        auto* o = SDK::UObject::GObjects->GetByIndex(i);
-        if (!o || o->IsDefaultObject() || !o->IsA(pawnCls)) continue;
-        const uintptr_t p = reinterpret_cast<uintptr_t>(o);
-        if (!*reinterpret_cast<void**>(p + 0x2D0)) continue;              // no controller -> orphan
-        auto* ps = *reinterpret_cast<SDK::UObject**>(p + 0x2B8);
-        if (!ps) continue;
-        const int t = *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(ps) + 0x380);
-        if (t < 0) return;                                                // still unassigned; leave it alone
-        if (firstTeam == -999) firstTeam = t; else if (t != firstTeam) allSame = false;
-        states[nStates++] = ps;
-    }
-    if (nStates < 2 || !allSame) return;   // already split, or not enough players -> nothing to do
-
-    SDK::UClass* psCls = SDK::UObject::FindClassFast("AxPlayerState");
-    if (!psCls) return;
-    SDK::UFunction* fnSet = psCls->GetFunction("AxPlayerState", "SetTeamIndex");
-    if (!fnSet) return;
-
-    // Leave the first half on their current team; move the rest to the other side.
-    for (int i = nStates / 2; i < nStates; ++i)
-    {
-        struct { int32_t NewTeamIndex; } parms{ (firstTeam == 0) ? 1 : 0 };
-        states[i]->ProcessEvent(fnSet, &parms);
-        ++g_teamFixes;
-    }
-    HxLog("[HalcyonA2][TEAMFIX] %d players ALL on team %d (no opposition -> a death ends the round "
-          "instantly). Split %d of them onto team %d. total fixes=%ld\n",
-          nStates, firstTeam, nStates - nStates / 2, (firstTeam == 0) ? 1 : 0, g_teamFixes);
-}
-static void SafeBalanceTeams() { __try { BalanceTeamsIfDegenerate(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
-
-// [2026-09-09 *** THE SCRAPRUN AUTO-END -- ROOT CAUSE, FROM THE GAME'S OWN LUAU] ------------------
-// Extracted A2/Content/LevelDefinitions/deathrun2_a2level/Scripts/gamemode.luau from the pak. The
-// end rule is explicit:
-//
-//     function PlayerLeftTeam(teamSize: number, teamIndex: number): ()
-//         if (currentState == State.RUNNING or currentState == State.OVERTIME_RUNNING) then
-//             if (teamSize == 0) then          -- the team is now EMPTY
-//                 ... GameScore:incrementScore(...)
-//                 SwitchState(State.GAME_EXIT) -- END THE MATCH
-//
-//     KillerTeamChanger.teamSizeDecreased.Listen(PlayerLeftTeam)
-//     RunnerTeamChanger.teamSizeDecreased.Listen(PlayerLeftTeam)
-//
-// So the match ends when a TEAM SIZE reaches ZERO -- exactly the intended "all runners are dead"
-// rule, not a bug in the gamemode.
-//
-// The bug is that nobody is ever ON a team here. Team membership is owned by the native
-// UTeamChangeComponent and is joined by PHYSICALLY OVERLAPPING the team-switcher volume, which
-// calls UTeamChangeComponent::HandleFiringSwitcherOverlapOnServer(PlayerIndex). Our headless server
-// never detects that overlap -- the same documented failure as the deathrun finish trigger: "our VR
-// pawns' server collision doesn't track the player (the real pose lives on AVRPawn.Entity@0x928,
-// not the pawn actor root), so the engine never detects the overlap". The roster therefore stays
-// EMPTY, so the first death fires teamSizeDecreased with teamSize=0 and the round exits instantly --
-// whichever player died, every time. That matches the report precisely.
-//
-// FIX (mirrors what this file already does for the finish trigger: detect it ourselves, then call
-// the real server-side handler so the genuine Luau path runs): if a Runner team-changer has fewer
-// members than there are live players in the world, seat the missing players by calling
-// HandleFiringSwitcherOverlapOnServer directly. That is the exact function the volume would have
-// called, so team sizes, delegates, scoreboards and Luau state all update through the normal path.
-//
-// Offsets (SDK 22284 A2_classes.hpp:9191 UTeamChangeComponent): TeamSize@0x4DC, TeamIndex@0x524.
-// AVRPawn::PlayerIndex@0x1C22.
-//
-// Deliberately conservative: only ever ADDS players to the RUNNER team (TeamIndex 0), only while the
-// roster is short, and never removes anyone. -NoSeatTeams disables it.
-// [2026-09-09 REVERTED TO OFF] Seating players via HandleFiringSwitcherOverlapOnServer CRASHED
-// CLIENTS ON JOIN. Measured after the fact: it was NOT a flood -- only one TeamIndex==0 component
-// exists in the map and the call ran once every 2s (151 calls over 280s). A SINGLE call per 2s was
-// enough to break joining, and the roster never grew (TeamSize@0x4DC stayed 0), so the loop never
-// satisfied itself either. The call is therefore doing something harmful and not doing the thing it
-// was meant to do. Off until that is understood; -SeatTeams opts back in for testing.
-static bool g_seatTeams = false;         // -SeatTeams to enable (was default-on and broke joins)
-static long g_teamSeats = 0;
-static void SeatPlayersOntoTeams()
-{
-    if (!g_seatTeams) return;
-    static ULONGLONG s_last = 0;
-    const ULONGLONG now = GetTickCount64();
-    if (now - s_last < 2000) return;
-    s_last = now;
-
-    SDK::UClass* tcCls = SDK::UObject::FindClassFast("TeamChangeComponent");
-    SDK::UClass* pawnCls = SDK::UObject::FindClassFast("VRPawn");
-    if (!tcCls || !pawnCls) return;
-
-    // Live players (a pawn with a controller is a real connected player, not an orphan).
-    unsigned char pidx[16]; int nPlayers = 0;
-    const int32_t num = SDK::UObject::GObjects->Num();
-    for (int32_t i = 0; i < num && nPlayers < 16; ++i)
-    {
-        auto* o = SDK::UObject::GObjects->GetByIndex(i);
-        if (!o || o->IsDefaultObject() || !o->IsA(pawnCls)) continue;
-        const uintptr_t pw = reinterpret_cast<uintptr_t>(o);
-        if (!*reinterpret_cast<void**>(pw + 0x2D0)) continue;          // no controller -> orphan
-        pidx[nPlayers++] = *reinterpret_cast<unsigned char*>(pw + 0x1C22);
-    }
-    if (nPlayers == 0) return;
-
-    SDK::UFunction* fnJoin = tcCls->GetFunction("TeamChangeComponent", "HandleFiringSwitcherOverlapOnServer");
-    if (!fnJoin) return;
-
-    for (int32_t i = 0; i < num; ++i)
-    {
-        auto* o = SDK::UObject::GObjects->GetByIndex(i);
-        if (!o || o->IsDefaultObject() || !o->IsA(tcCls)) continue;
-        const uintptr_t c = reinterpret_cast<uintptr_t>(o);
-        const int teamIndex = *reinterpret_cast<int*>(c + 0x524);
-        if (teamIndex != 0) continue;                                   // Runners only
-        int teamSize = *reinterpret_cast<int*>(c + 0x4DC);
-        if (teamSize >= nPlayers) continue;                             // roster already complete
-
-        for (int k = 0; k < nPlayers && teamSize < nPlayers; ++k)
-        {
-            struct { int32_t PlayerIndex; } parms{ (int32_t)pidx[k] };
-            o->ProcessEvent(fnJoin, &parms);
-            const int after = *reinterpret_cast<int*>(c + 0x4DC);
-            if (after != teamSize) { ++g_teamSeats; teamSize = after; }
-        }
-        HxLog("[HalcyonA2][TEAMSEAT] runner team-changer %s: %d live players, roster now %d "
-              "(was short -> seated via HandleFiringSwitcherOverlapOnServer; an empty roster is what "
-              "made the first death end the round). total seats=%ld\n",
-              o->GetName().c_str(), nPlayers, teamSize, g_teamSeats);
-    }
-}
-static void SafeSeatTeams() { __try { SeatPlayersOntoTeams(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
-
 static void SafeWireVRPawns()       { __try { WireVRPawnBallSimManagers(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
 
 // SPECTATOR SMOOTHNESS (direction B: VR players see the spectator pawn snap). The spectator pose rides
@@ -4884,78 +4377,6 @@ static __int64 __fastcall SimIntegrate_Hook(void* mgr, unsigned int simIndex, vo
             }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    // [2026-09-09 *** "THE BALL IS TOO EXCITED" MEASUREMENT]
-    // The restitution curve was measured present ([RESTCURVE] -> C_PropHitHandSpeedRestitution-
-    // Curve, identical to the CDO), so a missing curve is NOT the cause. That curve is sampled on
-    // HAND SPEED, which makes the hand velocity the server actually feeds it the next suspect:
-    // if the server sees a much larger hand speed than the client did, a tap solves like a smash.
-    //
-    // Measure it directly instead of guessing. Layout (SDK 22284 A2_structs.hpp):
-    //   FBallSimState      0x28: PlayerStates TArray@0x08, BallStates TArray@0x18
-    //   FBallSimPlayerState 0x18: PlayerIndex@0x00, ContactStates TArray@0x08
-    //   FBallSimContactState 0x90: position@0x08, Velocity@0x28, InstantVelocity@0x40,
-    //                              ParentHMDVelocity@0x58, PawnVelocity@0x70, Colliding@0x88
-    //   FBallSimBallState   0xD0: pos@0x00, Velocity@0x20
-    // On any COLLIDING contact, print hand |Velocity| and |InstantVelocity| next to the ball's
-    // |Velocity|. The ratio ball/hand is the effective restitution -- if a light tap shows a ratio
-    // far above 1, the solver is amplifying, and by how much. POD-only inside the __try (C2712).
-    __try {
-        if (fsim)
-        {
-            const uintptr_t s = reinterpret_cast<uintptr_t>(fsim);
-            void* statesD  = *reinterpret_cast<void**>(s + 0x58);
-            const int nStates = *reinterpret_cast<int*>(s + 0x60);
-            if (statesD && nStates > 0)
-            {
-                const uintptr_t st = reinterpret_cast<uintptr_t>(statesD) + (size_t)(nStates - 1) * 0x28;
-                void* psD = *reinterpret_cast<void**>(st + 0x08);   // PlayerStates.Data
-                const int nPs = *reinterpret_cast<int*>(st + 0x10); // PlayerStates.Num
-                void* bsD = *reinterpret_cast<void**>(st + 0x18);   // BallStates.Data
-                const int nBs = *reinterpret_cast<int*>(st + 0x20);
-
-                // ball 0's speed this state (the one being hit in a 1-ball jakeball sim)
-                double bspd = -1.0;
-                if (bsD && nBs > 0)
-                {
-                    const uintptr_t b0 = reinterpret_cast<uintptr_t>(bsD);
-                    const double bvx = *reinterpret_cast<double*>(b0 + 0x20);
-                    const double bvy = *reinterpret_cast<double*>(b0 + 0x28);
-                    const double bvz = *reinterpret_cast<double*>(b0 + 0x30);
-                    bspd = sqrt(bvx*bvx + bvy*bvy + bvz*bvz);
-                }
-
-                for (int pi = 0; psD && pi < nPs && pi < 8; ++pi)
-                {
-                    const uintptr_t ps = reinterpret_cast<uintptr_t>(psD) + (size_t)pi * 0x18;
-                    void* csD = *reinterpret_cast<void**>(ps + 0x08);
-                    const int nCs = *reinterpret_cast<int*>(ps + 0x10);
-                    for (int ci = 0; csD && ci < nCs && ci < 8; ++ci)
-                    {
-                        const uintptr_t cs = reinterpret_cast<uintptr_t>(csD) + (size_t)ci * 0x90;
-                        if (!*reinterpret_cast<unsigned char*>(cs + 0x88)) continue;   // Colliding
-                        const double vx = *reinterpret_cast<double*>(cs + 0x28);
-                        const double vy = *reinterpret_cast<double*>(cs + 0x30);
-                        const double vz = *reinterpret_cast<double*>(cs + 0x38);
-                        const double ix = *reinterpret_cast<double*>(cs + 0x40);
-                        const double iy = *reinterpret_cast<double*>(cs + 0x48);
-                        const double iz = *reinterpret_cast<double*>(cs + 0x50);
-                        const double hs = sqrt(vx*vx + vy*vy + vz*vz);
-                        const double is = sqrt(ix*ix + iy*iy + iz*iz);
-                        // throttle: at most ~5 lines/s, and only for contacts worth seeing
-                        static ULONGLONG s_lastC = 0;
-                        const ULONGLONG nowC = GetTickCount64();
-                        if (nowC - s_lastC < 200) continue;
-                        s_lastC = nowC;
-                        HxLog("[HalcyonA2][CONTACT] sim=%u p=%d c=%d handV=%.0f instV=%.0f ballV=%.0f "
-                              "ratio(ball/hand)=%.2f\n",
-                              simIndex, pi, ci, hs, is, bspd,
-                              (hs > 1.0) ? (bspd / hs) : -1.0);
-                    }
-                }
-            }
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
-
     if (g_injectHitVel) __try {
         if (g_pendingActive && fsim && (g_pendingRoot || g_pendingPrim))
         {
@@ -5214,17 +4635,14 @@ static void __fastcall SendResults_Hook(void* pawn, void* state, void* players, 
     if (now - g_lastSendLog > 1000)
     {
         g_lastSendLog = now;
-        HxLog("[HalcyonA2][SEND] sends/s=%d missedInputs=%d (peak=%d) missedCaught=%d simFrame=%d newest=%d streams/s=%ld hits/s=%ld pins/s=%ld miss/s=%ld | gtcTicked=%ld gtcSkipStopped=%ld\n",
+        HxLog("[HalcyonA2][SEND] sends/s=%d missedInputs=%d (peak=%d) missedCaught=%d simFrame=%d newest=%d streams/s=%ld hits/s=%ld pins/s=%ld miss/s=%ld\n",
               s_sendCalls, missedInputs, g_sendMax, missedCaught,
               g_activeSimFramePtr ? *g_activeSimFramePtr : -1, g_newestInFrame,
               g_sendPhysCnt, g_sendPhysHitCnt,             // READ ONLY: [SENDPHYS] owns/resets these.
                                                            // Exchanging here consumed them first and
                                                            // made [SEND] always print streams/s=0.
               InterlockedExchange(&g_holdPins, 0),         // [HOLD] per-frame authority pins applied
-              InterlockedExchange(&g_holdMiss, 0),       // [HOLD] fresh stream, no sim-ball match
-              // [SCRAPRUN] gate counters: skipStopped>0 proves stale/stopped GameTimeComponents
-              // WERE being driven before the fix, i.e. the spurious-OnCountdownEnd mechanism is real.
-              g_gtcTicked, g_gtcSkipStopped);
+              InterlockedExchange(&g_holdMiss, 0));       // [HOLD] fresh stream, no sim-ball match
         g_sendMax = 0; s_sendCalls = 0;
     }
     // [FRAME-REBASE] Undo the ingest rebase on the way OUT: the input records shipped back to the client
@@ -8738,13 +8156,6 @@ static int32_t g_idxEnterArena  = 0;
 static int32_t g_idxHitResponse = 0;
 static int32_t g_idxSendPhys    = 0;
 static int32_t g_idxSetFreqData = 0;   // A2PlayerEntity::Server_SetFrequentData — ingest ping-correction site
-// [2026-09-09] AActor::SetNetDormancy / FlushNetDormancy are REFLECTED UFunctions (SDK 22284
-// Engine_classes.hpp:1236 / :1172), so any call to them passes through ProcessEvent and we can just
-// watch for it. This settles the dormancy hypothesis for the 1-update/s lag state WITHOUT needing to
-// reproduce the state: if nothing ever calls SetNetDormancy on a VRPawn, dormancy cannot be the
-// mechanism and the pin added in 27c4cf9 is treating the wrong thing.
-static int32_t g_idxSetDormancy   = 0;
-static int32_t g_idxFlushDormancy = 0;
 static bool    g_rpcIdxDone     = false;
 
 static void ResolveRpcIndices()
@@ -8766,14 +8177,6 @@ static void ResolveRpcIndices()
     if (auto* peCls = SDK::UObject::FindClassFast("A2PlayerEntity"))
         if (auto* f = peCls->GetFunction("A2PlayerEntity", "Server_SetFrequentData"))
             g_idxSetFreqData = f->Name.ComparisonIndex;
-    if (auto* aCls = SDK::UObject::FindClassFast("Actor"))
-    {
-        if (auto* f = aCls->GetFunction("Actor", "SetNetDormancy"))   g_idxSetDormancy   = f->Name.ComparisonIndex;
-        if (auto* f = aCls->GetFunction("Actor", "FlushNetDormancy")) g_idxFlushDormancy = f->Name.ComparisonIndex;
-    }
-    HxLog("[HalcyonA2][DORMWATCH] watching SetNetDormancy(idx=%d) / FlushNetDormancy(idx=%d) -- if neither "
-          "ever fires on a VRPawn, dormancy is NOT the 1-update/s lag mechanism\n",
-          g_idxSetDormancy, g_idxFlushDormancy);
     g_rpcIdxDone = true;
     HxLog("[HalcyonA2][RPCTRACE] name idx: HitProp=%d SpawnBall=%d EnterArena=%d HitResponse=%d\n",
           g_idxHitProp, g_idxSpawnBall, g_idxEnterArena, g_idxHitResponse);
@@ -8893,21 +8296,6 @@ static void TraceBallRpc(SDK::UObject* Context, SDK::UFunction* Function, void* 
               p->Actor ? p->Actor->GetName().c_str() : "<null>", (int)p->Success);
     }
 }
-// [DORMWATCH] Separate function: GetName() builds a std::string, which cannot live inside
-// ProcessEvent_Hook's __try scope (C2712) -- same split as SafeTraceBallRpc.
-static void DormWatch(SDK::UObject* Context, bool isSet, void* Parms)
-{
-    const int arg = (isSet && Parms) ? (int)*reinterpret_cast<unsigned char*>(Parms) : -1;
-    const unsigned char cur = *reinterpret_cast<unsigned char*>(reinterpret_cast<uintptr_t>(Context) + 0x159);
-    HxLog("[HalcyonA2][DORMWATCH] %s on %s  newValue=%d currentNetDormancy=%d\n",
-          isSet ? "SetNetDormancy" : "FlushNetDormancy",
-          Context->GetName().c_str(), arg, (int)cur);
-}
-static void SafeDormWatch(SDK::UObject* c, bool isSet, void* p)
-{
-    __try { DormWatch(c, isSet, p); } __except (EXCEPTION_EXECUTE_HANDLER) {}
-}
-
 static void SafeTraceBallRpc(SDK::UObject* c, SDK::UFunction* f, void* p)
 {
     __try { TraceBallRpc(c, f, p); } __except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -8995,12 +8383,8 @@ static void ProfDump()
     }
     buf[off] = 0;
     const long wk = InterlockedExchange(&g_walks, 0);
-    HxLog("[HalcyonA2][PROF] dll=%.1fms/s (%.1f%% of wall) walks/s=%ld rebuilds/s=%ld epoch=%ld objN=%ld gtc[live=%d ticked=%ld skipStopped=%ld] [%s]\n",
-          totMs, (totMs / wallMs) * 100.0, wk, InterlockedExchange(&g_rebuilds, 0), (long)g_cacheEpoch, (long)g_objN,
-          // [SCRAPRUN EVIDENCE] skipStopped counts GameTimeComponents our ticker DECLINED to drive
-          // because ClockStartedAt <= 0. If it climbs, stale/stopped timers were being driven every
-          // frame before the gate -- the spurious-OnCountdownEnd mechanism, observable while IDLE.
-          (int)g_gameTimers.size(), g_gtcTicked, g_gtcSkipStopped, buf);
+    HxLog("[HalcyonA2][PROF] dll=%.1fms/s (%.1f%% of wall) walks/s=%ld rebuilds/s=%ld epoch=%ld objN=%ld [%s]\n",
+          totMs, (totMs / wallMs) * 100.0, wk, InterlockedExchange(&g_rebuilds, 0), (long)g_cacheEpoch, (long)g_objN, buf);
 }
 // ====================================================================================
 
@@ -9067,13 +8451,6 @@ static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, v
                      Function->Name.ComparisonIndex == g_idxSendPhys ||
                      Function->Name.ComparisonIndex == g_idxHitResponse))
         SafeTraceBallRpc(Context, Function, Parms);
-
-    // [DORMWATCH] Log every dormancy call, with the target actor, so we can see whether the game ever
-    // puts a player pawn to sleep. POD-only compare; the log itself is rare by nature.
-    if (Function && Context && (g_idxSetDormancy || g_idxFlushDormancy) &&
-        (Function->Name.ComparisonIndex == g_idxSetDormancy ||
-         Function->Name.ComparisonIndex == g_idxFlushDormancy))
-        SafeDormWatch(Context, Function->Name.ComparisonIndex == g_idxSetDormancy, Parms);
 
     // [SNAPFIX] Correct the incoming pose RPC's Ping the instant it arrives, before the handler stores
     // it into localData -> the fragment->rep sync can never carry a 0 -> no interpolation collapse/snap.
@@ -9280,10 +8657,6 @@ static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, v
             g_lastBallBuildTick = GetTickCount64();
             PROF(SafeWireVRPawns);   // point every VRPawn@0x1B38 at our manager; updates g_vrPawnCount
             PROF(SafeCheckRestCurve);   // [RESTCURVE] hand-speed->restitution curve present?
-            PROF(SafeDumpPawnNetState);   // [NETSTATE] are our relevancy pins actually holding?
-            PROF(SafeBalanceTeams);   // [TEAMFIX] split players when a mode has no opposition
-            PROF(SafeSeatTeams);   // [TEAMSEAT] put players on the Runner roster (headless never fires the switcher overlap)
-            PROF(SafeDumpReplicationGraph);   // [REPGRAPH] which node owns the player pawn class?
             // Reconcile only on player-count change: continuous reconcile re-bases the sim
             // frame counter every second (MI ~= all inputs) and rubber-bands the ball to
             // spawn. Gating it gives MI=0 and no reset. (Hits register in NEITHER mode, so
@@ -10694,9 +10067,6 @@ static void Main(HMODULE)
         if (wcsstr(GetCommandLineW(), L"-HoldAuthority")) { g_holdAuthority = true; HxLog("[HalcyonA2] -HoldAuthority: held/streamed balls pinned to the client stream every frame (anti-teleport)\n"); }
         if (wcsstr(GetCommandLineW(), L"-NoBallOwnArb")) { g_ballOwnArb = false; HxLog("[HalcyonA2] -NoBallOwnArb: ball ownership arbitration OFF (legacy force-accept, last writer wins)\n"); }
         if (wcsstr(GetCommandLineW(), L"-NoRestCurveFix")) { g_fixRestCurve = false; HxLog("[HalcyonA2] -NoRestCurveFix: will NOT restore a missing hand-speed restitution curve\n"); }
-        if (wcsstr(GetCommandLineW(), L"-NoTimerGate")) { g_gateTimers = false; HxLog("[HalcyonA2] -NoTimerGate: driving ALL learned game timers again (pre-ScrapRun-fix behaviour)\n"); }
-        if (wcsstr(GetCommandLineW(), L"-BalanceTeams")) { g_balanceTeams = true; HxLog("[HalcyonA2] -BalanceTeams: split players onto opposing teams when a match has them all on one side\n"); }
-        if (wcsstr(GetCommandLineW(), L"-SeatTeams")) { g_seatTeams = true; HxLog("[HalcyonA2] -SeatTeams: seating players onto the Runner team -- WARNING: this broke client joins on 2026-09-09\n"); }
         if (const wchar_t* sd = wcsstr(GetCommandLineW(), L"-SimDelay="))
         {
             const int v = _wtoi(sd + wcslen(L"-SimDelay="));
