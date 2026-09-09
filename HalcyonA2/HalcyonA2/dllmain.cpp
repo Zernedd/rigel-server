@@ -5695,8 +5695,18 @@ static int      g_volInsideN = 0;
 // that side, which is how the mode is meant to work.
 static void FindTeamVolumes()
 {
+    // [2026-09-09 *** PERF LANDMINE, MEASURED] The guard used to be
+    //     if (g_teamVolN > 0 && now - g_lastVolFind < 10000) return;
+    // which only throttles once something HAS been found. Nothing ever was, so this ran its full
+    // scan every 250ms -- and the scan below is O(n^2) over ~166k UObjects (a nested walk per
+    // component). Measured on the live server: SafeDetectTeamChanger = 1353ms/s, peaks of 507ms per
+    // call, dll at 97.9% of wall, the sim collapsed from 90 steps/s to 2, and clients could connect
+    // but never finish spawning. Throttle unconditionally, and back off hard when the search comes
+    // up empty so a fruitless scan can never dominate the frame again.
     const ULONGLONG now = GetTickCount64();
-    if (g_teamVolN > 0 && now - g_lastVolFind < 10000) return;
+    static ULONGLONG s_emptyBackoff = 10000;
+    const ULONGLONG wait = (g_teamVolN > 0) ? 10000 : s_emptyBackoff;
+    if (now - g_lastVolFind < wait) return;
     g_lastVolFind = now;
 
     SDK::UClass* tcCls = SDK::UObject::FindClassFast("TeamChangeComponent");
@@ -5704,6 +5714,17 @@ static void FindTeamVolumes()
     if (!tcCls || !phCls) return;
 
     const int32_t num = SDK::UObject::GObjects->Num();
+
+    // One pass to gather candidate trigger components, so the per-component lookup below is a short
+    // list scan rather than another full walk.
+    static SDK::UObject* physList[512];
+    int nPhys = 0;
+    for (int32_t i = 0; i < num && nPhys < 512; ++i)
+    {
+        auto* q = SDK::UObject::GObjects->GetByIndex(i);
+        if (q && !q->IsDefaultObject() && q->IsA(phCls)) physList[nPhys++] = q;
+    }
+
     int found = 0;
     for (int32_t i = 0; i < num && found < 8; ++i)
     {
@@ -5718,14 +5739,11 @@ static void FindTeamVolumes()
         if (!owner) { owner = o->Outer; how = "Outer"; }
         if (!owner) continue;
 
+        // Was a FULL GObjects walk per component (the O(n^2) above). Collect the PhysicalComponents
+        // ONCE per call and scan that small list instead.
         void* trig = nullptr;
-        for (int32_t k = 0; k < num; ++k)
-        {
-            auto* q = SDK::UObject::GObjects->GetByIndex(k);
-            if (!q || q->IsDefaultObject() || !q->IsA(phCls)) continue;
-            if (q->Outer != owner) continue;
-            trig = q; break;
-        }
+        for (int pc = 0; pc < nPhys; ++pc)
+            if (physList[pc]->Outer == owner) { trig = physList[pc]; break; }
         if (!trig) continue;
 
         g_teamVols[found].trigger = trig;
@@ -5744,6 +5762,10 @@ static void FindTeamVolumes()
     if (found != g_teamVolN)
         HxLog("[HalcyonA2][TEAMVOL] %d team-change volume(s) located (was %d)\n", found, g_teamVolN);
     g_teamVolN = found;
+    // Empty result -> double the retry interval up to 5 minutes. The volumes only exist once the
+    // deathrun2 module is loaded, so on every other map this search is permanently fruitless and
+    // must not keep costing a full scan.
+    s_emptyBackoff = (found == 0) ? ((s_emptyBackoff < 300000) ? s_emptyBackoff * 2 : 300000) : 10000;
 }
 
 static void DetectPlayerAtTeamChanger()
