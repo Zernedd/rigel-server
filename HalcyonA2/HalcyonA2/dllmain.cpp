@@ -4112,7 +4112,13 @@ static void SafeBalanceTeams() { __try { BalanceTeamsIfDegenerate(); } __except 
 //
 // Deliberately conservative: only ever ADDS players to the RUNNER team (TeamIndex 0), only while the
 // roster is short, and never removes anyone. -NoSeatTeams disables it.
-static bool g_seatTeams = true;          // -NoSeatTeams
+// [2026-09-09 REVERTED TO OFF] Seating players via HandleFiringSwitcherOverlapOnServer CRASHED
+// CLIENTS ON JOIN. Measured after the fact: it was NOT a flood -- only one TeamIndex==0 component
+// exists in the map and the call ran once every 2s (151 calls over 280s). A SINGLE call per 2s was
+// enough to break joining, and the roster never grew (TeamSize@0x4DC stayed 0), so the loop never
+// satisfied itself either. The call is therefore doing something harmful and not doing the thing it
+// was meant to do. Off until that is understood; -SeatTeams opts back in for testing.
+static bool g_seatTeams = false;         // -SeatTeams to enable (was default-on and broke joins)
 static long g_teamSeats = 0;
 static void SeatPlayersOntoTeams()
 {
@@ -10690,7 +10696,7 @@ static void Main(HMODULE)
         if (wcsstr(GetCommandLineW(), L"-NoRestCurveFix")) { g_fixRestCurve = false; HxLog("[HalcyonA2] -NoRestCurveFix: will NOT restore a missing hand-speed restitution curve\n"); }
         if (wcsstr(GetCommandLineW(), L"-NoTimerGate")) { g_gateTimers = false; HxLog("[HalcyonA2] -NoTimerGate: driving ALL learned game timers again (pre-ScrapRun-fix behaviour)\n"); }
         if (wcsstr(GetCommandLineW(), L"-BalanceTeams")) { g_balanceTeams = true; HxLog("[HalcyonA2] -BalanceTeams: split players onto opposing teams when a match has them all on one side\n"); }
-        if (wcsstr(GetCommandLineW(), L"-NoSeatTeams")) { g_seatTeams = false; HxLog("[HalcyonA2] -NoSeatTeams: will NOT seat players onto the Runner team (ScrapRun will auto-end on the first death)\n"); }
+        if (wcsstr(GetCommandLineW(), L"-SeatTeams")) { g_seatTeams = true; HxLog("[HalcyonA2] -SeatTeams: seating players onto the Runner team -- WARNING: this broke client joins on 2026-09-09\n"); }
         if (const wchar_t* sd = wcsstr(GetCommandLineW(), L"-SimDelay="))
         {
             const int v = _wtoi(sd + wcslen(L"-SimDelay="));
