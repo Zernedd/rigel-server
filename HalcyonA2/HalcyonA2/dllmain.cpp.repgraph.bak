@@ -3786,76 +3786,6 @@ static void CheckBallSimRestitutionCurve()
 }
 static void SafeCheckRestCurve() { __try { CheckBallSimRestitutionCurve(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
 
-// [2026-09-09 *** THE 1-POS-UPDATE/SEC LAG STATE, REAL LAYER] This build ships UA2ReplicationGraph
-// (SDK 22284 A2_classes.hpp:4243), a UReplicationDriver. When a replication GRAPH drives replication,
-// the per-actor knobs we pin in WireVRPawnBallSimManagers (bAlwaysRelevant, NetUpdateFrequency,
-// MinNetUpdateFrequency, NetPriority, NetCullDistanceSquared) are largely IGNORED -- the graph's nodes
-// decide relevancy and rate instead, and an actor is routed to a node BY CLASS when it registers:
-//     SpatializedClasses    @0x0570 -> GridNode3D, update frequency falls off with DISTANCE
-//     NonSpatializedClasses @0x0580
-//     AlwaysRelevantClasses @0x0590 -> AlwaysRelevantNode, full rate to everyone
-// If the VR pawn class is SPATIALIZED, a player whose grid cell is stale or far gets throttled to a
-// trickle -- which is exactly "only sending 1 pos upd/s" -- and GRABBING them fixes it because the grab
-// dirties the actor and forces an update. That also explains why setting bAlwaysRelevant on the actor
-// changed nothing: the routing decision was already made, by class, at registration.
-// DIAGNOSTIC FIRST: print the three class lists and say which bucket the VR pawn lands in. TArray is
-// {Data@0x00, Num@0x08}.
-static int g_repGraphLogged = 0;
-static int s_noGraphTries = 0;
-static const int kNoGraphGiveUp = 10;
-static void DumpReplicationGraph()
-{
-    if (g_repGraphLogged >= 2 || s_noGraphTries >= kNoGraphGiveUp) return;
-    SDK::UClass* rgCls = SDK::UObject::FindClassFast("A2ReplicationGraph");
-    if (!rgCls) return;
-    SDK::UObject* graph = nullptr;
-    const int32_t num = SDK::UObject::GObjects->Num();
-    InterlockedIncrement(&g_walks); g_objN = num;
-    for (int32_t i = 0; i < num; ++i)
-    {
-        auto* o = SDK::UObject::GObjects->GetByIndex(i);
-        if (o && !o->IsDefaultObject() && o->IsA(rgCls)) { graph = o; break; }
-    }
-    if (!graph)
-    {
-        // MEASURED 2026-09-09: the class ships in this build but NO live instance is ever created on
-        // this server -- replication uses the classic UNetDriver path, so the per-actor net flags we
-        // pin (including NetDormancy) ARE the operative layer after all. Give up after a bounded number
-        // of tries: this scan is a full ~166k-object walk and cost 12ms EVERY SECOND while it kept
-        // looking for something that is never going to appear.
-        if (++s_noGraphTries == kNoGraphGiveUp)
-            HxLog("[HalcyonA2][REPGRAPH] no live A2ReplicationGraph after %d scans -> classic UNetDriver "
-                  "replication (per-actor net flags are authoritative). Scan disabled.\n",
-                  kNoGraphGiveUp);
-        return;
-    }
-    ++g_repGraphLogged;
-    const uintptr_t g = reinterpret_cast<uintptr_t>(graph);
-    void* grid  = *reinterpret_cast<void**>(g + 0x5A0);
-    void* arNode = *reinterpret_cast<void**>(g + 0x5B0);
-    HxLog("[HalcyonA2][REPGRAPH] LIVE A2ReplicationGraph=%p GridNode3D=%p AlwaysRelevantNode=%p"
-          " -- a graph IS driving replication, so per-actor net flags are advisory only\n",
-          graph, grid, arNode);
-    const char* kName[3] = { "Spatialized", "NonSpatialized", "AlwaysRelevant" };
-    const uintptr_t kOff[3] = { 0x570, 0x580, 0x590 };
-    for (int L = 0; L < 3; ++L)
-    {
-        void** data = *reinterpret_cast<void***>(g + kOff[L]);
-        const int n = *reinterpret_cast<int*>(g + kOff[L] + 0x08);
-        HxLog("[HalcyonA2][REPGRAPH] %sClasses n=%d\n", kName[L], n);
-        for (int i = 0; data && i < n && i < 40; ++i)
-        {
-            auto* c = static_cast<SDK::UObject*>(data[i]);
-            if (!c) continue;
-            const std::string cn = c->GetName();
-            const bool isPawn = cn.find("VRPawn") != std::string::npos;
-            HxLog("[HalcyonA2][REPGRAPH]     %s%s\n", cn.c_str(),
-                  isPawn ? "   <<<<< THE PLAYER PAWN CLASS IS IN THIS BUCKET" : "");
-        }
-    }
-}
-static void SafeDumpReplicationGraph() { __try { DumpReplicationGraph(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
-
 static void SafeWireVRPawns()       { __try { WireVRPawnBallSimManagers(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
 
 // SPECTATOR SMOOTHNESS (direction B: VR players see the spectator pawn snap). The spectator pose rides
@@ -8919,7 +8849,6 @@ static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, v
             g_lastBallBuildTick = GetTickCount64();
             PROF(SafeWireVRPawns);   // point every VRPawn@0x1B38 at our manager; updates g_vrPawnCount
             PROF(SafeCheckRestCurve);   // [RESTCURVE] hand-speed->restitution curve present?
-            PROF(SafeDumpReplicationGraph);   // [REPGRAPH] which node owns the player pawn class?
             // Reconcile only on player-count change: continuous reconcile re-bases the sim
             // frame counter every second (MI ~= all inputs) and rubber-bands the ball to
             // spawn. Gating it gives MI=0 and no reset. (Hits register in NEITHER mode, so
