@@ -1,4 +1,4 @@
-using AUnrealFeatures.Hosting.Http.Actions;
+﻿using AUnrealFeatures.Hosting.Http.Actions;
 using AUnrealFeatures.Hosting.Http.Interfaces;
 using AUnrealFeatures.Hosting.Http.Preprocessors;
 using System;
@@ -20,12 +20,41 @@ namespace AUnrealFeatures.Ares.Servers
     // start returning 401. Flip Enforce=true once SSO sessions are minted and the log shows them landing.
     public sealed class DashboardAuthPreprocessor : IHttpRequestPreprocessor
     {
-        public static bool Enforce = false;   // capture-first; flip true after verifying sessions in the log
+        // [2026-09-09] ENFORCED. Was capture-first (log-only) with placeholder secrets, which meant
+        // every /api/* call on :8080 was allowed -- anyone who could reach the port could delete
+        // stations, ban users, grant roles and tear down servers.
+        //
+        // Enable/disable with DASHBOARD_AUTH_ENFORCE=0 only for local debugging; it defaults to ON.
+        public static bool Enforce =
+            (Environment.GetEnvironmentVariable("DASHBOARD_AUTH_ENFORCE") ?? "1") != "0";
 
         // These must match what the /auth/meta callback uses to MINT the session cookie.
         public const string SessionCookieName = "a2dash_session";
-        const string SessionSecret     = "CHANGE-ME-dashboard-session-secret";  // FILL: HS256 key for the session JWT
-        const string DashboardAdminKey = "CHANGE-ME-dashboard-admin-key";       // FILL: static key for scripts/automation
+
+        // Secrets come from the ENVIRONMENT, never from source -- a key committed to the repo is not
+        // a key. If either is unset we generate a strong random one AT STARTUP and print it once, so
+        // the service can never silently fall back to a guessable placeholder. A generated key only
+        // lives for that process lifetime, so set DASHBOARD_ADMIN_KEY in .env for a stable one.
+        static readonly string SessionSecret     = ResolveSecret("DASHBOARD_SESSION_SECRET", "session secret");
+        static readonly string DashboardAdminKey = ResolveSecret("DASHBOARD_ADMIN_KEY",     "admin key");
+
+        static string ResolveSecret(string envVar, string label)
+        {
+            var v = Environment.GetEnvironmentVariable(envVar);
+            if (!string.IsNullOrWhiteSpace(v) && !v.StartsWith("CHANGE-ME", StringComparison.OrdinalIgnoreCase))
+                return v;
+
+            var bytes = RandomNumberGenerator.GetBytes(32);
+            var gen = Convert.ToHexString(bytes).ToLowerInvariant();
+            Console.WriteLine($"[DASH-AUTH] {envVar} not set -- GENERATED a random {label} for this run:");
+            Console.WriteLine($"[DASH-AUTH]     {gen}");
+            Console.WriteLine($"[DASH-AUTH] Set {envVar} in .env to keep it stable across restarts.");
+            return gen;
+        }
+
+        // The key the dashboard page itself needs in order to call /api/*. Exposed so the server can
+        // print it on boot; never returned over HTTP.
+        public static string AdminKeyForDisplay => DashboardAdminKey;
 
         public Task<HttpPreprocessorContainer> TryPreprocessRequest(IHttpRequest request, IHttpResponse response)
         {

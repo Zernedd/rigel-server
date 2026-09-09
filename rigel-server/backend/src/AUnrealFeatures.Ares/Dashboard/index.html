@@ -55,6 +55,8 @@
   <h1>Ares Dashboard</h1>
   <span class="badge" id="status">LIVE</span>
   <span class="refresh" id="refresh-ts">Refreshing...</span>
+  <button onclick="clearDashKey()" title="Forget the dashboard key on this browser"
+          style="margin-left:10px;font-size:11px;padding:3px 9px;border-radius:5px;border:1px solid #333;background:#141414;color:inherit;cursor:pointer">Lock</button>
 </header>
 <main>
   <div class="stats" id="stats">
@@ -151,6 +153,68 @@
 </main>
 
 <script>
+// --- DASHBOARD KEY GATE -------------------------------------------------------------
+// /api/* on :8080 is enforced by DashboardAuthPreprocessor and needs the admin key. The key
+// is held in localStorage on this browser only and sent as x-dashboard-key on every /api
+// call, by wrapping fetch once rather than touching each call site. It is never put in a
+// URL, so it cannot leak through logs, history or a Referer header.
+const DASH_KEY_STORAGE = 'rigel_dashboard_key';
+
+function dashKey() { try { return localStorage.getItem(DASH_KEY_STORAGE) || ''; } catch (e) { return ''; } }
+function setDashKey(k) { try { localStorage.setItem(DASH_KEY_STORAGE, k); } catch (e) {} }
+function clearDashKey() { try { localStorage.removeItem(DASH_KEY_STORAGE); } catch (e) {} location.reload(); }
+
+(function () {
+  const realFetch = window.fetch.bind(window);
+  window.fetch = (url, opts) => {
+    opts = opts || {};
+    if (typeof url === 'string' && url.startsWith('/api/')) {
+      opts.headers = Object.assign({}, opts.headers || {}, { 'x-dashboard-key': dashKey() });
+    }
+    return realFetch(url, opts).then(res => {
+      if (res.status === 401 && typeof url === 'string' && url.startsWith('/api/')) showKeyPrompt(true);
+      return res;
+    });
+  };
+})();
+
+function showKeyPrompt(wasRejected) {
+  if (document.getElementById('key-overlay')) {
+    if (wasRejected) document.getElementById('key-err').textContent = 'That key was rejected.';
+    return;
+  }
+  const d = document.createElement('div');
+  d.id = 'key-overlay';
+  d.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.86);display:flex;align-items:center;' +
+                    'justify-content:center;z-index:9999';
+  d.innerHTML =
+    '<div style="background:#141414;border:1px solid #333;border-radius:10px;padding:26px 28px;width:440px;max-width:92vw">' +
+      '<h2 style="margin:0 0 6px;font-size:17px">Dashboard key</h2>' +
+      '<p style="margin:0 0 16px;font-size:13px;opacity:.65;line-height:1.5">' +
+        'This dashboard controls the live fleet. Paste the admin key to continue &mdash; it is stored ' +
+        'in this browser only.</p>' +
+      '<input id="key-input" type="password" placeholder="dashboard admin key" autocomplete="off" ' +
+        'style="width:100%;padding:10px;border-radius:6px;border:1px solid #333;background:#0d0d0d;' +
+        'color:inherit;font-family:monospace;font-size:13px">' +
+      '<div id="key-err" style="color:#f66;font-size:12px;min-height:17px;margin-top:8px">' +
+        (wasRejected ? 'That key was rejected.' : '') + '</div>' +
+      '<button id="key-go" style="margin-top:6px;width:100%;padding:10px;border-radius:6px;border:0;' +
+        'background:#2d6cdf;color:#fff;font-size:14px;cursor:pointer">Unlock</button>' +
+    '</div>';
+  document.body.appendChild(d);
+  const go = () => {
+    const v = document.getElementById('key-input').value.trim();
+    if (!v) return;
+    setDashKey(v);
+    d.remove();
+    refresh();
+  };
+  document.getElementById('key-go').onclick = go;
+  const inp = document.getElementById('key-input');
+  inp.onkeydown = e => { if (e.key === 'Enter') go(); };
+  inp.focus();
+}
+
 let activeTab = 'users';
 
 function switchTab(name) {
@@ -176,6 +240,8 @@ function pill(online, yes='Online', no='Offline') {
 }
 
 async function refresh() {
+  if (!dashKey()) { showKeyPrompt(false); return; }   // no key yet -> gate before any /api call
+
   try {
     const [stats, users, stations, deps, events] = await Promise.all([
       fetch('/api/stats').then(r => r.json()),

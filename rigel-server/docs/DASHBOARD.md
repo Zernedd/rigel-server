@@ -28,25 +28,49 @@ the internet even if port 3000 were open.
 
 ---
 
-## ⚠ Read this before you expose it
+## Authentication (ENFORCED as of 2026-09-09)
 
-`DashboardAuthPreprocessor.cs:23` currently has:
+`/api/*` on :8080 requires **either** a valid session cookie **or** the admin key header.
+Auth used to be `Enforce = false` with `CHANGE-ME` placeholders, which meant anyone who
+could reach the port controlled the whole fleet. That is fixed:
 
-```csharp
-public static bool Enforce = false;   // capture-first
-const string SessionSecret     = "CHANGE-ME-dashboard-session-secret";
-const string DashboardAdminKey = "CHANGE-ME-dashboard-admin-key";
+- `DashboardAuthPreprocessor.Enforce` now defaults to **on** (`DASHBOARD_AUTH_ENFORCE=0`
+  disables it, for local debugging only).
+- Secrets come from the **environment**, never from source: `DASHBOARD_ADMIN_KEY` and
+  `DASHBOARD_SESSION_SECRET`. If either is unset the server generates a random one at
+  startup and prints it once — it can no longer silently fall back to a placeholder.
+- On the VPS these are set as **machine-level** environment variables, because `install.ps1`
+  only reads `.env` at install time and does not export it to the running service.
+
+The dashboard page prompts for the key on first load, keeps it in `localStorage` for that
+browser only, and sends it as `x-dashboard-key` on every `/api` call (fetch is wrapped once
+rather than at each call site). The key never appears in a URL, so it cannot leak via logs,
+history, or a `Referer`. A 401 re-opens the prompt; **Lock** forgets the key.
+
+Scripts authenticate the same way:
+
+```bash
+curl -H "x-dashboard-key: $DASHBOARD_ADMIN_KEY" https://rigel-dash.wwiggles.org/api/stations
 ```
 
-**Authentication is disabled.** Every `/api/*` call is allowed; it only *logs* what it
-*would* have blocked (`[DASH-AUTH] would-401 …`). Both secrets are literal placeholders.
+## Public endpoint
 
-So **anyone who can reach port 8080 can control your entire fleet** — list/delete
-stations, kick/mute/ban users, grant roles, spin up and tear down servers.
+Reached through the **existing cloudflared tunnel** (`948b07c7-…`), which already fronts
+`rigel-ms` / `rigel` / `rigel-eos`. A fourth hostname was **added** to its ingress — the
+existing rules were not touched:
 
-**Do not open 8080 to the internet until you have done the hardening below.**
+```yaml
+  - hostname: rigel-dash.wwiggles.org
+    service: http://127.0.0.1:8080
+```
 
----
+It needs a DNS CNAME `rigel-dash` → `948b07c7-b3e6-4985-9620-6d8d10711b67.cfargotunnel.com`
+(proxied). `cloudflared tunnel route dns` could not create it — the origin `cert.pem` on the
+box is a 282-byte stub, not a real cert — so add the record in the Cloudflare dashboard.
+
+**Port 8080 is firewalled from the internet** (`Rigel-Block-Dashboard-8080-Inbound`). The
+tunnel reaches it over loopback, so it is unaffected; the only paths in are the tunnel and an
+SSH tunnel.
 
 ## Accessing it safely today (SSH tunnel — recommended)
 
