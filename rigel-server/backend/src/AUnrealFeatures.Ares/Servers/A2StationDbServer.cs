@@ -10,6 +10,7 @@ using AUnrealFeatures.EOSSDK;
 using AUnrealFeatures.EOSSDK.Models;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Text;
@@ -151,33 +152,37 @@ namespace AUnrealFeatures.Ares.Servers
         // The game's dedicated server, once it has -DashboardDeploymentId/-DashboardApiUrl/
         // -DashboardApiKey, fetches GET /v1/deployments/{id}?include_station_config=true and
         // natively applies the returned config's key/value pairs as NetVars — which is how the
-        // BP_Promoboard_* boards (ULiveNetvarImageLoader) get their texture URLs. These keys
-        // are the stationConfig NetVar names the boards read; empty on the baked default, so we
-        // serve them here. Permanent image host (postimg) — no expiry, unlike Discord CDN links
-        // which are signed + time-limited and 404 after ~24h.
-        private const string BoardUrl = "https://i.postimg.cc/zfc7SY91/boards.png";
+        // BP_Promoboard_* boards (ULiveNetvarImageLoader) get their texture URLs.
+        //
+        // [2026-09-09] The hardcoded third-party image host (postimg) is GONE. Board images are now
+        // UPLOADED and served by this backend itself: POST /v1/board/upload writes the file under
+        // BoardUploadDir and stores the resulting self-hosted URL in that station's Config, which
+        // already takes precedence over these defaults (see the TryAdd order in the deployment
+        // handlers — station.Config is added FIRST, so anything uploaded wins).
+        //
+        // These defaults therefore no longer carry any URL. A board with no uploaded image simply
+        // has no NetVar and stays blank, instead of silently pointing every station at an image on
+        // somebody else's server that we do not control and cannot revoke.
+        public static readonly string[] BoardConfigKeys =
+        {
+            "BoardTextureUrl1", "BoardTextureUrl2", "BoardTextureUrl3",
+            "BoardTextureUrl4", "BoardTextureUrl5", "BoardTextureUrl6",
+            "SignPlazaFront", "SignPlazaWest", "SignPlazaEast",
+            "SignComplexWest", "SignComplexEast", "SignComplexBasement",
+            "SignArenaPrime",
+            "statusBoardTKBMainUrl", "statusBoardTKBSidesUrl",
+            "statusBoardTKBBack1Url", "statusBoardTKBBack2Url",
+            "kingsCourtTeamLogosUrl",
+        };
+
+        // Where uploaded board images live on disk, and the max size we accept.
+        private static readonly string BoardUploadDir =
+            Path.Combine(Environment.CurrentDirectory, "boards");
+        private const int MaxBoardBytes = 8 * 1024 * 1024;   // 8 MB
 
         private static readonly Dictionary<string, string> DefaultStationConfig = new()
         {
-            ["StationAnnouncement"]     = "Welcome to Halcyon Ring",
-            ["BoardTextureUrl1"]        = BoardUrl,
-            ["BoardTextureUrl2"]        = BoardUrl,
-            ["BoardTextureUrl3"]        = BoardUrl,
-            ["BoardTextureUrl4"]        = BoardUrl,
-            ["BoardTextureUrl5"]        = BoardUrl,
-            ["BoardTextureUrl6"]        = BoardUrl,
-            ["SignPlazaFront"]          = BoardUrl,
-            ["SignPlazaWest"]           = BoardUrl,
-            ["SignPlazaEast"]           = BoardUrl,
-            ["SignComplexWest"]         = BoardUrl,
-            ["SignComplexEast"]         = BoardUrl,
-            ["SignComplexBasement"]     = BoardUrl,
-            ["SignArenaPrime"]          = BoardUrl,
-            ["statusBoardTKBMainUrl"]   = BoardUrl,
-            ["statusBoardTKBSidesUrl"]  = BoardUrl,
-            ["statusBoardTKBBack1Url"]  = BoardUrl,
-            ["statusBoardTKBBack2Url"]  = BoardUrl,
-            ["kingsCourtTeamLogosUrl"]  = BoardUrl,
+            ["StationAnnouncement"] = "Welcome to Halcyon Ring",
         };
 
         // The server authenticates with this fixed key (launch arg -DashboardApiKey=). Lets
@@ -965,6 +970,141 @@ namespace AUnrealFeatures.Ares.Servers
                 eventCollection!.Delete(ev.Id);
 
             return Results.Ok(new SuccessBoolean { Success = true });
+        }
+
+        // --- BOARD IMAGE UPLOAD ------------------------------------------------------
+        // Replaces the old hardcoded third-party image URL. Upload once, and the image is served
+        // by this backend from the same public origin the client already talks to, so there is no
+        // external host to expire, rate-limit, or go down.
+        //
+        //   POST /v1/board/upload?station_id=<id>&key=<BoardTextureUrl1|SignPlazaFront|...>
+        //   header:  x-api-key: <server master key>
+        //   body:    the raw image bytes (png/jpg/gif/webp)
+        //
+        // Writes boards/<station>_<key>_<n>.<ext>, points that station's Config[key] at
+        // /board/<file>, and returns the URL. Station config already overrides the defaults (the
+        // deployment handlers TryAdd station.Config FIRST), so the board picks it up on the game
+        // server's next deployment-config fetch.
+        //
+        // The public base URL matters: the Quest client fetches these directly, so it must be the
+        // externally reachable origin, not 127.0.0.1. Taken from BOARD_PUBLIC_BASE when set, else
+        // derived from the request's own Host header (correct whenever the upload came in through
+        // the same public hostname the clients use).
+        [HttpPost("/v1/board/upload")]
+        public Task<IHttpActionResult> UploadBoardImage(IHttpRequest request, IHttpResponse response)
+        {
+            if (request.GetHeaderValue("x-api-key") != ServerMasterKey)
+                return Task.FromResult<IHttpActionResult>(Results.Unauthorized(new SuccessBoolean { Success = false }));
+
+            string stationId = request.GetQueryParameter("station_id", "") ?? "";
+            string key       = request.GetQueryParameter("key", "") ?? "";
+            if (string.IsNullOrWhiteSpace(stationId) || string.IsNullOrWhiteSpace(key))
+                return Task.FromResult<IHttpActionResult>(Results.BadRequest(new { error = "station_id and key are required" }));
+            if (Array.IndexOf(BoardConfigKeys, key) < 0)
+                return Task.FromResult<IHttpActionResult>(Results.BadRequest(new { error = "unknown board key", allowed = BoardConfigKeys }));
+
+            byte[] body = request.Body ?? Array.Empty<byte>();
+            if (body.Length == 0)
+                return Task.FromResult<IHttpActionResult>(Results.BadRequest(new { error = "empty body" }));
+            if (body.Length > MaxBoardBytes)
+                return Task.FromResult<IHttpActionResult>(Results.BadRequest(new { error = "image too large", maxBytes = MaxBoardBytes }));
+
+            // Sniff the real format from magic bytes rather than trusting a caller-supplied
+            // extension -- that is what decides the filename we later serve it back under.
+            string ext = SniffImageExtension(body);
+            if (ext == null)
+                return Task.FromResult<IHttpActionResult>(Results.BadRequest(new { error = "not a png/jpg/gif/webp image" }));
+
+            var stationCollection = Program.Database.GetCollection<StationDbObject>(true);
+            var station = stationCollection?.FindOne(s => s.StationId == stationId);
+            if (station == null)
+                return Task.FromResult<IHttpActionResult>(Results.NotFound(new { error = "no such station", station_id = stationId }));
+
+            Directory.CreateDirectory(BoardUploadDir);
+            // Cache-busting suffix: boards are fetched by URL, so reusing a filename would leave
+            // clients showing the previous image out of their own HTTP cache.
+            string safeStation = SanitiseForFileName(stationId);
+            string fileName = $"{safeStation}_{key}_{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}.{ext}";
+            string fullPath = Path.Combine(BoardUploadDir, fileName);
+
+            // Drop this station+key's previous uploads so the folder cannot grow without bound.
+            try
+            {
+                foreach (var stale in Directory.GetFiles(BoardUploadDir, $"{safeStation}_{key}_*"))
+                    File.Delete(stale);
+            }
+            catch (Exception ex) { Logger.Warning($"board upload: could not clear old files: {ex.Message}"); }
+
+            File.WriteAllBytes(fullPath, body);
+
+            string baseUrl = (Environment.GetEnvironmentVariable("BOARD_PUBLIC_BASE") ?? "").TrimEnd('/');
+            if (string.IsNullOrWhiteSpace(baseUrl))
+                baseUrl = $"https://{request.Host}";
+            string url = $"{baseUrl}/board/{fileName}";
+
+            station.Config[key] = url;
+            stationCollection?.Update(station);
+
+            Logger.Information($"board upload: station={stationId} key={key} bytes={body.Length} -> {url}");
+            return Task.FromResult<IHttpActionResult>(Results.Ok(new { success = true, key, url, bytes = body.Length }));
+        }
+
+        // GET /board/{file} -- serve an uploaded board image.
+        [HttpGet("/board/{file}")]
+        public Task<IHttpActionResult> GetBoardImage(IHttpRequest request, IHttpResponse response, string file)
+        {
+            // Path-traversal guard: only ever serve a bare filename out of the upload directory.
+            if (string.IsNullOrWhiteSpace(file) || file.Contains("..") ||
+                file.Contains('/') || file.Contains('\\') || Path.IsPathRooted(file))
+                return Task.FromResult<IHttpActionResult>(Results.NotFound());
+
+            string fullPath = Path.Combine(BoardUploadDir, file);
+            if (!File.Exists(fullPath))
+                return Task.FromResult<IHttpActionResult>(Results.NotFound());
+
+            // Results.Ok() REPLACES whatever was written onto `response`, which served an empty
+            // text/plain body. Results.Configurable(status, mime, bytes) is how this framework
+            // returns a raw file -- it is what HttpStaticFilesProcessor uses.
+            string mime = Path.GetExtension(file).ToLowerInvariant() switch
+            {
+                ".png"  => "image/png",
+                ".jpg"  => "image/jpeg",
+                ".gif"  => "image/gif",
+                ".webp" => "image/webp",
+                _       => "application/octet-stream",
+            };
+            return Task.FromResult<IHttpActionResult>(
+                Results.Configurable(HttpStatusCode.OK, mime, File.ReadAllBytes(fullPath)));
+        }
+
+        // GET /v1/board/keys -- the uploadable board slots, for the dashboard UI to render.
+        [HttpGet("/v1/board/keys")]
+        public Task<IHttpActionResult> GetBoardKeys(IHttpRequest request, IHttpResponse response)
+            => Task.FromResult<IHttpActionResult>(Results.Ok(BoardConfigKeys));
+
+        // Identify the image type from its magic bytes. Returns null if it is not one we accept.
+        private static string SniffImageExtension(byte[] b)
+        {
+            if (b.Length >= 8  && b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47) return "png";
+            if (b.Length >= 3  && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF)                 return "jpg";
+            if (b.Length >= 6  && b[0] == 0x47 && b[1] == 0x49 && b[2] == 0x46)                 return "gif";
+            if (b.Length >= 12 && b[0] == 0x52 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x46
+                               && b[8] == 0x57 && b[9] == 0x45 && b[10] == 0x42 && b[11] == 0x50) return "webp";
+            return null;
+        }
+
+        // Shared with DashboardServer, which handles the browser-side upload on :8080 while this
+        // server keeps GET /board/{file} for public serving. Same process, same folder, same DB.
+        public static string BoardUploadDirPublic => BoardUploadDir;
+        public static string SniffImageExtensionPublic(byte[] b) => SniffImageExtension(b);
+        public static string SanitiseForFileNamePublic(string s) => SanitiseForFileName(s);
+
+        private static string SanitiseForFileName(string s)
+        {
+            var sb = new StringBuilder(s.Length);
+            foreach (char c in s)
+                sb.Append(char.IsLetterOrDigit(c) ? c : '-');
+            return sb.ToString();
         }
 
         // GET /stations/{station_id}/config

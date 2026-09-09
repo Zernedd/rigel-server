@@ -8678,8 +8678,12 @@ static void ProfDump()
     }
     buf[off] = 0;
     const long wk = InterlockedExchange(&g_walks, 0);
-    HxLog("[HalcyonA2][PROF] dll=%.1fms/s (%.1f%% of wall) walks/s=%ld rebuilds/s=%ld epoch=%ld objN=%ld [%s]\n",
-          totMs, (totMs / wallMs) * 100.0, wk, InterlockedExchange(&g_rebuilds, 0), (long)g_cacheEpoch, (long)g_objN, buf);
+    HxLog("[HalcyonA2][PROF] dll=%.1fms/s (%.1f%% of wall) walks/s=%ld rebuilds/s=%ld epoch=%ld objN=%ld gtc[live=%d ticked=%ld skipStopped=%ld] [%s]\n",
+          totMs, (totMs / wallMs) * 100.0, wk, InterlockedExchange(&g_rebuilds, 0), (long)g_cacheEpoch, (long)g_objN,
+          // [SCRAPRUN EVIDENCE] skipStopped counts GameTimeComponents our ticker DECLINED to drive
+          // because ClockStartedAt <= 0. If it climbs, stale/stopped timers were being driven every
+          // frame before the gate -- the spurious-OnCountdownEnd mechanism, observable while IDLE.
+          (int)g_gameTimers.size(), g_gtcTicked, g_gtcSkipStopped, buf);
 }
 // ====================================================================================
 

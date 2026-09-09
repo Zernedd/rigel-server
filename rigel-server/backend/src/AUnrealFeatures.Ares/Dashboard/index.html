@@ -71,6 +71,7 @@
     <button class="tab" onclick="switchTab('stations')">Stations</button>
     <button class="tab" onclick="switchTab('deployments')">Deployments</button>
     <button class="tab" onclick="switchTab('events')">Events</button>
+    <button class="tab" onclick="switchTab('boards')">Boards</button>
   </div>
 
   <!-- Users -->
@@ -123,6 +124,30 @@
       </table>
     </div>
   </div>
+
+  <!-- Boards: upload the district info-board / sign images. Replaces the old hardcoded
+       third-party image URL - images are stored and served by this backend itself. -->
+  <div class="panel" id="panel-boards">
+    <div style="margin:0 0 14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <label for="board-station" style="font-size:13px;opacity:.75">Station</label>
+      <select id="board-station" onchange="loadBoards()"
+              style="padding:7px 10px;border-radius:6px;border:1px solid #333;background:#141414;color:inherit;min-width:230px"></select>
+      <span id="board-msg" style="font-size:13px;opacity:.8"></span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th style="width:220px">Board</th><th style="width:90px">Preview</th><th>Current image</th><th style="width:230px">Replace</th>
+        </tr></thead>
+        <tbody id="tbl-boards"><tr><td colspan="4" class="empty">Pick a station...</td></tr></tbody>
+      </table>
+    </div>
+    <p style="font-size:12px;opacity:.6;margin-top:12px;line-height:1.6">
+      PNG / JPG / GIF / WebP, up to 8&nbsp;MB. The image is stored on this server and served from the
+      public station URL, so there is no external image host that can expire or go down.
+      The board updates on the game server's next config fetch &mdash; a blank slot leaves that board empty.
+    </p>
+  </div>
 </main>
 
 <script>
@@ -130,6 +155,7 @@ let activeTab = 'users';
 
 function switchTab(name) {
   activeTab = name;
+  if (name === 'boards') { loadBoardStations().then(loadBoards); }
   document.querySelectorAll('.tab').forEach((t, i) => {
     const tabs = ['users','stations','deployments','events'];
     t.classList.toggle('active', tabs[i] === name);
@@ -228,6 +254,72 @@ async function refresh() {
     document.getElementById('status').textContent = 'ERROR';
     document.getElementById('status').style.background = '#da3633';
   }
+}
+
+let boardKeys = [];
+
+async function loadBoardStations() {
+  const sel = document.getElementById('board-station');
+  if (sel.options.length) return;
+  const stations = await fetch('/api/stations').then(r => r.json()).catch(() => []);
+  // the API wraps the array as {"value":[...]} -- accept that, a bare array, or {stations:[]}
+  const list = Array.isArray(stations) ? stations : (stations.value || stations.stations || []);
+  sel.innerHTML = list.map(s => {
+    const id = s.station_id || s.StationId || s.id;
+    const nm = s.station_name || s.name || s.Name || id;
+    return `<option value="${id}">${nm} (${id})</option>`;
+  }).join('') || '<option value="">no stations</option>';
+}
+
+async function loadBoards() {
+  const sel = document.getElementById('board-station');
+  const stationId = sel.value;
+  const body = document.getElementById('tbl-boards');
+  if (!stationId) { body.innerHTML = '<tr><td colspan="4" class="empty">No station selected</td></tr>'; return; }
+
+  if (!boardKeys.length)
+    boardKeys = await fetch('/api/board/keys').then(r => r.json()).catch(() => []);
+  const cur = await fetch(`/api/stations/${stationId}/board`).then(r => r.json()).catch(() => ({}));
+
+  body.innerHTML = boardKeys.map(k => {
+    const url = cur[k] || '';
+    // cache-bust the preview so a just-uploaded image is not masked by the browser cache
+    const prev = url ? `<img src="${url}?t=${Date.now()}" style="height:34px;border-radius:4px;border:1px solid #333">` : '<span class="empty">-</span>';
+    const shown = url ? `<a href="${url}" target="_blank" style="color:#6cf;word-break:break-all;font-size:12px">${url}</a>` : '<span class="empty">not set</span>';
+    return `<tr>
+      <td style="font-family:monospace;font-size:12px">${k}</td>
+      <td>${prev}</td>
+      <td>${shown}</td>
+      <td>
+        <input type="file" accept="image/*" style="width:150px;font-size:11px"
+               onchange="uploadBoard('${stationId}','${k}',this)">
+        ${url ? `<button onclick="clearBoard('${stationId}','${k}')" style="margin-left:4px;font-size:11px;cursor:pointer">clear</button>` : ''}
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+async function uploadBoard(stationId, key, input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  const msg = document.getElementById('board-msg');
+  msg.textContent = `Uploading ${key}...`;
+  try {
+    // raw bytes, not multipart - the endpoint sniffs the format from the magic bytes
+    const res = await fetch(`/api/stations/${stationId}/board?key=${encodeURIComponent(key)}`,
+                            { method: 'POST', body: file });
+    const j = await res.json();
+    msg.textContent = res.ok && j.success ? `${key} updated` : `Failed: ${j.error || res.status}`;
+  } catch (e) {
+    msg.textContent = 'Upload failed: ' + e;
+  }
+  loadBoards();
+}
+
+async function clearBoard(stationId, key) {
+  await fetch(`/api/stations/${stationId}/board?key=${encodeURIComponent(key)}`, { method: 'DELETE' });
+  document.getElementById('board-msg').textContent = `${key} cleared`;
+  loadBoards();
 }
 
 async function setAdmin(userId, grant) {

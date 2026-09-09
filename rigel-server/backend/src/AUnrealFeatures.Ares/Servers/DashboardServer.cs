@@ -201,6 +201,95 @@ public sealed class AresDashboardServer : AstraHttpServer, IAresDashboardServer
         return Results.Ok(new DashboardActionResult { Success = true });
     }
 
+    // --- BOARD IMAGE UPLOAD (dashboard side) --------------------------------------
+    // The dashboard page is served on :8080 while the board images must be SERVED from the
+    // publicly reachable StationDb origin on :78 (that is what the Quest client fetches). Both
+    // servers run in the SAME process against the same LiteDB and the same boards/ folder, so the
+    // upload is handled here -- no cross-origin request from the browser, and no API key has to be
+    // embedded in the page -- while A2StationDbServer keeps GET /board/{file} for public serving.
+    //
+    //   POST /api/stations/{station_id}/board?key=<BoardTextureUrl1|SignPlazaFront|...>
+    //   body: raw image bytes (png/jpg/gif/webp)
+    //
+    // The stored URL must be the EXTERNAL origin, since the headset resolves it, not this browser.
+    // BOARD_PUBLIC_BASE sets it; it falls back to the known public StationDb hostname.
+    [HttpPost("/api/stations/{station_id}/board")]
+    public Task<IHttpActionResult> UploadStationBoard(IHttpRequest request, IHttpResponse response, string station_id)
+    {
+        string key = request.GetQueryParameter("key", "") ?? "";
+        if (Array.IndexOf(A2StationDbServer.BoardConfigKeys, key) < 0)
+            return Task.FromResult<IHttpActionResult>(Results.BadRequest(new { error = "unknown board key", allowed = A2StationDbServer.BoardConfigKeys }));
+
+        byte[] body = request.Body ?? Array.Empty<byte>();
+        if (body.Length == 0)
+            return Task.FromResult<IHttpActionResult>(Results.BadRequest(new { error = "empty body" }));
+        if (body.Length > 8 * 1024 * 1024)
+            return Task.FromResult<IHttpActionResult>(Results.BadRequest(new { error = "image too large (max 8MB)" }));
+
+        string ext = A2StationDbServer.SniffImageExtensionPublic(body);
+        if (ext == null)
+            return Task.FromResult<IHttpActionResult>(Results.BadRequest(new { error = "not a png/jpg/gif/webp image" }));
+
+        var stationCollection = Program.Database.GetCollection<StationDbObject>(true);
+        var station = stationCollection?.FindOne(s => s.StationId == station_id);
+        if (station == null)
+            return Task.FromResult<IHttpActionResult>(Results.NotFound(new { error = "no such station", station_id }));
+
+        string dir = A2StationDbServer.BoardUploadDirPublic;
+        Directory.CreateDirectory(dir);
+        string safeStation = A2StationDbServer.SanitiseForFileNamePublic(station_id);
+        string fileName = $"{safeStation}_{key}_{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}.{ext}";
+
+        try
+        {
+            foreach (var stale in Directory.GetFiles(dir, $"{safeStation}_{key}_*"))
+                File.Delete(stale);
+        }
+        catch { /* a leftover file is harmless; never fail the upload over cleanup */ }
+
+        File.WriteAllBytes(Path.Combine(dir, fileName), body);
+
+        string baseUrl = (Environment.GetEnvironmentVariable("BOARD_PUBLIC_BASE") ?? "").TrimEnd('/');
+        if (string.IsNullOrWhiteSpace(baseUrl))
+            baseUrl = "https://rigel.wwiggles.org";
+        string url = $"{baseUrl}/board/{fileName}";
+
+        station.Config[key] = url;
+        stationCollection?.Update(station);
+
+        return Task.FromResult<IHttpActionResult>(Results.Ok(new { success = true, key, url, bytes = body.Length }));
+    }
+
+    // GET /api/board/keys -- the uploadable slots, so the page can render one row per board.
+    [HttpGet("/api/board/keys")]
+    public Task<IHttpActionResult> BoardKeys(IHttpRequest request, IHttpResponse response)
+        => Task.FromResult<IHttpActionResult>(Results.Ok(A2StationDbServer.BoardConfigKeys));
+
+    // GET /api/stations/{station_id}/board -- current board URLs for this station.
+    [HttpGet("/api/stations/{station_id}/board")]
+    public Task<IHttpActionResult> GetStationBoard(IHttpRequest request, IHttpResponse response, string station_id)
+    {
+        var stationCollection = Program.Database.GetCollection<StationDbObject>(true);
+        var station = stationCollection?.FindOne(s => s.StationId == station_id);
+        var result = new Dictionary<string, string>();
+        foreach (var k in A2StationDbServer.BoardConfigKeys)
+            result[k] = (station != null && station.Config.TryGetValue(k, out var v)) ? v : "";
+        return Task.FromResult<IHttpActionResult>(Results.Ok(result));
+    }
+
+    // DELETE /api/stations/{station_id}/board?key=... -- clear one board back to blank.
+    [HttpDelete("/api/stations/{station_id}/board")]
+    public Task<IHttpActionResult> ClearStationBoard(IHttpRequest request, IHttpResponse response, string station_id)
+    {
+        string key = request.GetQueryParameter("key", "") ?? "";
+        var stationCollection = Program.Database.GetCollection<StationDbObject>(true);
+        var station = stationCollection?.FindOne(s => s.StationId == station_id);
+        if (station == null) return Task.FromResult<IHttpActionResult>(Results.NotFound());
+        station.Config.Remove(key);
+        stationCollection?.Update(station);
+        return Task.FromResult<IHttpActionResult>(Results.Ok(new { success = true, key }));
+    }
+
     [HttpGet("/api/stations")]
     public async Task<IHttpActionResult> GetStations(IHttpRequest request, IHttpResponse response)
     {
