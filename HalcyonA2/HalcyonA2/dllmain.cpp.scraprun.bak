@@ -426,9 +426,6 @@ static UpdGameState_t UpdGameState_Orig = nullptr;
 // out to be needed, upgrade to broadcasting the GameTimer onCountdownEnd delegate instead.
 static std::unordered_map<void*, unsigned long long> g_gameBeginAt;   // GSM -> GetTickCount64() at GAME_BEGIN entry
 static bool g_endTriggerFired = false;   // deathrun finish->overtime latch; re-armed at each GAME_BEGIN (see DetectRunnerAtFinish)
-// [SCRAPRUN] defined after g_gameTimers; dumps every learned clock when a match ENDS, so the
-// next 50/50 auto-end is captured with the timer state that caused it.
-static void DumpGameTimersOnEnd(unsigned char newState);
 static __int64 __fastcall UpdGameState_Hook(void* self, unsigned char newState)
 {
     static const char* const kNm[] = {
@@ -437,10 +434,6 @@ static __int64 __fastcall UpdGameState_Hook(void* self, unsigned char newState)
         "OVERTIME_COUNTDOWN","OVERTIME_RUNNING","BEGIN_PLAY" };
     const char* s = (newState < 15) ? kNm[newState] : "?";
     printf("[HalcyonA2][GSMSTATE] mgr=%p -> %u (%s)\n", self, static_cast<unsigned>(newState), s);
-    // 0 NOT_RUNNING / 6 TEAM_SCORED_ENTER / 7 TEAM_SCORED / 10 GAME_EXIT are the ways a match ends.
-    // Capture what every learned clock looked like at that instant.
-    if (newState == 0 || newState == 6 || newState == 7 || newState == 10)
-        DumpGameTimersOnEnd(newState);
     if (newState == 3)                    // entered GAME_BEGIN -> arm the countdown watchdog
     {
         g_gameBeginAt[self] = GetTickCount64();
@@ -486,28 +479,6 @@ using StartTimerCd_t = __int64 (__fastcall*)(void*, double);
 using GtcTick_t      = void (__fastcall*)(void*);
 static StartTimerCd_t StartTimerCd_Orig = nullptr;
 static std::unordered_set<void*> g_gameTimers;             // live UGameTimeComponent instances to drive
-// [2026-09-09 *** SCRAPRUN 50/50 AUTO-END] UGameTimeComponent field offsets (SDK 22284,
-// A2_classes.hpp:2155): ClockStartedAt@0x478, IsMainCountdown@0x488, IsSecondaryCountdown@0x489,
-// ClockEndLength@0x490, ClockPunishment@0x4B0, OnCountdownEnd@0x520.
-//
-// Why this matters: we drive TickComponent from OUR ProcessEvent dispatch, which is a DIFFERENT
-// point in the frame than the engine's own component tick. ScrapRun restarts a timer when a player
-// dies/respawns. If we tick in the window where ClockStartedAt has been rewritten but the rest of
-// the clock fields have not, the computed remaining momentarily reads <= 0 and TickComponent
-// broadcasts OnCountdownEnd -> the Luau conductor takes countdownFinishedDirections[currentState]
-// -> the match ends. Whether we land inside that window is a coin flip, which is exactly the
-// reported "50/50 chance the gamemode auto-ends on respawn".
-//
-// The set also only ever dropped entries on a vtable mismatch, so STOPPED timers were driven
-// forever -- a second way to fire a spurious countdown end.
-static const uintptr_t GTC_ClockStartedAt = 0x478;
-static const uintptr_t GTC_IsMainCd       = 0x488;
-static const uintptr_t GTC_IsSecondaryCd  = 0x489;
-static const uintptr_t GTC_ClockEndLength = 0x490;
-static bool g_gateTimers = true;            // -NoTimerGate restores the old drive-everything behaviour
-static volatile long g_gtcTicked = 0;
-static volatile long g_gtcSkipStopped = 0;  // ClockStartedAt <= 0 -> timer is not running
-
 static __int64 __fastcall StartTimerCd_Hook(void* self, double lenMs)
 {
     if (self && g_gameTimers.insert(self).second)
@@ -531,60 +502,11 @@ static void TickGameTimers()
             it = g_gameTimers.erase(it);
             continue;
         }
-        // [SCRAPRUN FIX] Only drive a timer that is actually running. A component whose
-        // ClockStartedAt is <= 0 has been reset/stopped; ticking it can only produce a spurious
-        // OnCountdownEnd, never useful progress. This deliberately does NOT gate on
-        // IsMainCountdown, because the main match clock counts UP with that flag clear and still
-        // needs driving -- gating on it would stop the match from ever ending on time.
-        if (g_gateTimers)
-        {
-            const uintptr_t c = reinterpret_cast<uintptr_t>(inst);
-            const double startedAt = *reinterpret_cast<double*>(c + GTC_ClockStartedAt);
-            if (!(startedAt > 0.0))
-            {
-                InterlockedIncrement(&g_gtcSkipStopped);
-                ++it;
-                continue;
-            }
-        }
         tick(inst);
-        InterlockedIncrement(&g_gtcTicked);
         ++it;
     }
 }
 static void SafeTickGameTimers() { __try { TickGameTimers(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
-
-// [SCRAPRUN 50/50 AUTO-END EVIDENCE] When the conductor leaves RUNNING for an end state, print every
-// learned UGameTimeComponent. If an auto-end on respawn is caused by a spurious OnCountdownEnd, the
-// culprit clock shows up here with a just-reset ClockStartedAt and/or an elapsed that has only barely
-// crossed ClockEndLength. ticked/skipStopped say whether the new gate is doing anything.
-// SEH cannot coexist with C++ object unwinding in one frame (C2712), and the range-for below builds
-// iterators -- so the __try lives in the wrapper, exactly like SafeTickGameTimers.
-static void DumpGameTimersOnEndImpl(unsigned char newState)
-{
-    {
-        const uintptr_t base = GetBase();
-        void* const gtcVft = reinterpret_cast<void*>(base + GtcVft_RVA);
-        printf("[HalcyonA2][SCRAPEND] state->%u  timers=%d  ticked=%ld skipStopped=%ld (gate=%d)\n",
-               static_cast<unsigned>(newState), static_cast<int>(g_gameTimers.size()),
-               g_gtcTicked, g_gtcSkipStopped, static_cast<int>(g_gateTimers));
-        for (auto* inst : g_gameTimers)
-        {
-            if (!inst || *reinterpret_cast<void**>(inst) != gtcVft) continue;
-            const uintptr_t c = reinterpret_cast<uintptr_t>(inst);
-            printf("[HalcyonA2][SCRAPEND]   gtc=%p startedAt=%.3f endLen=%.3f mainCd=%d secCd=%d\n",
-                   inst,
-                   *reinterpret_cast<double*>(c + GTC_ClockStartedAt),
-                   *reinterpret_cast<double*>(c + GTC_ClockEndLength),
-                   (int)*reinterpret_cast<unsigned char*>(c + GTC_IsMainCd),
-                   (int)*reinterpret_cast<unsigned char*>(c + GTC_IsSecondaryCd));
-        }
-    }
-}
-static void DumpGameTimersOnEnd(unsigned char newState)
-{
-    __try { DumpGameTimersOnEndImpl(newState); } __except (EXCEPTION_EXECUTE_HANDLER) {}
-}
 
 // ★ THE GC-FLOOD FIX. sub_7FF6732AF4C0 (RVA 0x124F4C0) is a GC reference-batch COMPACTOR: it reads
 // ctx->count @+0x3C0 entries from the inline batch buffer @+0x3C8, compacts the live ones into +0x508,
@@ -2077,9 +1999,6 @@ static bool        g_pingStampEnabled = true;   // console-toggleable A/B switch
 static std::unordered_map<void*, float> g_lastGoodPing;
 static constexpr float kPingFloorMs = 100.0f;
 static volatile long g_ingestPingFixes = 0;   // [SNAPFIX] # of incoming pose RPCs whose Ping we corrected 0->ping (1Hz census)
-// [DORM] how many VRPawns we had to pull out of net dormancy, and how many needed an explicit flush.
-static long g_dormFixed   = 0;
-static long g_dormFlushed = 0;
 
 // TEAM-COLOR STAMP FIX (mirrors the ping fix). Server_SetCurrentColor writes the Mass fragment, but
 // the fragment->replicated-copy sync only carries pose (FrequentData), NOT the color, so the entity's
@@ -2440,45 +2359,6 @@ static void WireVRPawnBallSimManagers()
             *reinterpret_cast<float*>(p + 0x178) = 100.0f;    // NetUpdateFrequency — target 100Hz
             *reinterpret_cast<float*>(p + 0x17C) = 100.0f;    // MinNetUpdateFrequency — pin it (defeat adaptive down-throttle)
             *reinterpret_cast<float*>(p + 0x180) = 10.0f;     // NetPriority — win the actor budget over static objects
-
-            // [2026-09-09 *** THE "1 POS UPDATE/SEC" LAG STATE] AActor::NetDormancy @0x159
-            // (ENetDormancy, SDK 22284 Engine_classes.hpp:1121 / Engine_structs.hpp:1848:
-            //  DORM_Never=0, DORM_Awake=1, DORM_DormantAll=2, DORM_DormantPartial=3, DORM_Initial=4).
-            //
-            // A DORMANT actor is skipped by the replication driver entirely until something dirties it
-            // and calls FlushNetDormancy. A player pawn that goes dormant therefore stops sending pose
-            // updates and only trickles out the occasional forced update -- which is exactly the reported
-            // "player is only sending 1 pos upd/s". It also explains the reported WORKAROUND precisely:
-            // GRABBING the stuck player writes a replicated property on their pawn, which flushes
-            // dormancy and wakes replication back up. That is a dormancy symptom, not a bandwidth one
-            // (bandwidth was already measured and cleared: [NETRATE] showed caps at 500000, raised=0).
-            //
-            // We set every other net knob on these pawns but never touched this one. Pin it to DORM_Never
-            // so a player pawn can never be put to sleep in the first place.
-            unsigned char& dorm = *reinterpret_cast<unsigned char*>(p + 0x159);
-            if (dorm != 0)
-            {
-                const unsigned char was = dorm;
-                dorm = 0;                                     // DORM_Never
-                ++g_dormFixed;
-                // Writing the field does NOT by itself wake an actor the connection has already filed
-                // as dormant -- that needs FlushNetDormancy(). Call it so a player already stuck in the
-                // laggy state recovers without needing someone to grab them.
-                if (was == 2 || was == 3 || was == 4)
-                {
-                    static SDK::UFunction* fnFlush = nullptr;
-                    if (!fnFlush)
-                        if (SDK::UClass* ac = SDK::UObject::FindClassFast("Actor"))
-                            fnFlush = ac->GetFunction("Actor", "FlushNetDormancy");
-                    if (fnFlush)
-                    {
-                        o->ProcessEvent(fnFlush, nullptr);
-                        ++g_dormFlushed;
-                    }
-                    HxLog("[HalcyonA2][DORM] %s NetDormancy %u -> DORM_Never + FlushNetDormancy "
-                          "(this pawn was the 1-update/s lag state)\n", o->GetName().c_str(), was);
-                }
-            }
         }
 
         void** ref = reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(o) + 0x1B38);
@@ -10187,7 +10067,6 @@ static void Main(HMODULE)
         if (wcsstr(GetCommandLineW(), L"-HoldAuthority")) { g_holdAuthority = true; HxLog("[HalcyonA2] -HoldAuthority: held/streamed balls pinned to the client stream every frame (anti-teleport)\n"); }
         if (wcsstr(GetCommandLineW(), L"-NoBallOwnArb")) { g_ballOwnArb = false; HxLog("[HalcyonA2] -NoBallOwnArb: ball ownership arbitration OFF (legacy force-accept, last writer wins)\n"); }
         if (wcsstr(GetCommandLineW(), L"-NoRestCurveFix")) { g_fixRestCurve = false; HxLog("[HalcyonA2] -NoRestCurveFix: will NOT restore a missing hand-speed restitution curve\n"); }
-        if (wcsstr(GetCommandLineW(), L"-NoTimerGate")) { g_gateTimers = false; HxLog("[HalcyonA2] -NoTimerGate: driving ALL learned game timers again (pre-ScrapRun-fix behaviour)\n"); }
         if (const wchar_t* sd = wcsstr(GetCommandLineW(), L"-SimDelay="))
         {
             const int v = _wtoi(sd + wcslen(L"-SimDelay="));

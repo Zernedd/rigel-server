@@ -2077,9 +2077,6 @@ static bool        g_pingStampEnabled = true;   // console-toggleable A/B switch
 static std::unordered_map<void*, float> g_lastGoodPing;
 static constexpr float kPingFloorMs = 100.0f;
 static volatile long g_ingestPingFixes = 0;   // [SNAPFIX] # of incoming pose RPCs whose Ping we corrected 0->ping (1Hz census)
-// [DORM] how many VRPawns we had to pull out of net dormancy, and how many needed an explicit flush.
-static long g_dormFixed   = 0;
-static long g_dormFlushed = 0;
 
 // TEAM-COLOR STAMP FIX (mirrors the ping fix). Server_SetCurrentColor writes the Mass fragment, but
 // the fragment->replicated-copy sync only carries pose (FrequentData), NOT the color, so the entity's
@@ -2440,45 +2437,6 @@ static void WireVRPawnBallSimManagers()
             *reinterpret_cast<float*>(p + 0x178) = 100.0f;    // NetUpdateFrequency — target 100Hz
             *reinterpret_cast<float*>(p + 0x17C) = 100.0f;    // MinNetUpdateFrequency — pin it (defeat adaptive down-throttle)
             *reinterpret_cast<float*>(p + 0x180) = 10.0f;     // NetPriority — win the actor budget over static objects
-
-            // [2026-09-09 *** THE "1 POS UPDATE/SEC" LAG STATE] AActor::NetDormancy @0x159
-            // (ENetDormancy, SDK 22284 Engine_classes.hpp:1121 / Engine_structs.hpp:1848:
-            //  DORM_Never=0, DORM_Awake=1, DORM_DormantAll=2, DORM_DormantPartial=3, DORM_Initial=4).
-            //
-            // A DORMANT actor is skipped by the replication driver entirely until something dirties it
-            // and calls FlushNetDormancy. A player pawn that goes dormant therefore stops sending pose
-            // updates and only trickles out the occasional forced update -- which is exactly the reported
-            // "player is only sending 1 pos upd/s". It also explains the reported WORKAROUND precisely:
-            // GRABBING the stuck player writes a replicated property on their pawn, which flushes
-            // dormancy and wakes replication back up. That is a dormancy symptom, not a bandwidth one
-            // (bandwidth was already measured and cleared: [NETRATE] showed caps at 500000, raised=0).
-            //
-            // We set every other net knob on these pawns but never touched this one. Pin it to DORM_Never
-            // so a player pawn can never be put to sleep in the first place.
-            unsigned char& dorm = *reinterpret_cast<unsigned char*>(p + 0x159);
-            if (dorm != 0)
-            {
-                const unsigned char was = dorm;
-                dorm = 0;                                     // DORM_Never
-                ++g_dormFixed;
-                // Writing the field does NOT by itself wake an actor the connection has already filed
-                // as dormant -- that needs FlushNetDormancy(). Call it so a player already stuck in the
-                // laggy state recovers without needing someone to grab them.
-                if (was == 2 || was == 3 || was == 4)
-                {
-                    static SDK::UFunction* fnFlush = nullptr;
-                    if (!fnFlush)
-                        if (SDK::UClass* ac = SDK::UObject::FindClassFast("Actor"))
-                            fnFlush = ac->GetFunction("Actor", "FlushNetDormancy");
-                    if (fnFlush)
-                    {
-                        o->ProcessEvent(fnFlush, nullptr);
-                        ++g_dormFlushed;
-                    }
-                    HxLog("[HalcyonA2][DORM] %s NetDormancy %u -> DORM_Never + FlushNetDormancy "
-                          "(this pawn was the 1-update/s lag state)\n", o->GetName().c_str(), was);
-                }
-            }
         }
 
         void** ref = reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(o) + 0x1B38);
