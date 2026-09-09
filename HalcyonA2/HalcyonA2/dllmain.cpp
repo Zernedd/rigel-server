@@ -5584,6 +5584,182 @@ static void DetectRunnerAtFinish()
 }
 static void SafeDetectRunnerAtFinish() { __try { DetectRunnerAtFinish(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
 
+// [2026-09-09 *** SCRAPRUN: PLAYERS NEVER JOIN A TEAM] ------------------------------------------
+// Root cause read from the game's own source, extracted from A2-Windows.pak
+// (A2/Content/LevelDefinitions/deathrun2_a2level/Scripts/gamemode.luau):
+//
+//     function PlayerLeftTeam(teamSize: number, teamIndex: number): ()
+//         if (currentState == State.RUNNING or currentState == State.OVERTIME_RUNNING) then
+//             if (teamSize == 0) then           -- the team is now EMPTY
+//                 SwitchState(State.GAME_EXIT)  -- END THE MATCH
+//     RunnerTeamChanger.teamSizeDecreased.Listen(PlayerLeftTeam)
+//
+// So a round ends when a team roster hits ZERO -- the intended "all runners are dead" rule. The
+// gamemode is fine. The problem is that the roster is EMPTY here, so the first death ends it.
+//
+// Players join a team by ENTERING THE TEAM-CHANGER VOLUME. deathrun2_a2level/level.json:
+//     TeamChanger        teamIndex 0 (Runners)    teamMaxSize 20
+//     TeamChanger_Copy   teamIndex 1 (Scrappers)  teamMaxSize 4
+// Our headless server never detects that overlap -- the documented pawn-collision problem: the real
+// pose lives on AVRPawn.Entity@0x928, not the pawn actor root, so the engine's own overlap never
+// fires. Identical to the deathrun finish trigger.
+//
+// FIRST ATTEMPT FAILED AND BROKE CLIENT JOINS: calling
+// UTeamChangeComponent::HandleFiringSwitcherOverlapOnServer(PlayerIndex) directly never grew the
+// roster (TeamSize@0x4DC stayed 0) and stopped clients connecting -- ONE call every 2s was enough.
+// That function evidently needs overlap context we were not supplying.
+//
+// THIS approach instead reuses the pattern already proven in this file for the finish trigger:
+// detect the player geometrically, then fire the REAL overlap entry point
+// (UPhysicalComponent::OverlapBegin_Implementation, RVA 0x53B2B20) so the game's genuine team-change
+// path runs exactly as it would from a real volume touch.
+//
+// Fires ON ENTER ONLY, latched per player, like a real overlap -- never continuously. That latch is
+// the specific guard against the runaway that broke joins last time.
+static bool  g_teamOverlap = false;          // -TeamOverlap to enable
+static double g_teamRadius = 450.0;          // -TeamRadius=N
+static ULONGLONG g_lastTeamScan = 0;
+static long   g_teamOverlapFires = 0;
+static int    g_teamVolLogged = 0;
+
+// One team-change volume we can fire: the trigger component, where it is, and which team it enrols.
+struct TeamVol { void* trigger; double loc[3]; int teamIndex; };
+static TeamVol g_teamVols[8];
+static int     g_teamVolN = 0;
+static ULONGLONG g_lastVolFind = 0;
+
+// Per (pawn,volume) latch so we fire ONCE on entry, exactly like a real overlap, and never loop.
+// The runaway that broke client joins came from re-firing every pass; this is the guard against it.
+struct VolLatch { void* pawn; void* vol; };
+static VolLatch g_volInside[32];
+static int      g_volInsideN = 0;
+
+// Locate every team-change volume. The previous attempt went
+// TeamChangeComponent -> TeamChangeActor@0x4C8 -> a PhysicalComponent whose Outer is that actor, and
+// found NOTHING live (zero [TEAMVOL] lines with 4 players connected), so one of those links is
+// empty on this build. Try three routes and take whichever yields a trigger, then say which worked:
+//   (a) TeamChangeActor@0x4C8, (b) the component's own Outer, (c) any PhysicalComponent whose owner
+//       sits within a short distance of the component's owner.
+// deathrun2_a2level/level.json has FIVE teamChange prefabs -- TeamChanger (team 0, max 20),
+// TeamChanger_Copy (team 1, max 4) and three TeamChangeCheckpoints (team 0) -- so handling exactly
+// one volume was too narrow. Both teams are covered here: a player walking into either volume joins
+// that side, which is how the mode is meant to work.
+static void FindTeamVolumes()
+{
+    const ULONGLONG now = GetTickCount64();
+    if (g_teamVolN > 0 && now - g_lastVolFind < 10000) return;
+    g_lastVolFind = now;
+
+    SDK::UClass* tcCls = SDK::UObject::FindClassFast("TeamChangeComponent");
+    SDK::UClass* phCls = SDK::UObject::FindClassFast("PhysicalComponent");
+    if (!tcCls || !phCls) return;
+
+    const int32_t num = SDK::UObject::GObjects->Num();
+    int found = 0;
+    for (int32_t i = 0; i < num && found < 8; ++i)
+    {
+        auto* o = SDK::UObject::GObjects->GetByIndex(i);
+        if (!o || o->IsDefaultObject() || !o->IsA(tcCls)) continue;
+        const uintptr_t c = reinterpret_cast<uintptr_t>(o);
+        const int teamIndex = *reinterpret_cast<int*>(c + 0x524);
+        if (teamIndex != 0 && teamIndex != 1) continue;
+
+        SDK::UObject* owner = *reinterpret_cast<SDK::UObject**>(c + 0x4C8);   // TeamChangeActor
+        const char* how = "TeamChangeActor";
+        if (!owner) { owner = o->Outer; how = "Outer"; }
+        if (!owner) continue;
+
+        void* trig = nullptr;
+        for (int32_t k = 0; k < num; ++k)
+        {
+            auto* q = SDK::UObject::GObjects->GetByIndex(k);
+            if (!q || q->IsDefaultObject() || !q->IsA(phCls)) continue;
+            if (q->Outer != owner) continue;
+            trig = q; break;
+        }
+        if (!trig) continue;
+
+        g_teamVols[found].trigger = trig;
+        g_teamVols[found].teamIndex = teamIndex;
+        WireActorLoc(owner, g_teamVols[found].loc);
+        if (g_teamVolLogged < 8)
+        {
+            ++g_teamVolLogged;
+            HxLog("[HalcyonA2][TEAMVOL] volume %d: team=%d trigger=%s owner=%s (via %s) at (%.0f, %.0f, %.0f)\n",
+                  found, teamIndex, static_cast<SDK::UObject*>(trig)->GetName().c_str(),
+                  owner->GetName().c_str(), how,
+                  g_teamVols[found].loc[0], g_teamVols[found].loc[1], g_teamVols[found].loc[2]);
+        }
+        ++found;
+    }
+    if (found != g_teamVolN)
+        HxLog("[HalcyonA2][TEAMVOL] %d team-change volume(s) located (was %d)\n", found, g_teamVolN);
+    g_teamVolN = found;
+}
+
+static void DetectPlayerAtTeamChanger()
+{
+    if (!g_teamOverlap) return;
+    const ULONGLONG now = GetTickCount64();
+    if (now - g_lastTeamScan < 250) return;          // 4Hz: plenty to catch someone walking in
+    g_lastTeamScan = now;
+
+    FindTeamVolumes();
+    if (g_teamVolN == 0) return;
+
+    SDK::UClass* pawnCls = SDK::UObject::FindClassFast("VRPawn");
+    if (!pawnCls) return;
+
+    const double R2 = g_teamRadius * g_teamRadius;
+    VolLatch stillIn[32]; int nStillIn = 0;
+
+    const int32_t num = SDK::UObject::GObjects->Num();
+    for (int32_t i = 0; i < num; ++i)
+    {
+        auto* o = SDK::UObject::GObjects->GetByIndex(i);
+        if (!o || o->IsDefaultObject() || !o->IsA(pawnCls)) continue;
+        const uintptr_t pw = reinterpret_cast<uintptr_t>(o);
+        if (!*reinterpret_cast<void**>(pw + 0x2D0)) continue;                 // orphan, not a player
+        void* entity = *reinterpret_cast<void**>(pw + 0x928);                 // real pose lives here
+        if (!entity) continue;
+        const uintptr_t e = reinterpret_cast<uintptr_t>(entity);
+        const double px = *reinterpret_cast<double*>(e + 0x100);
+        const double py = *reinterpret_cast<double*>(e + 0x108);
+        const double pz = *reinterpret_cast<double*>(e + 0x110);
+        if (px == 0.0 && py == 0.0 && pz == 0.0) continue;                    // no pose yet
+
+        for (int v = 0; v < g_teamVolN; ++v)
+        {
+            const double dx = px - g_teamVols[v].loc[0];
+            const double dy = py - g_teamVols[v].loc[1];
+            const double dz = pz - g_teamVols[v].loc[2];
+            if ((dx*dx + dy*dy + dz*dz) > R2) continue;
+
+            bool wasInside = false;
+            for (int k = 0; k < g_volInsideN; ++k)
+                if (g_volInside[k].pawn == o && g_volInside[k].vol == g_teamVols[v].trigger) { wasInside = true; break; }
+
+            if (nStillIn < 32) { stillIn[nStillIn].pawn = o; stillIn[nStillIn].vol = g_teamVols[v].trigger; ++nStillIn; }
+
+            if (!wasInside)
+            {
+                // ENTER edge only. Fire the game's REAL overlap entry point so the genuine
+                // team-change path runs, exactly as a physical volume touch would -- the same trick
+                // this file already uses for the deathrun finish trigger.
+                auto ob = reinterpret_cast<OverlapBegin_t>(GetBase() + 0x53B2B20);
+                ob(g_teamVols[v].trigger, 0, o);
+                ++g_teamOverlapFires;
+                HxLog("[HalcyonA2][TEAMVOL] %s ENTERED team-%d volume -> fired real OverlapBegin (total=%ld)\n",
+                      o->GetName().c_str(), g_teamVols[v].teamIndex, g_teamOverlapFires);
+            }
+        }
+    }
+
+    for (int k = 0; k < nStillIn; ++k) g_volInside[k] = stillIn[k];
+    g_volInsideN = nStillIn;
+}
+static void SafeDetectTeamChanger() { __try { DetectPlayerAtTeamChanger(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+
 // Goal-collider state: is UGoalComponent::Collider@0x5A0 a valid PrimitiveComponent, is the
 // goal enabled (bGoalEnabled@0x5A9), and where is it vs the ball? If OverlapBegin never fires
 // we need to know whether the collider is valid/enabled (setup) or the overlap just isn't
@@ -8689,6 +8865,7 @@ static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, v
         // detect it geometrically and drive the real Luau path. Self-gates (latched + throttled). See
         // DetectRunnerAtFinish.
         PROF(SafeDetectRunnerAtFinish);
+        PROF(SafeDetectTeamChanger);   // [TEAMVOL] fire the real team-changer overlap (headless never does)
         // Fallback only: if the tick above somehow doesn't advance a GSM out of GAME_BEGIN within ~11s,
         // force it to RUNNING via the NetVar (skips the Luau onEnter). Disarmed automatically the moment
         // the tick's onCountdownEnd drives updateGameState(5). See WatchdogGameBegin.
@@ -10066,6 +10243,12 @@ static void Main(HMODULE)
         if (wcsstr(GetCommandLineW(), L"-ReapOrphans")) { g_reapOrphans = true; HxLog("[HalcyonA2] -ReapOrphans: destroy VRPawns orphaned >30s (leak fix; destroys actors)\n"); }
         if (wcsstr(GetCommandLineW(), L"-HoldAuthority")) { g_holdAuthority = true; HxLog("[HalcyonA2] -HoldAuthority: held/streamed balls pinned to the client stream every frame (anti-teleport)\n"); }
         if (wcsstr(GetCommandLineW(), L"-NoBallOwnArb")) { g_ballOwnArb = false; HxLog("[HalcyonA2] -NoBallOwnArb: ball ownership arbitration OFF (legacy force-accept, last writer wins)\n"); }
+        if (wcsstr(GetCommandLineW(), L"-TeamOverlap")) { g_teamOverlap = true; HxLog("[HalcyonA2] -TeamOverlap: geometrically fire the runner team-changer overlap so ScrapRun rosters fill\n"); }
+        if (const wchar_t* tr = wcsstr(GetCommandLineW(), L"-TeamRadius="))
+        {
+            const double v = _wtof(tr + 12);
+            if (v > 50.0 && v < 5000.0) { g_teamRadius = v; HxLog("[HalcyonA2] -TeamRadius=%.0f\n", v); }
+        }
         if (wcsstr(GetCommandLineW(), L"-NoRestCurveFix")) { g_fixRestCurve = false; HxLog("[HalcyonA2] -NoRestCurveFix: will NOT restore a missing hand-speed restitution curve\n"); }
         if (const wchar_t* sd = wcsstr(GetCommandLineW(), L"-SimDelay="))
         {
