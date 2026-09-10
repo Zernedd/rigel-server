@@ -5670,6 +5670,8 @@ static double g_teamRadius = 450.0;          // -TeamRadius=N
 static ULONGLONG g_lastTeamScan = 0;
 static long   g_teamOverlapFires = 0;
 static int    g_teamVolLogged = 0;
+static int    g_teamVolDiag = 0;   // one-shot 'what do we actually see' census
+static SDK::UObject* g_scrapSlot = nullptr;   // the module slot deathrun2/ScrapRun is streamed into
 
 // One team-change volume we can fire: the trigger component, where it is, and which team it enrols.
 struct TeamVol { void* trigger; double loc[3]; int teamIndex; };
@@ -5683,49 +5685,48 @@ struct VolLatch { void* pawn; void* vol; };
 static VolLatch g_volInside[32];
 static int      g_volInsideN = 0;
 
-// Locate every team-change volume. The previous attempt went
-// TeamChangeComponent -> TeamChangeActor@0x4C8 -> a PhysicalComponent whose Outer is that actor, and
-// found NOTHING live (zero [TEAMVOL] lines with 4 players connected), so one of those links is
-// empty on this build. Try three routes and take whichever yields a trigger, then say which worked:
-//   (a) TeamChangeActor@0x4C8, (b) the component's own Outer, (c) any PhysicalComponent whose owner
-//       sits within a short distance of the component's owner.
-// deathrun2_a2level/level.json has FIVE teamChange prefabs -- TeamChanger (team 0, max 20),
-// TeamChanger_Copy (team 1, max 4) and three TeamChangeCheckpoints (team 0) -- so handling exactly
-// one volume was too narrow. Both teams are covered here: a player walking into either volume joins
-// that side, which is how the mode is meant to work.
+// [2026-09-09 *** WHAT THE CENSUS ACTUALLY SHOWED] Every team-change actor in this world carries:
+//     ObjectPrefabComponent (PrefabComponent)   TeamChangeComponent (TeamChangeComponent)
+//     TeamSwitcherMesh (StaticMeshComponent)    LoadingBar (StaticMeshComponent)
+//     Padlock (StaticMeshComponent)             PropBlocker (BoxComponent)
+// There is NO UPhysicalComponent on ANY of them. Every earlier attempt looked for one so it could
+// call UPhysicalComponent::OverlapBegin_Implementation -- that was structurally impossible, which is
+// why the locate found nothing and failed silently three times running.
+//
+// The census also showed the actors are RedSwitcher / BlueSwitcher / teamChanger -- the changers for
+// EVERY arena, not just ScrapRun. The first attempt iterated all team-0 components and fired at each,
+// so it was force-joining players into other arenas' teams; that is the likeliest reason it broke
+// client joins, rather than the call being harmful in itself.
+//
+// So: use the real server-side entry point on the component itself
+// (UTeamChangeComponent::HandleFiringSwitcherOverlapOnServer, a reflected UFunction), but ONLY on
+// ScrapRun's own changers, identified by POSITION from
+// A2/Content/LevelDefinitions/deathrun2_a2level/level.json:
+//     TeamChanger       team 0 (Runners)    (-2766.4, -3677.2,  798.6)
+//     TeamChanger_Copy  team 1 (Scrappers)  (-2766.0, -2196.2,  709.8)
+// and fire once on the ENTER edge, never continuously.
+struct ScrapChanger { double x, y, z; int team; };
+static const ScrapChanger kScrapChangers[] = {
+    { -2766.4, -3677.2, 798.6, 0 },
+    { -2766.0, -2196.2, 709.8, 1 },
+};
+static const double kChangerMatchRadius = 600.0;   // identify the ACTOR as one of ScrapRun's
+
 static void FindTeamVolumes()
 {
-    // [2026-09-09 *** PERF LANDMINE, MEASURED] The guard used to be
-    //     if (g_teamVolN > 0 && now - g_lastVolFind < 10000) return;
-    // which only throttles once something HAS been found. Nothing ever was, so this ran its full
-    // scan every 250ms -- and the scan below is O(n^2) over ~166k UObjects (a nested walk per
-    // component). Measured on the live server: SafeDetectTeamChanger = 1353ms/s, peaks of 507ms per
-    // call, dll at 97.9% of wall, the sim collapsed from 90 steps/s to 2, and clients could connect
-    // but never finish spawning. Throttle unconditionally, and back off hard when the search comes
-    // up empty so a fruitless scan can never dominate the frame again.
     const ULONGLONG now = GetTickCount64();
     static ULONGLONG s_emptyBackoff = 10000;
+    static long s_volEpoch = -1;
+    if (s_volEpoch != g_cacheEpoch) { s_volEpoch = g_cacheEpoch; s_emptyBackoff = 10000; g_lastVolFind = 0; }
     const ULONGLONG wait = (g_teamVolN > 0) ? 10000 : s_emptyBackoff;
-    if (now - g_lastVolFind < wait) return;
+    if (g_lastVolFind != 0 && now - g_lastVolFind < wait) return;
     g_lastVolFind = now;
 
     SDK::UClass* tcCls = SDK::UObject::FindClassFast("TeamChangeComponent");
-    SDK::UClass* phCls = SDK::UObject::FindClassFast("PhysicalComponent");
-    if (!tcCls || !phCls) return;
+    if (!tcCls) return;
 
     const int32_t num = SDK::UObject::GObjects->Num();
-
-    // One pass to gather candidate trigger components, so the per-component lookup below is a short
-    // list scan rather than another full walk.
-    static SDK::UObject* physList[512];
-    int nPhys = 0;
-    for (int32_t i = 0; i < num && nPhys < 512; ++i)
-    {
-        auto* q = SDK::UObject::GObjects->GetByIndex(i);
-        if (q && !q->IsDefaultObject() && q->IsA(phCls)) physList[nPhys++] = q;
-    }
-
-    int found = 0;
+    int found = 0, nSeen = 0;
     for (int32_t i = 0; i < num && found < 8; ++i)
     {
         auto* o = SDK::UObject::GObjects->GetByIndex(i);
@@ -5733,38 +5734,81 @@ static void FindTeamVolumes()
         const uintptr_t c = reinterpret_cast<uintptr_t>(o);
         const int teamIndex = *reinterpret_cast<int*>(c + 0x524);
         if (teamIndex != 0 && teamIndex != 1) continue;
+        ++nSeen;
 
         SDK::UObject* owner = *reinterpret_cast<SDK::UObject**>(c + 0x4C8);   // TeamChangeActor
-        const char* how = "TeamChangeActor";
-        if (!owner) { owner = o->Outer; how = "Outer"; }
+        if (!owner) owner = o->Outer;
         if (!owner) continue;
 
-        // Was a FULL GObjects walk per component (the O(n^2) above). Collect the PhysicalComponents
-        // ONCE per call and scan that small list instead.
-        void* trig = nullptr;
-        for (int pc = 0; pc < nPhys; ++pc)
-            if (physList[pc]->Outer == owner) { trig = physList[pc]; break; }
-        if (!trig) continue;
+        double loc[3] = {};
+        if (!WireActorLoc(owner, loc)) continue;
 
-        g_teamVols[found].trigger = trig;
+        // [2026-09-09] POSITION MATCHING WAS WRONG and matched nothing in a live ScrapRun round.
+        // deathrun2_a2level/level.json coordinates are MODULE-LOCAL: ScrapRun is a STREAMED level
+        // placed into a module slot, so the actors' real world positions are offset by that slot's
+        // engine-computed transform. This file already noted as much for the scraprun markers
+        // ("in the streamed PKR_Scraprun level; its engine-computed world transform is the target").
+        //
+        // Use the component's own module slot instead -- UTeamChangeComponent::TeamChangeSlot@0x4D0
+        // (AModuleSlot*), with Arena@0x4D8 alongside. That identifies which arena a changer belongs
+        // to regardless of where the module got placed.
+        SDK::UObject* slot = *reinterpret_cast<SDK::UObject**>(c + 0x4D0);
+        const int arena = *reinterpret_cast<int*>(c + 0x4D8);
+        std::string slotName = slot ? slot->GetName() : std::string("<null>");
+        std::string ownerName = owner->GetName();
+
+        // Log every candidate once so that, if the match below is still wrong, the log names the
+        // right discriminator instead of failing silently the way the last three attempts did.
+        if (g_teamVolDiag < 16)
+        {
+            ++g_teamVolDiag;
+            HxLog("[HalcyonA2][TEAMDIAG] candidate actor=%s team=%d arena=%d slot=%s at (%.0f, %.0f, %.0f)\n",
+                  ownerName.c_str(), teamIndex, arena, slotName.c_str(), loc[0], loc[1], loc[2]);
+        }
+
+        // [2026-09-09] Slot NAME is generic ("BP_ModuleSlotWithImportanceVolume_C_4"), so match on
+        // slot IDENTITY instead, anchored by an actor name only deathrun2 uses.
+        // deathrun2_a2level/level.json names its changers TeamChanger / TeamChanger_Copy /
+        // TeamChangeCheckpoint*; every other arena uses RedSwitcher / BlueSwitcher / teamChanger.
+        // Confirmed live: TeamChanger_Copy (team 1) and TeamChangeCheckpoint (team 0) both sit in
+        // slot BP_ModuleSlotWithImportanceVolume_C_4. So: find that slot via the distinctive names,
+        // then accept EVERY team changer sharing it -- which picks up the runner changer too, without
+        // depending on any single name.
+        // Match on the SLOT TYPE. Observed live across two boots:
+        //     jakeball    -> BP_JakeBallGamemodeSlotB_C_0
+        //     tackleball  -> BP_TackleballTrainingPlaceholder_C_0
+        //     ScrapRun    -> BP_ModuleSlotWithImportanceVolume_C_4
+        //         holding teamChanger (team 0, Runners), TeamChanger_Copy (team 1, Scrappers)
+        //         and TeamChangeCheckpoint (team 0)
+        // Every other arena has an arena-NAMED slot; the streamed ScrapRun module uses the generic
+        // importance-volume slot. Keying on the actor name failed because load order varies between
+        // boots and the runner changer is lowercase "teamChanger" while the others are capitalised.
+        const bool isScrap = slotName.find("ModuleSlotWithImportanceVolume") != std::string::npos;
+        if (isScrap && slot && !g_scrapSlot)
+        {
+            g_scrapSlot = slot;
+            HxLog("[HalcyonA2][TEAMVOL] ScrapRun module slot = %s (via actor %s)\n",
+                  slotName.c_str(), ownerName.c_str());
+        }
+        if (!isScrap) continue;
+
+        g_teamVols[found].trigger = o;                 // the COMPONENT, not a collider
         g_teamVols[found].teamIndex = teamIndex;
-        WireActorLoc(owner, g_teamVols[found].loc);
+        g_teamVols[found].loc[0] = loc[0];
+        g_teamVols[found].loc[1] = loc[1];
+        g_teamVols[found].loc[2] = loc[2];
         if (g_teamVolLogged < 8)
         {
             ++g_teamVolLogged;
-            HxLog("[HalcyonA2][TEAMVOL] volume %d: team=%d trigger=%s owner=%s (via %s) at (%.0f, %.0f, %.0f)\n",
-                  found, teamIndex, static_cast<SDK::UObject*>(trig)->GetName().c_str(),
-                  owner->GetName().c_str(), how,
-                  g_teamVols[found].loc[0], g_teamVols[found].loc[1], g_teamVols[found].loc[2]);
+            HxLog("[HalcyonA2][TEAMVOL] ScrapRun changer: actor=%s team=%d at (%.0f, %.0f, %.0f)\n",
+                  owner->GetName().c_str(), teamIndex, loc[0], loc[1], loc[2]);
         }
         ++found;
     }
     if (found != g_teamVolN)
-        HxLog("[HalcyonA2][TEAMVOL] %d team-change volume(s) located (was %d)\n", found, g_teamVolN);
+        HxLog("[HalcyonA2][TEAMVOL] %d ScrapRun changer(s) matched out of %d team component(s) in world\n",
+              found, nSeen);
     g_teamVolN = found;
-    // Empty result -> double the retry interval up to 5 minutes. The volumes only exist once the
-    // deathrun2 module is loaded, so on every other map this search is permanently fruitless and
-    // must not keep costing a full scan.
     s_emptyBackoff = (found == 0) ? ((s_emptyBackoff < 300000) ? s_emptyBackoff * 2 : 300000) : 10000;
 }
 
@@ -5772,14 +5816,17 @@ static void DetectPlayerAtTeamChanger()
 {
     if (!g_teamOverlap) return;
     const ULONGLONG now = GetTickCount64();
-    if (now - g_lastTeamScan < 250) return;          // 4Hz: plenty to catch someone walking in
+    if (now - g_lastTeamScan < 250) return;
     g_lastTeamScan = now;
 
     FindTeamVolumes();
     if (g_teamVolN == 0) return;
 
     SDK::UClass* pawnCls = SDK::UObject::FindClassFast("VRPawn");
-    if (!pawnCls) return;
+    SDK::UClass* tcCls   = SDK::UObject::FindClassFast("TeamChangeComponent");
+    if (!pawnCls || !tcCls) return;
+    SDK::UFunction* fnJoin = tcCls->GetFunction("TeamChangeComponent", "HandleFiringSwitcherOverlapOnServer");
+    if (!fnJoin) return;
 
     const double R2 = g_teamRadius * g_teamRadius;
     VolLatch stillIn[32]; int nStillIn = 0;
@@ -5790,14 +5837,14 @@ static void DetectPlayerAtTeamChanger()
         auto* o = SDK::UObject::GObjects->GetByIndex(i);
         if (!o || o->IsDefaultObject() || !o->IsA(pawnCls)) continue;
         const uintptr_t pw = reinterpret_cast<uintptr_t>(o);
-        if (!*reinterpret_cast<void**>(pw + 0x2D0)) continue;                 // orphan, not a player
-        void* entity = *reinterpret_cast<void**>(pw + 0x928);                 // real pose lives here
+        if (!*reinterpret_cast<void**>(pw + 0x2D0)) continue;
+        void* entity = *reinterpret_cast<void**>(pw + 0x928);
         if (!entity) continue;
         const uintptr_t e = reinterpret_cast<uintptr_t>(entity);
         const double px = *reinterpret_cast<double*>(e + 0x100);
         const double py = *reinterpret_cast<double*>(e + 0x108);
         const double pz = *reinterpret_cast<double*>(e + 0x110);
-        if (px == 0.0 && py == 0.0 && pz == 0.0) continue;                    // no pose yet
+        if (px == 0.0 && py == 0.0 && pz == 0.0) continue;
 
         for (int v = 0; v < g_teamVolN; ++v)
         {
@@ -5809,20 +5856,20 @@ static void DetectPlayerAtTeamChanger()
             bool wasInside = false;
             for (int k = 0; k < g_volInsideN; ++k)
                 if (g_volInside[k].pawn == o && g_volInside[k].vol == g_teamVols[v].trigger) { wasInside = true; break; }
-
             if (nStillIn < 32) { stillIn[nStillIn].pawn = o; stillIn[nStillIn].vol = g_teamVols[v].trigger; ++nStillIn; }
+            if (wasInside) continue;
 
-            if (!wasInside)
-            {
-                // ENTER edge only. Fire the game's REAL overlap entry point so the genuine
-                // team-change path runs, exactly as a physical volume touch would -- the same trick
-                // this file already uses for the deathrun finish trigger.
-                auto ob = reinterpret_cast<OverlapBegin_t>(GetBase() + 0x53B2B20);
-                ob(g_teamVols[v].trigger, 0, o);
-                ++g_teamOverlapFires;
-                HxLog("[HalcyonA2][TEAMVOL] %s ENTERED team-%d volume -> fired real OverlapBegin (total=%ld)\n",
-                      o->GetName().c_str(), g_teamVols[v].teamIndex, g_teamOverlapFires);
-            }
+            // ENTER edge: run the game's own server-side switcher handler for THIS player on THIS
+            // changer. Reflected call, so the normal team-change path (sizes, delegates, scoreboards,
+            // the Luau listeners) all runs as if the volume had been touched.
+            const int32_t pidx = *reinterpret_cast<unsigned char*>(pw + 0x1C22);
+            struct { int32_t PlayerIndex; } parms{ pidx };
+            const int before = *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(g_teamVols[v].trigger) + 0x4DC);
+            static_cast<SDK::UObject*>(g_teamVols[v].trigger)->ProcessEvent(fnJoin, &parms);
+            const int after  = *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(g_teamVols[v].trigger) + 0x4DC);
+            ++g_teamOverlapFires;
+            HxLog("[HalcyonA2][TEAMVOL] %s (pidx=%d) ENTERED team-%d changer -> roster %d->%d (fires=%ld)\n",
+                  o->GetName().c_str(), pidx, g_teamVols[v].teamIndex, before, after, g_teamOverlapFires);
         }
     }
 
