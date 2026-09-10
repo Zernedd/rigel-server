@@ -5859,6 +5859,24 @@ static void DetectPlayerAtTeamChanger()
             if (nStillIn < 32) { stillIn[nStillIn].pawn = o; stillIn[nStillIn].vol = g_teamVols[v].trigger; ++nStillIn; }
             if (wasInside) continue;
 
+            // [2026-09-09 *** THE REMOVAL, FOUND] HandleFiringSwitcherOverlapOnServer is a TOGGLE.
+            // Live ScrapRun log, same pawn and same changer on consecutive fires:
+            //     (pidx=6) ENTERED team-0 changer -> roster 0->1   JOINED
+            //     (pidx=6) ENTERED team-0 changer -> roster 1->0   REMOVED
+            //     (pidx=6) ENTERED team-0 changer -> roster 0->1   JOINED
+            // 62 fires, only 10 of which grew the roster. So the thing dropping players from their
+            // team a fraction of a second after joining was OUR OWN re-firing: the enter latch is
+            // lost whenever the player slips outside the radius for one pass -- or when a single pose
+            // read returns (0,0,0), which the loop above skips -- and the next pass toggles them back
+            // off. That fully explains "players get a team for a fraction of a second".
+            //
+            // Fix: never fire for a player who is already on this changer's team. Membership is
+            // authoritative on the PlayerState (APawn::PlayerState@0x2B8 ->
+            // AAxPlayerState::TeamIndex@0x380), so a lost latch can no longer toggle anyone off.
+            auto* ps = *reinterpret_cast<SDK::UObject**>(pw + 0x2B8);
+            const int curTeam = ps ? *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(ps) + 0x380) : -1;
+            if (curTeam == g_teamVols[v].teamIndex) continue;   // already on this team -> a fire would REMOVE them
+
             // ENTER edge: run the game's own server-side switcher handler for THIS player on THIS
             // changer. Reflected call, so the normal team-change path (sizes, delegates, scoreboards,
             // the Luau listeners) all runs as if the volume had been touched.
@@ -5868,8 +5886,8 @@ static void DetectPlayerAtTeamChanger()
             static_cast<SDK::UObject*>(g_teamVols[v].trigger)->ProcessEvent(fnJoin, &parms);
             const int after  = *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(g_teamVols[v].trigger) + 0x4DC);
             ++g_teamOverlapFires;
-            HxLog("[HalcyonA2][TEAMVOL] %s (pidx=%d) ENTERED team-%d changer -> roster %d->%d (fires=%ld)\n",
-                  o->GetName().c_str(), pidx, g_teamVols[v].teamIndex, before, after, g_teamOverlapFires);
+            HxLog("[HalcyonA2][TEAMVOL] %s (pidx=%d) team %d -> joined team-%d changer: roster %d->%d (fires=%ld)\n",
+                  o->GetName().c_str(), pidx, curTeam, g_teamVols[v].teamIndex, before, after, g_teamOverlapFires);
         }
     }
 
