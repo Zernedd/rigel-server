@@ -131,9 +131,31 @@ function CatalogView({ sc }: { sc: StationCfg }) {
   const [slots, setSlots] = useState<Record<string, string>>({});   // level -> slot the overrides target
 
   useEffect(() => {
-    fetch("/netvar-catalog.json", { cache: "no-store" })
-      .then(r => { if (!r.ok) throw new Error(`catalog ${r.status}`); return r.json(); })
-      .then(setCat).catch(e => setErr(e.message));
+    (async () => {
+      try {
+        const r = await fetch("/netvar-catalog.json", { cache: "no-store" });
+        if (!r.ok) throw new Error(`catalog ${r.status}`);
+        const base: Catalog = await r.json();
+        setCat(base);
+        // The static catalog can lag the game: add every world value the running server actually reports
+        // (config/...) that it does not list yet, so anything visible in the live report can be overridden.
+        const dumps = await api.netvarDumps();
+        const d = dumps.find(x => x.event_type === "netvars");
+        if (!d) return;
+        const live = await api.netvarDump(d.deployment_id, "netvars") as { config?: unknown };
+        const known = new Set(base.world.map(w => w.path));
+        const extra: CatalogWorld[] = [];
+        const walk = (node: unknown, path: string) => {
+          if (node !== null && typeof node === "object" && !Array.isArray(node)) {
+            for (const [k, v] of Object.entries(node as object)) walk(v, `${path}/${k}`);
+          } else if (!known.has(path) && (typeof node === "boolean" || typeof node === "number" || typeof node === "string")) {
+            extra.push({ path, type: typeof node === "boolean" ? "bool" : typeof node, default: node });
+          }
+        };
+        if (live?.config) walk(live.config, "config");
+        if (extra.length) setCat({ ...base, world: [...base.world, ...extra] });
+      } catch (e) { setErr((e as Error).message); }
+    })();
   }, []);
 
   const needle = q.trim().toLowerCase();

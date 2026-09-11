@@ -7,6 +7,7 @@ using AUnrealFeatures.Ares.Servers;
 using AUnrealFeatures.AAMothership;
 using AUnrealFeatures.AAMothership.Models;
 using AUnrealFeatures.EOSSDK;
+using AUnrealFeatures.HalcyonSocket;
 
 namespace AUnrealFeatures.Ares
 {
@@ -101,13 +102,13 @@ namespace AUnrealFeatures.Ares
                 //   /matchmaking/v1/{deployment_id}/filter on this gateway, so it has to be
                 //   running for players to see any servers at all.
                 .AddServer<IEosGatewayServer, EosGatewayServer>()
-                .AddServer<IEosWsServer, EosWsServer>();
+                .AddServer<IEosWsServer, EosWsServer>()
 
-                // Optional, off by default - uncomment (and re-add the using) to run them:
-                //
-                //   Halcyon socket :9095 - the control channel the dashboard's "Spin Up"
-                //   button uses to launch a game server on a host machine.
-                // .AddServer<IHalcyonSocketServer, HalcyonSocketServer>()
+                //   Halcyon socket - :9095 HTTP control (localhost) + :9100 agent TCP. The dashboard's
+                //   "Spin Up" relays through it to a connected allocator agent, which launches and
+                //   injects a game server that then self-registers. Keep 9095/9100 firewalled from the
+                //   internet: the agent protocol has no authentication.
+                .AddServer<IHalcyonSocketServer, HalcyonSocketServer>();
 
             await _hostApplication.RunAsync();
         }
