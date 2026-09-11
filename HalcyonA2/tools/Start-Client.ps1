@@ -27,7 +27,8 @@ param(
     # World netvar path to read from this client's own copy every 5s (e.g. config/player/brakeStrength).
     [string] $NvRead = '',
     # Log this client's quest component / ClientProgression state every 5s ([QSTATE]).
-    [switch] $QuestState
+    [switch] $QuestState,
+    [switch] $VoipState
 )
 $ErrorActionPreference = 'Stop'
 function Info($m) { Write-Host "[client] $m" -ForegroundColor Cyan }
@@ -56,6 +57,7 @@ if ($NoBalls) { $args += '-HalcyonNoBalls' }
 if ($TeamHooks) { $args += '-HalcyonTeamHooks' }
 if ($NvRead)    { $args += "-HalcyonNvRead=$NvRead" }
 if ($QuestState) { $args += '-HalcyonQuestState' }
+if ($VoipState)  { $args += '-HalcyonVoipState' }
 
 Info "launching client$(if ($Name) { " $Name" })$(if ($Drive) { " [DRIVER]" }) -> $Connect"
 $p = Start-Process -FilePath $exe -ArgumentList $args -PassThru -RedirectStandardOutput $out -RedirectStandardError $err

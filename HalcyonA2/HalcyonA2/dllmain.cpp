@@ -2038,13 +2038,39 @@ static void* PickChannelPTT(void* chan)
         return &g_voipChannelPTT;
     return chan;
 }
+// [2026-09-11 GODVOICE] Log what actually goes out. The client (verified in the shipped binary) stores
+// pTTChannelId at comms+0x150 and pTTJoinToken at comms+0x180, joins the SPATIAL channel first, and only
+// joins the PTT channel from the join-completion callback (sub_145437D20) once that first join succeeds.
+// It then transmits only if the PTT channel session (helper+0x118) reaches connected. Vivox refuses the
+// join when the token's "t" claim and the channel id disagree -- and PickChannelPTT only substitutes our
+// global channel when the game left the field EMPTY. So: say whether it was empty, and what we sent.
+static void LogSendJoin(void* chan1, void* chan2, void* chan3)
+{
+    auto num = [](void* f) { return f ? *reinterpret_cast<int32_t*>(reinterpret_cast<uintptr_t>(f) + 8) : -1; };
+    auto str = [](void* f) -> const wchar_t* {
+        if (!f) return L"<null>";
+        auto* d = *reinterpret_cast<wchar_t**>(f);
+        return (d && *reinterpret_cast<int32_t*>(reinterpret_cast<uintptr_t>(f) + 8) > 0) ? d : L"<empty>";
+    };
+    HxLog("[HalcyonA2][VOIPFIX] ReceiveChannelJoinTokens out: spatialChan(%d)='%ls' pTTChan(%d)='%ls' echoChan(%d)='%ls'%s\n",
+          num(chan1), str(chan1), num(chan2), str(chan2), num(chan3), str(chan3),
+          (num(chan2) > 0) ? "  *** pTTChannelId NOT empty -> our global channel was NOT substituted; it will not match the PTT token ***" : "");
+}
+
 static __int64 __fastcall SendJoin_Hook(void* a1, void* tok1, void* chan1, void* tok2,
                                         void* chan2, void* tok3, void* chan3)
 {
     EnsureVoipChannel();   // ensure the per-server channel is built before substituting empties
     t_joinTokenIdx = 0;    // all three builds are done; re-arm for the next request
-    return SendJoin_Orig(a1, tok1, PickChannel(chan1), tok2, PickChannelPTT(chan2),
-                         tok3, PickChannel(chan3));
+    LogSendJoin(chan1, chan2, chan3);
+    void* c1 = PickChannel(chan1);
+    void* c2 = PickChannelPTT(chan2);
+    void* c3 = PickChannel(chan3);
+    HxLog("[HalcyonA2][VOIPFIX] ReceiveChannelJoinTokens sent: pTTChannelId='%ls' (substituted=%d) spatial='%ls'\n",
+          (c2 && *reinterpret_cast<wchar_t**>(c2)) ? *reinterpret_cast<wchar_t**>(c2) : L"<empty>",
+          (c2 != chan2) ? 1 : 0,
+          (c1 && *reinterpret_cast<wchar_t**>(c1)) ? *reinterpret_cast<wchar_t**>(c1) : L"<empty>");
+    return SendJoin_Orig(a1, tok1, c1, tok2, c2, tok3, c3);
 }
 
 
@@ -12306,6 +12332,61 @@ static void ClientQuestStateImpl()
 }
 static void ClientQuestState() { __try { ClientQuestStateImpl(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
 
+// [2026-09-11 VOIPSTATE -- client only] -HalcyonVoipState: why the god-voice button does nothing.
+// Static analysis of the shipped client pinned the whole path down:
+//   AVRPlayerController::inputPTT is bound to UA2OnlineCommunicationsComponent (PC+0x8B0). Its press
+//   handler (sub_1454438A0) checks HasPermission(owner, "global_voip") -- or the "IsDevMode" CVar --
+//   and only then calls the transmit switch (sub_1454439B0) on the Vivox helper at comms+0x190.
+//   That switch returns IMMEDIATELY unless ALL THREE hold:
+//       helper+0x148 == 1          <- TX mode. CVar "a2.SetVoipTxMode", whose own help text says
+//                                     "0 (default) is non-positional (no PTT), 1 is positional +
+//                                      non-positional on PTT"
+//       helper+0x160 (login session)  state == 2 (connected)
+//       helper+0x118 (PTT channel)    state == 2 (connected)
+//   Only then does it set the transmitting flag (+0x120) and switch Vivox transmission.
+// Two candidate constructors disagree about the default of +0x148 (one zeroes it, one sets 1), so
+// read the LIVE value off a real client instead of guessing. Read-only.
+static bool g_clientVoipState = false;
+static void ClientVoipStateImpl()
+{
+    auto* world = SDK::UWorld::GetWorld();
+    if (!world || !world->OwningGameInstance) return;
+    auto& lps = world->OwningGameInstance->LocalPlayers;
+    if (lps.Num() <= 0 || !lps[0] || !lps[0]->PlayerController) return;
+    const uintptr_t pc = reinterpret_cast<uintptr_t>(lps[0]->PlayerController);
+    void* comms = *reinterpret_cast<void**>(pc + 0x8B0);                       // onlineCommunicationsComponent
+    const uintptr_t h = comms ? *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(comms) + 0x190) : 0;
+    const int  mode    = h ? *reinterpret_cast<int*>(h + 0x148) : -1;
+    void* loginSess    = h ? *reinterpret_cast<void**>(h + 0x160) : nullptr;
+    void* pttSess      = h ? *reinterpret_cast<void**>(h + 0x118) : nullptr;
+    void* spatialSess  = h ? *reinterpret_cast<void**>(h + 0x110) : nullptr;
+    const int txFlag   = h ? *reinterpret_cast<uint8_t*>(h + 0x120) : -1;
+    // state getters live at vtable +0x30 (login) and +0x20 (channel); 2 == connected.
+    int loginState = -1, pttState = -1, spatialState = -1;
+    if (loginSess)   { void** vt = *reinterpret_cast<void***>(loginSess);   loginState   = reinterpret_cast<uint8_t(__fastcall*)(void*)>(vt[6])(loginSess); }
+    if (pttSess)     { void** vt = *reinterpret_cast<void***>(pttSess);     pttState     = reinterpret_cast<uint8_t(__fastcall*)(void*)>(vt[4])(pttSess); }
+    if (spatialSess) { void** vt = *reinterpret_cast<void***>(spatialSess); spatialState = reinterpret_cast<uint8_t(__fastcall*)(void*)>(vt[4])(spatialSess); }
+    // ReceiveChannelJoinTokens' native impl is a virtual at vtable+0x4B8; report its RVA so it can be
+    // disassembled (that is the code that decides whether the PTT channel session at +0x118 is ever made).
+    void* impl = nullptr;
+    if (comms) { void** vt = *reinterpret_cast<void***>(comms); if (vt) impl = vt[0x4B8 / 8]; }
+    char line[420];
+    snprintf(line, sizeof(line),
+             "recvTokensImpl=RVA_%llX | comms=%p helper=%p | TXMODE(+0x148)=%d %s | login(+0x160)=%p state=%d | PTT(+0x118)=%p state=%d | spatial(+0x110)=%p state=%d | transmitting(+0x120)=%d",
+             impl ? static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(impl) - GetBase()) : 0ULL,
+             comms, reinterpret_cast<void*>(h), mode, (mode == 1) ? "OK" : "*** BLOCKS GOD VOICE ***",
+             loginSess, loginState, pttSess, pttState, spatialSess, spatialState, txFlag);
+    static char s_last[420] = {};
+    static ULONGLONG s_at = 0;
+    if (strcmp(line, s_last) != 0 || GetTickCount64() - s_at > 30000)
+    {
+        HxLog("[HalcyonA2][VOIPSTATE] %s %s\n", NowStamp(), line);
+        strcpy_s(s_last, line);
+        s_at = GetTickCount64();
+    }
+}
+static void ClientVoipState() { __try { ClientVoipStateImpl(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+
 static void ClientInstallTeamHooks(uintptr_t base)
 {
     MH_Initialize();
@@ -12356,6 +12437,7 @@ static void ClientMain(uintptr_t base)
         if (g_clientInArena && tick > 6) { ClientScriptTick(); ClientTeamState(); }
         if (!g_nvReadPath.empty() && tick > 8 && (tick % 5) == 0) ClientNvRead();
         if (g_clientQuestState && tick > 6 && (tick % 5) == 0) ClientQuestState();
+        if (g_clientVoipState  && tick > 6 && (tick % 5) == 0) ClientVoipState();
         if (!g_noBallLog) ClientReportState();   // [BALLTEST] every second on BOTH clients, timestamped for correlation
     }
 }
@@ -12421,6 +12503,7 @@ static void Main(HMODULE)
         if (wcsstr(GetCommandLineW(), L"-HalcyonDrive")) g_clientDrive = true;
         if (wcsstr(GetCommandLineW(), L"-HalcyonNoBalls")) g_noBallLog = true;
         if (wcsstr(GetCommandLineW(), L"-HalcyonQuestState")) g_clientQuestState = true;
+        if (wcsstr(GetCommandLineW(), L"-HalcyonVoipState")) g_clientVoipState = true;
         if (const wchar_t* nr = wcsstr(GetCommandLineW(), L"-HalcyonNvRead="))
         {
             nr += wcslen(L"-HalcyonNvRead=");
