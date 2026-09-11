@@ -9912,6 +9912,46 @@ static __int64 __fastcall RolesFetched_Hook(__int64 pc, __int64* roles)
     return RolesFetched_Orig(pc, roles);
 }
 
+// [2026-09-11 GOD VOICE -- timing hardening] The one-shot push above fires the moment the server's roles
+// fetch completes, which can be before the owning client's controller is ready to take RPCs; a Client_
+// RPC sent then is dropped silently and the roles never arrive. Luckily the original handler copies the
+// roles into the SERVER's own AVRPlayerController::StationDashboardRoles (+0xA40, Num @+0xA48), so we can
+// re-send from that copy later without keeping (or deep-copying) the freed array.
+// Re-push a few times over the first ~40s per controller. Client_SetRoles just assigns the array, so a
+// repeat is harmless, and after the cap it stops entirely.
+static void RePushRoles()
+{
+    static ULONGLONG s_last = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (now - s_last < 5000) return;
+    s_last = now;
+    static SDK::UClass* pcCls = nullptr;
+    if (!pcCls) pcCls = SDK::UObject::FindClassFast("VRPlayerController");
+    if (!pcCls) return;
+    static std::unordered_map<void*, int> s_sent;
+    for (SDK::UObject* o : ClassObjects(pcCls))
+    {
+        const uintptr_t p = reinterpret_cast<uintptr_t>(o);
+        void* data = *reinterpret_cast<void**>(p + 0xA40);
+        const int num = *reinterpret_cast<int*>(p + 0xA48);
+        if (!data || num <= 0) continue;                       // no roles on this controller
+        if (!*reinterpret_cast<void**>(p + 0xA50)) continue;    // not a server-side possessed controller
+        int& sent = s_sent[o];
+        if (sent >= 8) continue;                                // ~40s of retries, then stop
+        ++sent;
+        static SDK::UFunction* fn = nullptr;
+        if (!fn && o->Class) fn = o->Class->GetFunction("VRPlayerController", "Client_SetRoles");
+        if (!fn) return;
+        struct { void* Data; int32_t Num; int32_t Max; } parms{};
+        parms.Data = data; parms.Num = num; parms.Max = num;
+        o->ProcessEvent(fn, &parms);
+        if (sent == 1 || sent == 8)
+            HxLog("[HalcyonA2][ROLES] re-push %d/8: %d role(s) -> %s (client-side StationDashboardRoles is "
+                  "what HasPermission(\"global_voip\") reads)\n", sent, num, o->GetName().c_str());
+    }
+}
+static void SafeRePushRoles() { __try { RePushRoles(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+
 // [2026-09-11 QUEST RE-PUSH] Why quests never appeared on real clients (traced in IDA):
 // A client switches its quests on in exactly one place, sub_14468C8E0 (sets ClientProgression+0x3D9 and
 // activates the quest bundles). It is reached from OnRep_QuestProgression (exec 0x4695D00 -> sub_14468D120)
@@ -11162,6 +11202,7 @@ static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, v
         PROF(SafeNvWorldCensus);     // [NVCENSUS] one-shot, log-only, 90s after boot
         PROF(SafeDetectTeamChanger);   // [TEAMVOL] fire the real team-changer overlap (headless never does)
         PROF(SafePollTeamRosters);   // [ROSTER] catch the exact moment of removal
+        PROF(SafeRePushRoles);       // [ROLES] re-send station roles to owning clients (god voice)
         // Fallback only: if the tick above somehow doesn't advance a GSM out of GAME_BEGIN within ~11s,
         // force it to RUNNING via the NetVar (skips the Luau onEnter). Disarmed automatically the moment
         // the tick's onCountdownEnd drives updateGameState(5). See WatchdogGameBegin.
