@@ -9890,6 +9890,29 @@ static void PushRolesToOwningClient(__int64 pc, __int64* roles)
     static SDK::UFunction* fn = nullptr;
     if (!fn) fn = obj->Class->GetFunction("VRPlayerController", "Client_SetRoles");
     if (!fn) { HxLog("[HalcyonA2][ROLES] Client_SetRoles not found on %s\n", obj->GetName().c_str()); return; }
+    // [2026-09-11] Twelve pushes went out and the client still behaved as if it had no roles, so prove the
+    // call can actually LEAVE the server. UObject::ProcessEvent only sends a net function remotely when the
+    // function carries FUNC_NetClient (0x01000000) and the actor resolves an owning connection; otherwise it
+    // silently runs the implementation locally -- which would just re-fill the SERVER's own array and look
+    // exactly like this. UFunction::FunctionFlags@0xB0, APlayerController::NetConnection@0x520,
+    // AActor::Role@0x158 / RemoteRole@0x68 / Owner@0x148.
+    {
+        static void* s_logged = nullptr;
+        if (s_logged != obj)
+        {
+            s_logged = obj;
+            const uint32_t flags = *reinterpret_cast<uint32_t*>(reinterpret_cast<uintptr_t>(fn) + 0xB0);
+            void* conn  = *reinterpret_cast<void**>(static_cast<uintptr_t>(pc) + 0x520);
+            void* owner = *reinterpret_cast<void**>(static_cast<uintptr_t>(pc) + 0x148);
+            HxLog("[HalcyonA2][ROLES] Client_SetRoles flags=0x%08X NetClient=%d Net=%d | NetConnection=%p owner=%p "
+                  "Role=%d RemoteRole=%d -> %s\n",
+                  flags, (flags & 0x01000000) ? 1 : 0, (flags & 0x00000040) ? 1 : 0, conn, owner,
+                  *reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(pc) + 0x158),
+                  *reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(pc) + 0x68),
+                  ((flags & 0x01000000) && conn) ? "will route to the owning client"
+                                                 : "*** CANNOT ROUTE -- this runs locally on the server and the client never gets it ***");
+        }
+    }
     struct { void* Data; int32_t Num; int32_t Max; } parms{};
     parms.Data = reinterpret_cast<void*>(roles[0]);
     parms.Num  = num;
