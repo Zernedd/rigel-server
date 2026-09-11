@@ -26,6 +26,8 @@
     ExtraArgs = @(
         '-NoAuthGate'                       # mock clients never do dashboard auth
         '-TeamOverlap'                      # same as the VPS server
+        '-QuestTestNoOrg'                   # register mock players' quests without a dashboard org
+        '-QuestTestSeed'                    # ...seeded with 3 completed quests (incl. the parkour intro)
         '-ServerName=Rigel-LOCALTEST'
         '-MothershipHost=127.0.0.1'
         '-MothershipPort=9'                 # discard port: nothing listens

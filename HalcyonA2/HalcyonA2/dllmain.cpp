@@ -9624,6 +9624,24 @@ static __int64 __fastcall FetchRoles_Hook(__int64 a1, __int64 a2)
 }
 static constexpr uintptr_t FetchRoles_RVA = 0x54B04E0;
 
+// [2026-09-11 QUEST RE-PUSH] Why quests never appeared on real clients (traced in IDA):
+// A client switches its quests on in exactly one place, sub_14468C8E0 (sets ClientProgression+0x3D9 and
+// activates the quest bundles). It is reached from OnRep_QuestProgression (exec 0x4695D00 -> sub_14468D120)
+// ONLY if the component is already the client's registered local quest component (comp+0xF8, set by
+// sub_144690FF0 when the local pawn registers). The client's other path -- its own Mothership fetch ->
+// Server_SetQuestProgressionAndInitializeQuests -- throws the fetched progression away when no local
+// component exists yet (sub_144692CC0), and that RPC never reached this server (0 QTRACE hits).
+// We register the player as soon as the org is known, typically BEFORE the client's pawn registers its
+// component, so the single OnRep lands while comp+0xF8 is still 0 and nothing ever fires it again.
+// TESTED 2026-09-11 on the mock client ([QSTATE]): that timing theory is NOT what breaks quests -- the client
+// had its component registered as local and questsOn(+0x3D9)=1 right after we registered it. A re-push that
+// bumped QuestProgression.LastUpdate was tried and removed: the raw write never replicated (client LastUpdate
+// stayed 0). What is still unexplained is that BOTH client->server quest RPCs (Server_SetQuests, which is how
+// clients hand the server their quest bundles, and Server_SetQuestProgressionAndInitializeQuests) never reach
+// this server -- see the [QBUNDLE] / [QRPC] logging.
+static bool g_questTestNoOrg = false;   // -QuestTestNoOrg: LOCAL TESTING ONLY -- register mock players that have no org
+static bool g_questTestSeed  = false;   // -QuestTestSeed: with -QuestTestNoOrg, give them the 3 completed seed quests instead of none
+
 static void InitPlayerQuests()
 {
     static SDK::UClass* qcCls = nullptr;
@@ -9667,7 +9685,7 @@ static void InitPlayerQuests()
               pawn ? o->Outer->GetName().c_str() : "<null>",
               pc   ? reinterpret_cast<SDK::UObject*>(pc)->GetName().c_str() : "<null>",
               org.c_str());
-        if (org.empty()) continue;   // dashboard login not applied yet (or local host) — wait/skip
+        if (org.empty() && !g_questTestNoOrg) continue;   // dashboard login not applied yet (or local host) — wait/skip
 
         // Fetch this player's real progression once; register only when it's ready (feeding
         // wrong/empty data makes the client refuse to init the quest UI).
@@ -9677,11 +9695,16 @@ static void InitPlayerQuests()
             auto it = g_qReady.find(org);
             if (it != g_qReady.end()) { quests = it->second; ready = true; }
         }
+        if (org.empty()) ready = true;                    // -QuestTestNoOrg: register with an empty progression
         if (!ready) { KickQuestFetch(org); continue; }   // kick (once) then register next pass
 
         void* prog = BuildProgFromFetched(quests);
+        if (org.empty() && g_questTestSeed) { BuildSeedProgression(); prog = g_seedProg; }   // local test: completed intro quests
         SafeRegisterQuest(sp, o, prog);
         ++registered;
+        // [2026-09-11] One fetch per registration: the next component for this player (pawn change, rejoin)
+        // must get what the Mothership holds THEN, not this snapshot -- the client refuses mismatched progress.
+        if (!org.empty()) { std::lock_guard<std::mutex> lk(g_qMx); g_qReady.erase(org); }
         HxLog("[HalcyonA2][QUEST] register %s (pc %s) with %zu REAL quests IsInitialized ->%d\n",
                o->GetName().c_str(),
                reinterpret_cast<SDK::UObject*>(pc)->GetName().c_str(), quests.size(),
@@ -9727,6 +9750,39 @@ static __int64 __fastcall QSetP_Hook(void* sp, void* pawn, void* guid, unsigned 
 {
     printf("[HalcyonA2][QTRACE] ServerProgression::SetProgress sp=%p pawn=%p progress=%d\n", sp, pawn, (int)prog);
     return QSetP_Orig(sp, pawn, guid, prog);
+}
+
+// [2026-09-11 QBUNDLE] Where do quest DEFINITIONS come from on this server, and do players get them?
+//   sub_144692F30(UServerProgression, FAAQuestBundle*, ?, bIsRemoving) adds a bundle. Callers: Server_SetQuests
+//     _Impl (a CLIENT hands the server its bundles), sub_1446EC3B0, sub_1446F72D0 (gamemode quest data).
+//   sub_144689030(UA2PlayerQuestComponent*, FAAQuestBundle*, bIsRemoving) sends Client_SetQuests to a player;
+//     called on player register (sub_14468BE60) and for every bundle added.
+// FAAQuestBundle quest rows: TArray @+0x20 (0x120 each), count @+0x28 (as read by Client_SetQuests_Impl).
+using QAddBundle_t = __int64(__fastcall*)(void*, void*, void*, unsigned char);
+using QSendSet_t   = __int64(__fastcall*)(void*, void*, char);
+static QAddBundle_t QAddBundle_Orig = nullptr;
+static QSendSet_t   QSendSet_Orig   = nullptr;
+static volatile long g_qBundleAdds = 0, g_qClientSends = 0;
+static int SafeBundleRows(void* bundle)
+{
+    __try { return bundle ? *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(bundle) + 0x28) : -1; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return -2; }
+}
+static __int64 __fastcall QAddBundle_Hook(void* sp, void* bundle, void* a3, unsigned char removing)
+{
+    const long n = InterlockedIncrement(&g_qBundleAdds);
+    if (n <= 200)
+        HxLog("[HalcyonA2][QBUNDLE] bundle %s #%ld rows=%d sp=%p caller=GAME+0x%llX\n", removing ? "REMOVE" : "add", n,
+              SafeBundleRows(bundle), sp, (unsigned long long)(reinterpret_cast<uintptr_t>(_ReturnAddress()) - GetBase()));
+    return QAddBundle_Orig(sp, bundle, a3, removing);
+}
+static __int64 __fastcall QSendSet_Hook(void* comp, void* bundle, char removing)
+{
+    const long n = InterlockedIncrement(&g_qClientSends);
+    if (n <= 300)
+        HxLog("[HalcyonA2][QBUNDLE] Client_SetQuests #%ld -> comp=%p rows=%d removing=%d caller=GAME+0x%llX\n", n, comp,
+              SafeBundleRows(bundle), (int)removing, (unsigned long long)(reinterpret_cast<uintptr_t>(_ReturnAddress()) - GetBase()));
+    return QSendSet_Orig(comp, bundle, removing);
 }
 
 // Texture-streaming thunk sub_54ABCC0(a1): this = *(a1+0x890); return (*this->vtable[0x600/8])(this).
@@ -10395,6 +10451,25 @@ static void ProfDump()
 }
 // ====================================================================================
 
+// [2026-09-11 QRPC] Every UA2PlayerQuestComponent function dispatched through ProcessEvent: incoming client RPCs
+// (Server_SetQuests, Server_SetQuestProgressionAndInitializeQuests, Server_SetProgress, ...) and our outgoing
+// Client_SetQuests. Cheap: one pointer compare against the class (the UFunction's Outer); the name is only built
+// for quest functions, and the log is capped.
+static void QuestRpcTrace(SDK::UObject* Context, SDK::UFunction* Function)
+{
+    static SDK::UObject* s_qcCls = nullptr;
+    static ULONGLONG s_qcTry = 0;
+    if (!s_qcCls && GetTickCount64() - s_qcTry > 5000)
+    {
+        s_qcTry = GetTickCount64();
+        s_qcCls = SDK::UObject::FindClassFast("A2PlayerQuestComponent");
+    }
+    if (!s_qcCls || !Function || Function->Outer != s_qcCls) return;
+    static volatile long s_qrpc = 0;
+    if (InterlockedIncrement(&s_qrpc) <= 400)
+        HxLog("[HalcyonA2][QRPC] %s on %p\n", Function->GetName().c_str(), static_cast<void*>(Context));
+}
+
 static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, void* Parms)
 {
     // [PORT 22284] DROP A2SpectatorEntity::Server_ApplyData. The server's phantom local player rides
@@ -10415,6 +10490,8 @@ static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, v
     // SafeProcessEventOrig SEH net below still stops any stray dispatch AV from killing the server.
 
     if (g_bootSpineOnly) { SafeProcessEventOrig(Context, Function, Parms); return; }
+
+    QuestRpcTrace(Context, Function);   // [2026-09-11 QRPC] (helper: this function has SEH, so no C++ temporaries here)
 
     // [22284] Drop OVRPlatform BP-library calls on the headless server (see g_neuterQuestPlatform). A VR
     // player's kiosk init dispatches User_GetOrgScopedID etc. into the Oculus Platform SDK, which
@@ -11940,6 +12017,58 @@ static void ClientNvRead()
           rc == 1 ? NvOrigToString(type, v).c_str() : "-");
 }
 
+// [2026-09-11 QSTATE -- client only] -HalcyonQuestState: this client's own quest state every 5s -- whether its
+// pawn's quest component is registered as the local one (+0xF8), the replicated IsInitialized (+0x140) and quest
+// count (+0x130), and whether ClientProgression (sub_1446849A0(world)) switched quests on (+0x3D9) and which
+// component it holds as local (+0x3F0). "Quests never appear" = questsOn stays 0.
+static bool g_clientQuestState = false;
+static void ClientQuestStateImpl()
+{
+    {
+        auto* world = SDK::UWorld::GetWorld();
+        if (!world || !world->OwningGameInstance) return;
+        auto& lps = world->OwningGameInstance->LocalPlayers;
+        if (lps.Num() <= 0 || !lps[0] || !lps[0]->PlayerController) return;
+        SDK::APawn* pawn = lps[0]->PlayerController->Pawn;
+        static SDK::UClass* qcCls = nullptr;
+        if (!qcCls) qcCls = SDK::UObject::FindClassFast("A2PlayerQuestComponent");
+        if (!qcCls) return;
+        uintptr_t comp = 0; int comps = 0;
+        const int32_t n = SDK::UObject::GObjects->Num();
+        for (int32_t i = 0; i < n; ++i)
+        {
+            auto* o = SDK::UObject::GObjects->GetByIndex(i);
+            if (!o || o->IsDefaultObject() || !o->IsA(qcCls)) continue;
+            ++comps;
+            if (pawn && o->Outer == static_cast<SDK::UObject*>(pawn)) comp = reinterpret_cast<uintptr_t>(o);
+        }
+        const uintptr_t cp = reinterpret_cast<uintptr_t(__fastcall*)(void*)>(GetBase() + 0x46849A0)(world);
+        char line[320];
+        snprintf(line, sizeof(line),
+                 "pawnComp=%p local(+0xF8)=%d IsInitialized=%d quests=%d lastUpdate=%lld | ClientProgression=%p questsOn(+0x3D9)=%d localComp=%p defs=%d states=%d | quest comps=%d",
+                 reinterpret_cast<void*>(comp),
+                 comp ? *reinterpret_cast<uint8_t*>(comp + 0xF8) : -1,
+                 comp ? *reinterpret_cast<uint8_t*>(comp + 0x140) : -1,
+                 comp ? *reinterpret_cast<int*>(comp + 0x130) : -1,
+                 comp ? *reinterpret_cast<long long*>(comp + 0x120) : -1LL,
+                 reinterpret_cast<void*>(cp),
+                 cp ? *reinterpret_cast<uint8_t*>(cp + 0x3D9) : -1,
+                 cp ? *reinterpret_cast<void**>(cp + 0x3F0) : nullptr,
+                 cp ? *reinterpret_cast<int*>(cp + 344) - *reinterpret_cast<int*>(cp + 388) : -1,    // quest definitions (TSet @+336)
+                 cp ? *reinterpret_cast<int*>(cp + 632) - *reinterpret_cast<int*>(cp + 676) : -1,    // quest states (TMap @+624)
+                 comps);
+        static char s_last[320] = {};
+        static ULONGLONG s_at = 0;
+        if (strcmp(line, s_last) != 0 || GetTickCount64() - s_at > 30000)
+        {
+            HxLog("[HalcyonA2][QSTATE] %s %s\n", NowStamp(), line);
+            strcpy_s(s_last, line);
+            s_at = GetTickCount64();
+        }
+    }
+}
+static void ClientQuestState() { __try { ClientQuestStateImpl(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+
 static void ClientInstallTeamHooks(uintptr_t base)
 {
     MH_Initialize();
@@ -11989,6 +12118,7 @@ static void ClientMain(uintptr_t base)
         if (g_clientDrive && g_clientInArena && tick > 6) ClientDriveActions();
         if (g_clientInArena && tick > 6) { ClientScriptTick(); ClientTeamState(); }
         if (!g_nvReadPath.empty() && tick > 8 && (tick % 5) == 0) ClientNvRead();
+        if (g_clientQuestState && tick > 6 && (tick % 5) == 0) ClientQuestState();
         if (!g_noBallLog) ClientReportState();   // [BALLTEST] every second on BOTH clients, timestamped for correlation
     }
 }
@@ -12053,6 +12183,7 @@ static void Main(HMODULE)
     {
         if (wcsstr(GetCommandLineW(), L"-HalcyonDrive")) g_clientDrive = true;
         if (wcsstr(GetCommandLineW(), L"-HalcyonNoBalls")) g_noBallLog = true;
+        if (wcsstr(GetCommandLineW(), L"-HalcyonQuestState")) g_clientQuestState = true;
         if (const wchar_t* nr = wcsstr(GetCommandLineW(), L"-HalcyonNvRead="))
         {
             nr += wcslen(L"-HalcyonNvRead=");
@@ -12270,6 +12401,8 @@ static void Main(HMODULE)
         if (rotbuf[0]) sscanf_s(rotbuf, "%lf,%lf,%lf", &g_slotRotAdj[0], &g_slotRotAdj[1], &g_slotRotAdj[2]);
         grab(L"-BallClass=", g_ballClass, sizeof(g_ballClass));   // renderable ball to replace broken death balls
         if (wcsstr(GetCommandLineW(), L"-KillMgrRepl")) { g_disableMgrRepl = true; HxLog("[HalcyonA2] -KillMgrRepl: BallSimManager set non-replicating (old flood-suppression behaviour)\n"); }
+        if (wcsstr(GetCommandLineW(), L"-QuestTestSeed")) g_questTestSeed = true;
+        if (wcsstr(GetCommandLineW(), L"-QuestTestNoOrg")) { g_questTestNoOrg = true; HxLog("[HalcyonA2][QUEST] -QuestTestNoOrg: registering players without an org (LOCAL TESTING ONLY)\n"); }
         if (wcsstr(GetCommandLineW(), L"-NoAuthGate")) { g_gateEnforce = false; HxLog("[HalcyonA2][GATE] -NoAuthGate: auth gate is LOG-ONLY (no kicks) - testing only\n"); }
         if (wcsstr(GetCommandLineW(), L"-NoFixLOD")) g_fixLod = false;   // disable the DefaultLODSettings pop-in fix
         if (wcsstr(GetCommandLineW(), L"-BallPump"))   { g_ballPumpsEnabled = true;  HxLog("[HalcyonA2] -BallPump: manual ball-sim pump ENABLED\n"); }
@@ -12885,6 +13018,9 @@ static void Main(HMODULE)
     MH_STATUS qb = MH_CreateHook(reinterpret_cast<void*>(base + 0x46902F0), &QSetQ_Hook, reinterpret_cast<void**>(&QSetQ_Orig));
     // [PORT 22284] QReg(0x4680E50)/QSetP(0x4685C30) DISABLED — RVAs unfound (trace-only).
     printf("[HalcyonA2] QTRACE hooks: Init=%s SetQuests=%s\n", MH_StatusToString(qa), MH_StatusToString(qb));
+    MH_STATUS qc = MH_CreateHook(reinterpret_cast<void*>(base + 0x4692F30), &QAddBundle_Hook, reinterpret_cast<void**>(&QAddBundle_Orig));
+    MH_STATUS qd = MH_CreateHook(reinterpret_cast<void*>(base + 0x4689030), &QSendSet_Hook, reinterpret_cast<void**>(&QSendSet_Orig));
+    HxLog("[HalcyonA2][QBUNDLE] hooks: AddBundle=%s SendClientSetQuests=%s\n", MH_StatusToString(qc), MH_StatusToString(qd));
 
     // [PORT 22284] StreamThunk null-guard (0x54ABCC0) DISABLED — RVA unfound (tiny indirect-jmp thunk);
     // runtime crash-driven. Note: r.TextureStreaming 0 already kills the streaming path on -nullrhi.

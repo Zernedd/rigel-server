@@ -87,7 +87,10 @@ public sealed class MothershipServer : AstraHttpServer, IMothershipServer
         (Environment.GetEnvironmentVariable("MOTHERSHIP_ALLOW_NONSTORE") ?? "") is "1" or "true" or "TRUE" or "yes";
     static readonly bool   QUEST_REQUIRE_STORE      = !INSECURE_TESTING && !ALLOW_NONSTORE && true;    // require app_integrity_state == StoreRecognized
     static readonly bool   QUEST_REQUIRE_DEVICE_BASIC = !INSECURE_TESTING && true;  // require device_integrity_state in {Advanced, Basic} (reject NotTrusted)
-    static readonly bool   QUEST_REQUIRE_PATCHED    = !INSECURE_TESTING && true;    // deny if security_update_pending_days >= 1
+    // [2026-09-11] OFF. It denied the login of any headset with a pending OS security update AND (via
+    // QUEST_BAN_ON_TAMPER) fired a 7-day Meta device ban on it -- a legit player who simply hasn't installed the
+    // latest patch is not tampering. A pending update is now only logged ("[QUEST-ATT] note ... (allowed)").
+    static readonly bool   QUEST_REQUIRE_PATCHED    = false;
     static readonly bool   QUEST_BAN_ON_TAMPER      = !INSECURE_TESTING && true;    // fire a device ban when a tamper check fails
     const int    QUEST_BAN_MINUTES        = 7 * 24 * 60;   // 7 days
 
@@ -173,7 +176,16 @@ public sealed class MothershipServer : AstraHttpServer, IMothershipServer
             Encoding.UTF8.GetBytes(k), Encoding.UTF8.GetBytes(SERVER_API_KEY));
     }
 
-    public MothershipServer() : base(HOSTNAME, PORT) { }
+    // The backend runs as a scheduled task with no console, so Console.WriteLine output (every [QUEST-ATT] auth
+    // decision, every [QUEST-BAN]) was thrown away and a failed login left no trace in the log files. Keep a static
+    // handle to this server's file logger so the static helpers can write there too.
+    private static Serilog.ILogger? s_fileLog;
+    public MothershipServer() : base(HOSTNAME, PORT) { s_fileLog = Logger; }
+    private static void AuthLog(string line)
+    {
+        Console.WriteLine(line);
+        s_fileLog?.Warning("{AuthLine}", line);
+    }
 
 
     private static string NewId() => Guid.NewGuid().ToString();
@@ -424,11 +436,11 @@ public sealed class MothershipServer : AstraHttpServer, IMothershipServer
             using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
             var resp = await http.PostAsync(url, null);
             var text = await resp.Content.ReadAsStringAsync();
-            Console.WriteLine($"[QUEST-BAN] unique_id={uniqueId} minutes={minutes} reason='{reason}' -> {text}");
+            AuthLog($"[QUEST-BAN] unique_id={uniqueId} minutes={minutes} reason='{reason}' -> {text}");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[QUEST-BAN] unique_id={uniqueId} error: {ex.Message}");
+            AuthLog($"[QUEST-BAN] unique_id={uniqueId} error: {ex.Message}");
         }
     }
 
@@ -645,7 +657,11 @@ public sealed class MothershipServer : AstraHttpServer, IMothershipServer
         if (string.IsNullOrEmpty(userId))           return JsonAnon(new { error = "UserId not found" },           HttpStatusCode.NotFound);
         if (string.IsNullOrEmpty(attestationToken)) return JsonAnon(new { error = "AttestationToken not found" }, HttpStatusCode.NotFound);
         if (string.IsNullOrEmpty(metaNonce))        return JsonAnon(new { error = "MetaNonce not found" },        HttpStatusCode.NotFound);
-        if (!_pendingQuestAuth.ContainsKey(userId)) return JsonAnon(new { error = "No pending authentication" },  HttpStatusCode.NotFound);
+        if (!_pendingQuestAuth.ContainsKey(userId))
+        {
+            AuthLog($"[QUEST-ATT] DENY userId={userId} reason='no pending authentication (complete without a matching begin)'");
+            return JsonAnon(new { error = "No pending authentication" }, HttpStatusCode.NotFound);
+        }
 
         // --- Meta Platform Integrity verification --------------------------------------------------
         // The client obtained `attestationToken` via DeviceApplicationIntegrity::GetIntegrityToken.
@@ -677,7 +693,7 @@ public sealed class MothershipServer : AstraHttpServer, IMothershipServer
         // can replay it against graph.oculus.com offline and see why enforcement would pass/fail
         // (app-creds? nonce binding? package pin? token format?). Skipped for the trusted-server's
         // dummy "x" token. Remove once enforcement is validated.
-        Console.WriteLine(
+        AuthLog(
             $"[QUEST-ATT] userId={userId} attOk={att.Ok} attMsg={att.Message} " +
             $"claimNonce={att.Nonce} metaNonce={metaNonce} issuedNonce={issuedNonce} " +
             $"exp={att.Exp} ts={att.Timestamp} pkg={att.PackageId} app={att.AppIntegrity} dev={att.DeviceIntegrity} " +
@@ -687,15 +703,22 @@ public sealed class MothershipServer : AstraHttpServer, IMothershipServer
         if (QUEST_ENFORCE && !trustedServer)
         {
             // --- (b) UserProof: prove the userId genuinely owns the Meta account -------------------
+            // Every denial below is logged with its reason (they used to return silently).
+            IHttpActionResult Deny(string reason)
+            {
+                AuthLog($"[QUEST-ATT] DENY userId={userId} reason='{reason}' uid={att.UniqueId}");
+                return JsonAnon(new { error = reason }, HttpStatusCode.Unauthorized);
+            }
+
             if (!proof.Ok)
-                return JsonAnon(new { error = "userproof nonce invalid" }, HttpStatusCode.Unauthorized);
+                return Deny("userproof nonce invalid");
             // MetaNonce is single-use too (Meta also invalidates it, but guard our side).
             if (string.IsNullOrEmpty(metaNonce) || !_usedQuestNonces.TryAdd("mp:" + metaNonce, 1))
-                return JsonAnon(new { error = "userproof nonce replayed" }, HttpStatusCode.Unauthorized);
+                return Deny("userproof nonce replayed");
 
             // --- (a) Attestation: device/app integrity + challenge-nonce binding -------------------
             if (!att.Ok)
-                return JsonAnon(new { error = $"attestation verify failed: {att.Message}" }, HttpStatusCode.Unauthorized);
+                return Deny($"attestation verify failed: {att.Message}");
 
             // The nonce Meta signed into the claims must match the challenge we issued in begin/QUEST
             // (server-derived, strongest); fall back to the client-reported nonce only if we issued
@@ -703,22 +726,23 @@ public sealed class MothershipServer : AstraHttpServer, IMothershipServer
             bool bound = (!string.IsNullOrEmpty(issuedNonce) && att.Nonce == issuedNonce)
                       || (string.IsNullOrEmpty(issuedNonce) && !string.IsNullOrEmpty(att.Nonce));
             if (!bound)
-                return JsonAnon(new { error = "attestation nonce mismatch" }, HttpStatusCode.Unauthorized);
+                return Deny("attestation nonce mismatch");
 
             // Single-use on the challenge nonce.
             if (string.IsNullOrEmpty(att.Nonce) || !_usedQuestNonces.TryAdd("att:" + att.Nonce, 1))
-                return JsonAnon(new { error = "attestation nonce replayed" }, HttpStatusCode.Unauthorized);
+                return Deny("attestation nonce replayed");
 
             // Freshness (Meta enforces 24h, but be explicit).
             if (att.Exp != 0 && att.Exp < DateTimeOffset.UtcNow.ToUnixTimeSeconds())
-                return JsonAnon(new { error = "attestation expired" }, HttpStatusCode.Unauthorized);
+                return Deny("attestation expired");
 
             // Meta already banned this device -> deny (no re-ban; the ban is live on Meta's side).
             if (att.DeviceBanned)
-            {
-                Console.WriteLine($"[QUEST-ATT] DENY userId={userId} reason='device_ban.is_banned' uid={att.UniqueId}");
-                return JsonAnon(new { error = "device banned" }, HttpStatusCode.Unauthorized);
-            }
+                return Deny("device banned (device_ban.is_banned)");
+
+            // A pending OS security update is not tampering (see QUEST_REQUIRE_PATCHED): note it, let them in.
+            if (att.SecurityPendingDays >= 1)
+                AuthLog($"[QUEST-ATT] note userId={userId} security_update_pending_days={att.SecurityPendingDays} (allowed)");
 
             // --- TAMPER checks: any failure denies AND fires a 7-day device ban on the token's uid ---
             string tamper = null;
@@ -738,7 +762,7 @@ public sealed class MothershipServer : AstraHttpServer, IMothershipServer
             {
                 if (QUEST_BAN_ON_TAMPER && !string.IsNullOrEmpty(att.UniqueId))
                     _ = BanDevice(att.UniqueId, QUEST_BAN_MINUTES, tamper);   // fire-and-forget (don't jam the response)
-                Console.WriteLine($"[QUEST-ATT] DENY+BAN userId={userId} reason='{tamper}' uid={att.UniqueId}");
+                AuthLog($"[QUEST-ATT] DENY{(QUEST_BAN_ON_TAMPER ? "+BAN" : "")} userId={userId} reason='{tamper}' uid={att.UniqueId}");
                 return JsonAnon(new { error = $"attestation policy failed: {tamper}" }, HttpStatusCode.Unauthorized);
             }
         }
