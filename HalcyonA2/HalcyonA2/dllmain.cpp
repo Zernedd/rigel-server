@@ -2417,6 +2417,156 @@ static void PrintCapturedString(void* fstr)
 static bool g_quietSims = false;
 static bool g_pinSimResults = false;  // [2026-09-07] OFF: pinning mgr+0x412 every frame caused the ball snap-back stutter (see the pin site). -PinSimResults re-enables.
 
+// ======================= SHARED OBJECT INDEX (one walk instead of ten) =======================
+// [2026-09-11 PERF] Ten subsystems each answered "which objects are of class X?" by walking the whole
+// GObjects array (167k on prod, ~15-30ms a pass) once or twice a second. The live [PROF] line showed
+// walks/s=7-12 and named them: WireVRPawns, InitTeamColors, InitPlayerQuests, TrainingTick,
+// EnableGoals, DetectGoals, GolfSinkDetect, VolleyfallTick, PumpBallOverlaps, PumpPhysicsSync -- each
+// 13-30ms, several landing in the same frame. That is ~150ms/s of game thread and, worse, the source
+// of the remaining 40-85ms frame stalls (the ball sim steps at ~90Hz, so every stall starves it).
+//
+// One shared pass replaces all of them: ObjIndexTick() walks a SLICE of GObjects per tick (~1s for a
+// full pass at the server's ~800 ticks/s), classifies each object into every registered class bucket
+// in that single visit, and publishes the finished lists atomically at the end of the pass. Consumers
+// iterate the published list via ClassObjects(cls).
+//
+// Semantics are preserved deliberately:
+//   * index order is preserved (the pass runs 0..Num, exactly like the loops it replaces);
+//   * CDOs are excluded, same as every `o->IsDefaultObject()` filter it replaces;
+//   * IsA() is still what decides membership -- no cast-flag or name shortcuts;
+//   * entries are VALIDATED on read (GObjects[idx] must still hold that exact pointer), so a consumer
+//     can never touch an object that was destroyed since the pass -- the same guarantee a live walk
+//     gives. Four of these consumers already tolerated 3s-stale caches; this is strictly safer.
+//   * the first ClassObjects() call for a class does one immediate full walk, so startup behaviour and
+//     first-frame discovery are unchanged. Everything after that rides the shared pass.
+// The only behavioural change is discovery LATENCY: a newly spawned object joins its list within one
+// pass (~1s) instead of on the next call. Every consumer here is a discovery/idempotent-init probe
+// that already ran on a 1-3s cadence, so that is a no-op for them.
+struct ObjIdxEntry { SDK::UObject* obj; int32_t idx; };
+struct ObjIdxBucket
+{
+    SDK::UClass* cls = nullptr;
+    std::vector<ObjIdxEntry> build;    // filling during the current pass
+    std::vector<ObjIdxEntry> pub;      // last completed pass (what consumers read)
+    std::vector<SDK::UObject*> view;   // validated scratch handed to the consumer
+    long passes = 0;
+};
+static ObjIdxBucket g_objIdx[48];
+static int      g_objIdxN = 0;
+static int32_t  g_objIdxCursor = 0;
+static long     g_objIdxPasses = 0;
+
+static ObjIdxBucket* ObjIdxBucketFor(SDK::UClass* cls)
+{
+    if (!cls) return nullptr;
+    for (int i = 0; i < g_objIdxN; ++i) if (g_objIdx[i].cls == cls) return &g_objIdx[i];
+    if (g_objIdxN >= 48) return nullptr;          // table full -> caller falls back to a direct walk
+    ObjIdxBucket* b = &g_objIdx[g_objIdxN++];
+    b->cls = cls; b->passes = 0;
+    b->build.clear(); b->pub.clear();
+    return b;
+}
+
+// One full walk, used only to seed a class the shared pass has not published yet.
+static void ObjIdxSeed(ObjIdxBucket* b)
+{
+    const int32_t num = SDK::UObject::GObjects->Num();
+    InterlockedIncrement(&g_walks); g_objN = num;   // [PROF] full-walk accounting
+    b->pub.clear();
+    for (int32_t i = 0; i < num; ++i)
+    {
+        auto* o = SDK::UObject::GObjects->GetByIndex(i);
+        if (!o || o->IsDefaultObject() || !o->IsA(b->cls)) continue;
+        b->pub.push_back({ o, i });
+    }
+    b->passes = 1;
+}
+
+// The list of live, non-CDO instances of `cls`. Validated: every entry is still the object sitting at
+// the GObjects index it was found at.
+static const std::vector<SDK::UObject*>& ClassObjects(SDK::UClass* cls)
+{
+    static std::vector<SDK::UObject*> s_empty;
+    if (!cls) return s_empty;
+    ObjIdxBucket* b = ObjIdxBucketFor(cls);
+    if (!b)
+    {
+        // Table full. Returning an empty list here would silently switch a subsystem off, so fall back
+        // to the old behaviour -- a direct walk, every call -- and say so once.
+        static ObjIdxBucket s_fallback;
+        static bool s_warned = false;
+        if (!s_warned) { s_warned = true; HxLog("[HalcyonA2][OBJIDX] bucket table full -- %s falls back to direct walks\n", cls->GetName().c_str()); }
+        s_fallback.cls = cls; s_fallback.passes = 0;
+        ObjIdxSeed(&s_fallback);
+        s_fallback.view.clear();
+        for (const ObjIdxEntry& e : s_fallback.pub) s_fallback.view.push_back(e.obj);
+        return s_fallback.view;
+    }
+    if (b->passes == 0) ObjIdxSeed(b);             // first use: behave exactly like the old direct walk
+    b->view.clear();
+    b->view.reserve(b->pub.size());
+    for (const ObjIdxEntry& e : b->pub)
+        if (SDK::UObject::GObjects->GetByIndex(e.idx) == e.obj) b->view.push_back(e.obj);
+    return b->view;
+}
+
+// Same list, but with the GObjects index kept — for callers that cache indices and re-resolve later.
+static const std::vector<ObjIdxEntry>& ClassObjectEntries(SDK::UClass* cls)
+{
+    static std::vector<ObjIdxEntry> s_emptyE, s_viewE;
+    if (!cls) return s_emptyE;
+    ObjIdxBucket* b = ObjIdxBucketFor(cls);
+    if (!b)
+    {
+        static ObjIdxBucket s_fallbackE;   // table full -> direct walk, never an empty list (see ClassObjects)
+        s_fallbackE.cls = cls; s_fallbackE.passes = 0;
+        ObjIdxSeed(&s_fallbackE);
+        return s_fallbackE.pub;
+    }
+    if (b->passes == 0) ObjIdxSeed(b);
+    s_viewE.clear();
+    for (const ObjIdxEntry& e : b->pub)
+        if (SDK::UObject::GObjects->GetByIndex(e.idx) == e.obj) s_viewE.push_back(e);
+    return s_viewE;
+}
+
+// Called once per tick. Walks a slice; publishes when the pass completes.
+static void ObjIndexTick()
+{
+    if (g_objIdxN == 0) return;
+    const int32_t num = SDK::UObject::GObjects->Num();
+    if (num <= 0) return;
+    g_objN = num;
+    // Target one complete pass per ~1s. The server ticks ~800/s, so ~1/700th of the array per tick
+    // (floored so a small array still finishes promptly). ~0.03ms/tick at 167k objects.
+    int32_t slice = num / 700; if (slice < 256) slice = 256;
+    int32_t i = g_objIdxCursor;
+    if (i > num) i = 0;
+    const int32_t end = (i + slice < num) ? (i + slice) : num;
+    for (; i < end; ++i)
+    {
+        auto* o = SDK::UObject::GObjects->GetByIndex(i);
+        if (!o || o->IsDefaultObject()) continue;
+        for (int b = 0; b < g_objIdxN; ++b)
+            if (g_objIdx[b].cls && o->IsA(g_objIdx[b].cls)) g_objIdx[b].build.push_back({ o, i });
+    }
+    g_objIdxCursor = i;
+    if (i >= num)
+    {
+        for (int b = 0; b < g_objIdxN; ++b)
+        {
+            g_objIdx[b].pub.swap(g_objIdx[b].build);
+            g_objIdx[b].build.clear();
+            ++g_objIdx[b].passes;
+        }
+        g_objIdxCursor = 0;
+        InterlockedIncrement(&g_walks);            // [PROF] one shared walk, amortised across ticks
+        ++g_objIdxPasses;
+    }
+}
+static void SafeObjIndexTick() { __try { ObjIndexTick(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+// ============================================================================================
+
 static void PumpPhysicsSync()
 {
     static SDK::UClass* cls = nullptr;   // [PERF] cached class lookup
@@ -2469,19 +2619,22 @@ static void PumpPhysicsSync()
         static SDK::UClass* pawnCls = nullptr;   // [PERF] cached class lookup
         if (!pawnCls) pawnCls = SDK::UObject::FindClassFast("VRPawn");
         if (!pawnCls) pawnCls = SDK::UObject::FindClassFast("BP_VRPawn_C");
-        const int32_t num = SDK::UObject::GObjects->Num();
-        InterlockedIncrement(&g_walks); g_objN = num;   // [PROF] full-walk accounting
-        for (int32_t i = 0; i < num; ++i)
+        // [2026-09-11 PERF] shared class index instead of a full GObjects walk (see ObjIndexTick).
+        // Two lists off one shared pass; the `else if` exclusivity of the old single loop is kept by
+        // skipping anything already counted as a sync component.
+        for (SDK::UObject* o : ClassObjects(cls))
         {
-            auto* o = SDK::UObject::GObjects->GetByIndex(i);
-            if (!o || o->IsDefaultObject()) continue;
-            if (nSync < 512 && o->IsA(cls)) { syncs[nSync++] = o; }
-            else if (pawnCls && nPlayers < 64 && o->IsA(pawnCls))
+            if (nSync >= 512) break;
+            syncs[nSync++] = o;
+        }
+        if (pawnCls)
+            for (SDK::UObject* o : ClassObjects(pawnCls))
             {
+                if (nPlayers >= 64) break;
+                if (o->IsA(cls)) continue;
                 auto* a = static_cast<SDK::AActor*>(o);
                 if (a->RootComponent) players[nPlayers++] = a->RootComponent->K2_GetComponentLocation();
             }
-        }
     }
     if (nPlayers == 0)   // nobody connected -> nothing to send
         return;
@@ -2565,13 +2718,9 @@ static void WireVRPawnBallSimManagers()
     // catchable in any log window while diagnosing why the player isn't seated.
     static uint64_t s_lastDiscLog = 0;
     const bool forceDisc = (GetTickCount64() - s_lastDiscLog > 2000);
-    const int32_t num = SDK::UObject::GObjects->Num();
-        InterlockedIncrement(&g_walks); g_objN = num;   // [PROF] full-walk accounting
-    for (int32_t i = 0; i < num; ++i)
+    // [2026-09-11 PERF] shared class index instead of a 167k-object walk per call (see ObjIndexTick).
+    for (SDK::UObject* o : ClassObjects(cls))
     {
-        auto* o = SDK::UObject::GObjects->GetByIndex(i);
-        if (!o || o->IsDefaultObject() || !o->IsA(cls))
-            continue;
         // [ORPHAN-PAWN 2026-09-09] Skip pawns whose Controller is gone (APawn::Controller @0x2D0).
         // Measured across four join/disconnect cycles: pawnCount only ever CLIMBED (1 -> 6) - a
         // disconnecting player leaves its VRPawn behind. Those orphans inflated the count, fired a
@@ -4139,14 +4288,12 @@ static void TuneBallNet()
     static SDK::UClass* cls = nullptr;   // [PERF] cached class lookup
     if (!cls) cls = SDK::UObject::FindClassFast("BP_JakeBall_C");
     if (!cls) return;
-    const int32_t num = SDK::UObject::GObjects->Num();
-        InterlockedIncrement(&g_walks); g_objN = num;   // [PROF] full-walk accounting
+    // [2026-09-11 PERF] shared class index instead of a full GObjects walk (see ObjIndexTick).
     static bool loggedOne = false;
     int tuned = 0;
-    for (int32_t i = 0; i < num; ++i)
+    for (SDK::UObject* o : ClassObjects(cls))
     {
-        auto* o = SDK::UObject::GObjects->GetByIndex(i);
-        if (!o || o->IsDefaultObject() || o->Class != cls) continue;
+        if (o->Class != cls) continue;   // exact class, as before (the index matches subclasses too)
         const uintptr_t p = reinterpret_cast<uintptr_t>(o);
         float& nuf  = *reinterpret_cast<float*>(p + 0x178);
         float& mnuf = *reinterpret_cast<float*>(p + 0x17C);
@@ -4182,12 +4329,9 @@ static void EnsureNativeBallSimMgr()
     static SDK::UClass* mgrCls = nullptr;   // [PERF] cached class lookup
     if (!mgrCls) mgrCls = SDK::UObject::FindClassFast("BallSimManager");
     if (!mgrCls) return;
-    const int32_t num = SDK::UObject::GObjects->Num();
-        InterlockedIncrement(&g_walks); g_objN = num;   // [PROF] full-walk accounting
-    for (int32_t i = 0; i < num; ++i)
+    // [2026-09-11 PERF] shared class index instead of a full GObjects walk (see ObjIndexTick).
+    for (SDK::UObject* o : ClassObjects(mgrCls))
     {
-        auto* o = SDK::UObject::GObjects->GetByIndex(i);
-        if (!o || o->IsDefaultObject() || !o->IsA(mgrCls)) continue;
         if (g_ballSimMgr != o)
         {
             g_ballSimMgr = o;
@@ -4213,13 +4357,8 @@ static void WireNativeManagerSubsystem()
     if (!subCls) subCls = SDK::UObject::FindClassFast("OfflineBallSimSubsystem");
     if (!subCls) return;
     void* sub = nullptr;
-    const int32_t num = SDK::UObject::GObjects->Num();
-        InterlockedIncrement(&g_walks); g_objN = num;   // [PROF] full-walk accounting
-    for (int32_t i = 0; i < num; ++i)
-    {
-        auto* o = SDK::UObject::GObjects->GetByIndex(i);
-        if (o && !o->IsDefaultObject() && o->IsA(subCls)) { sub = o; break; }
-    }
+    // [2026-09-11 PERF] shared class index instead of a full GObjects walk (see ObjIndexTick).
+    for (SDK::UObject* o : ClassObjects(subCls)) { sub = o; break; }
     if (!sub) return;
     const uintptr_t slot = reinterpret_cast<uintptr_t>(g_ballSimMgr) + 0x2F0;
     void* before = *reinterpret_cast<void**>(slot);
@@ -5604,16 +5743,24 @@ static void PumpBallOverlaps()
         if (!physCls) physCls = SDK::UObject::FindClassFast("PhysicalComponent");
         static SDK::UClass* goalCls = nullptr;   // [PERF] cached class lookup
         if (!goalCls) goalCls = SDK::UObject::FindClassFast("GoalComponent");
-        const int32_t num = SDK::UObject::GObjects->Num();
-        InterlockedIncrement(&g_walks); g_objN = num;   // [PROF] full-walk accounting
-        for (int32_t i = 0; i < num; ++i)
-        {
-            auto* o = SDK::UObject::GObjects->GetByIndex(i);
-            if (!o || o->IsDefaultObject()) continue;
-            if (discCls && nDisc < 128 && o->IsA(discCls))      discs[nDisc++] = o;
-            else if (physCls && nPhys < 512 && o->IsA(physCls)) phys[nPhys++]  = o;
-            else if (goalCls && nGoal < 64 && o->IsA(goalCls))  goals[nGoal++] = o;
-        }
+        // [2026-09-11 PERF] shared class index instead of a full GObjects walk (see ObjIndexTick).
+        // Three lists off one shared pass, keeping the old loop's first-match-wins exclusivity.
+        if (discCls)
+            for (SDK::UObject* o : ClassObjects(discCls)) { if (nDisc >= 128) break; discs[nDisc++] = o; }
+        if (physCls)
+            for (SDK::UObject* o : ClassObjects(physCls))
+            {
+                if (nPhys >= 512) break;
+                if (discCls && o->IsA(discCls)) continue;
+                phys[nPhys++] = o;
+            }
+        if (goalCls)
+            for (SDK::UObject* o : ClassObjects(goalCls))
+            {
+                if (nGoal >= 64) break;
+                if ((discCls && o->IsA(discCls)) || (physCls && o->IsA(physCls))) continue;
+                goals[nGoal++] = o;
+            }
     }
 
     // [PERF 2026-09-09] AMORTIZED. This used to run every list in full on ONE call: up to
@@ -5894,12 +6041,9 @@ static void DetectRunnerAtFinish()
         if (!physCls) physCls = SDK::UObject::FindClassFast("PhysicalComponent");
         if (physCls)
         {
-            const int32_t num = SDK::UObject::GObjects->Num();
-        InterlockedIncrement(&g_walks); g_objN = num;   // [PROF] full-walk accounting
-            for (int32_t i = 0; i < num; ++i)
+            // [2026-09-11 PERF] shared class index instead of a full GObjects walk (see ObjIndexTick).
+            for (SDK::UObject* o : ClassObjects(physCls))
             {
-                auto* o = SDK::UObject::GObjects->GetByIndex(i);
-                if (!o || o->IsDefaultObject() || !o->IsA(physCls)) continue;
                 SDK::UObject* owner = o->Outer;
                 bool hit = o->GetName().find("PlayerOverlapAtEnd") != std::string::npos
                         || (owner && owner->GetName().find("PlayerOverlapAtEnd") != std::string::npos);
@@ -5950,12 +6094,12 @@ static void DetectRunnerAtFinish()
         if (!pawnCls) pawnCls = SDK::UObject::FindClassFast("BP_VRPawn_C");
         if (pawnCls)
         {
-            const int32_t num = SDK::UObject::GObjects->Num();
-        InterlockedIncrement(&g_walks); g_objN = num;   // [PROF] full-walk accounting
-            for (int32_t i = 0; i < num && nPawn < 128; ++i)
+            // [2026-09-11 PERF] shared class index instead of a full GObjects walk (see ObjIndexTick).
+            // Indices are still what gets cached: the loop below re-resolves them for liveness.
+            for (const ObjIdxEntry& e : ClassObjectEntries(pawnCls))
             {
-                auto* o = SDK::UObject::GObjects->GetByIndex(i);
-                if (o && !o->IsDefaultObject() && o->IsA(pawnCls)) pawnIdx[nPawn++] = i;
+                if (nPawn >= 128) break;
+                pawnIdx[nPawn++] = e.idx;
             }
         }
     }
@@ -6624,13 +6768,9 @@ static void EnableGoals()
     if (!goalCls)
         return;
     static SDK::UFunction* fnEnable = nullptr;
-    const int32_t num = SDK::UObject::GObjects->Num();
-        InterlockedIncrement(&g_walks); g_objN = num;   // [PROF] full-walk accounting
-    for (int32_t i = 0; i < num; ++i)
+    // [2026-09-11 PERF] shared class index instead of a 167k-object walk per call (see ObjIndexTick).
+    for (SDK::UObject* o : ClassObjects(goalCls))
     {
-        auto* o = SDK::UObject::GObjects->GetByIndex(i);
-        if (!o || o->IsDefaultObject() || !o->IsA(goalCls))
-            continue;
         const uintptr_t p = reinterpret_cast<uintptr_t>(o);
         if (*reinterpret_cast<int*>(p + 0x590) < 0)          // template / unassigned goal
             continue;
@@ -6846,13 +6986,10 @@ static void DetectGoals()
         InterlockedIncrement(&g_rebuilds);   // [PROF] how often caches actually rebuild
         lastRebuild = now;
         gN = 0; bN = 0;
-        const int32_t num = SDK::UObject::GObjects->Num();
-        InterlockedIncrement(&g_walks); g_objN = num;   // [PROF] full-walk accounting
-        for (int32_t i = 0; i < num; ++i)
+        // [2026-09-11 PERF] shared class index instead of a full GObjects walk (see ObjIndexTick).
+        for (SDK::UObject* o : ClassObjects(goalCls))
         {
-            auto* o = SDK::UObject::GObjects->GetByIndex(i);
-            if (!o || o->IsDefaultObject()) continue;
-            if (gN < 64 && o->IsA(goalCls))
+            if (gN >= 64) break;
             {
                 const uintptr_t p = reinterpret_cast<uintptr_t>(o);
                 if (*reinterpret_cast<int*>(p + 0x590) < 0)
@@ -6870,10 +7007,12 @@ static void DetectGoals()
                 }
                 gObj[gN] = o; gOrg[gN] = bp.Origin; gExt[gN] = bp.BoxExtent; ++gN;
             }
-            else if (bN < 256 && o->IsA(ballCls))
-            {
-                bObj[bN++] = o;
-            }
+        }
+        for (SDK::UObject* o : ClassObjects(ballCls))
+        {
+            if (bN >= 256) break;
+            if (o->IsA(goalCls)) continue;   // keep the old loop's first-match-wins exclusivity
+            bObj[bN++] = o;
         }
         int gEnabled = 0;
         for (int g = 0; g < gN; ++g)
@@ -7072,28 +7211,33 @@ static void GolfSinkDetect()
         static SDK::UClass* compCls = nullptr;   // [PERF] cached class lookup
         if (!compCls) compCls = SDK::UObject::FindClassFast("GolfCupComponent");
         SDK::UObject* compTmp[128]; int nComp = 0;
-        const int32_t num = SDK::UObject::GObjects->Num();
-        InterlockedIncrement(&g_walks); g_objN = num;   // [PROF] full-walk accounting
-        for (int32_t i = 0; i < num; ++i)
+        // [2026-09-11 PERF] shared class index instead of a full GObjects walk (see ObjIndexTick).
+        // Three lists off one shared pass, keeping the old loop's first-match-wins exclusivity.
+        for (SDK::UObject* o : ClassObjects(cupCls))
         {
-            auto* o = SDK::UObject::GObjects->GetByIndex(i);
-            if (!o || o->IsDefaultObject()) continue;
-            if (cN < 64 && o->IsA(cupCls))
+            if (cN >= 64) break;
+            auto* vol = *reinterpret_cast<SDK::USceneComponent**>(reinterpret_cast<uintptr_t>(o) + 0x2B8); // GoalTriggerVolume
+            if (!vol) continue;
+            FBoundsParams bp{}; bp.Component = vol;
+            if (!BoundsMemoGet(bp.Component, bp.Origin, bp.BoxExtent))   // [PERF] static geometry: measure once
             {
-                auto* vol = *reinterpret_cast<SDK::USceneComponent**>(reinterpret_cast<uintptr_t>(o) + 0x2B8); // GoalTriggerVolume
-                if (!vol) continue;
-                FBoundsParams bp{}; bp.Component = vol;
-                if (!BoundsMemoGet(bp.Component, bp.Origin, bp.BoxExtent))   // [PERF] static geometry: measure once
-                {
-                    kslCDO->ProcessEvent(fnBounds, &bp);
-                    BoundsMemoPut(bp.Component, bp.Origin, bp.BoxExtent);
-                }
-                cObj[cN] = o; cOrg[cN] = bp.Origin; cExt[cN] = bp.BoxExtent; cComp[cN] = nullptr; ++cN;
+                kslCDO->ProcessEvent(fnBounds, &bp);
+                BoundsMemoPut(bp.Component, bp.Origin, bp.BoxExtent);
             }
-            else if (compCls && nComp < 128 && o->IsA(compCls))
+            cObj[cN] = o; cOrg[cN] = bp.Origin; cExt[cN] = bp.BoxExtent; cComp[cN] = nullptr; ++cN;
+        }
+        if (compCls)
+            for (SDK::UObject* o : ClassObjects(compCls))
+            {
+                if (nComp >= 128) break;
+                if (o->IsA(cupCls)) continue;
                 compTmp[nComp++] = o;
-            else if (bNg < 256 && o->IsA(ballCls))
-                bObj[bNg++] = o;
+            }
+        for (SDK::UObject* o : ClassObjects(ballCls))
+        {
+            if (bNg >= 256) break;
+            if (o->IsA(cupCls) || (compCls && o->IsA(compCls))) continue;
+            bObj[bNg++] = o;
         }
         // Match each cup to its GolfCupComponent by walking the component's Outer chain up to the cup —
         // that component's BallInCup PUBLISHES over the bridge (networked); the cup actor's doesn't.
@@ -7291,29 +7435,34 @@ static void VolleyfallTick()
         InterlockedIncrement(&g_rebuilds);   // [PROF] how often caches actually rebuild
         lastRb = now; pN = 0; bN = 0; sN = 0;
         double zSum = 0.0;
-        const int32_t num = SDK::UObject::GObjects->Num();
-        InterlockedIncrement(&g_walks); g_objN = num;   // [PROF] full-walk accounting
-        for (int32_t i = 0; i < num; ++i)
+        // [2026-09-11 PERF] shared class index instead of a full GObjects walk (see ObjIndexTick).
+        // Three lists off one shared pass, keeping the old loop's first-match-wins exclusivity.
+        for (SDK::UObject* o : ClassObjects(panelCls))
         {
-            auto* o = SDK::UObject::GObjects->GetByIndex(i);
-            if (!o || o->IsDefaultObject()) continue;
-            if (pN < 128 && o->IsA(panelCls))
+            if (pN >= 128) break;
+            auto* mesh = *reinterpret_cast<SDK::USceneComponent**>(reinterpret_cast<uintptr_t>(o) + Panel_Mesh_Off);
+            if (!mesh) continue;
+            FBoundsParams bp{}; bp.Component = mesh;
+            if (!BoundsMemoGet(bp.Component, bp.Origin, bp.BoxExtent))   // [PERF] static geometry: measure once
             {
-                auto* mesh = *reinterpret_cast<SDK::USceneComponent**>(reinterpret_cast<uintptr_t>(o) + Panel_Mesh_Off);
-                if (!mesh) continue;
-                FBoundsParams bp{}; bp.Component = mesh;
-                if (!BoundsMemoGet(bp.Component, bp.Origin, bp.BoxExtent))   // [PERF] static geometry: measure once
-                {
-                    kslCDO->ProcessEvent(fnBounds, &bp);
-                    BoundsMemoPut(bp.Component, bp.Origin, bp.BoxExtent);
-                }
-                pObj[pN] = o; pOrg[pN] = bp.Origin; pExt[pN] = bp.BoxExtent; zSum += bp.Origin.Z; ++pN;
+                kslCDO->ProcessEvent(fnBounds, &bp);
+                BoundsMemoPut(bp.Component, bp.Origin, bp.BoxExtent);
             }
-            else if (bN < 128 && o->IsA(ballCls))
-                bObj[bN++] = o;
-            else if (spawnCls && sN < 16 && o->IsA(spawnCls))
-                sObj[sN++] = o;
+            pObj[pN] = o; pOrg[pN] = bp.Origin; pExt[pN] = bp.BoxExtent; zSum += bp.Origin.Z; ++pN;
         }
+        for (SDK::UObject* o : ClassObjects(ballCls))
+        {
+            if (bN >= 128) break;
+            if (o->IsA(panelCls)) continue;
+            bObj[bN++] = o;
+        }
+        if (spawnCls)
+            for (SDK::UObject* o : ClassObjects(spawnCls))
+            {
+                if (sN >= 16) break;
+                if (o->IsA(panelCls) || o->IsA(ballCls)) continue;
+                sObj[sN++] = o;
+            }
         if (pN > 0) floorZ = zSum / pN;
         if (!fnOverlap && pN > 0 && pObj[0]->Class)
             fnOverlap = pObj[0]->Class->GetFunction("BP_FloorPanelB_LE_C", "ReceiveActorBeginOverlap");
@@ -8055,12 +8204,9 @@ static void SuppressDeathBalls()
     // resolves we swap DiscClass to it (keeps the trap producing a real, renderable ball); otherwise
     // we null DiscClass so SpawnBall no-ops.
     SDK::UClass* repl = g_ballClass[0] ? SDK::UObject::FindClassFast(g_ballClass) : nullptr;
-    const int32_t num = SDK::UObject::GObjects->Num();
-        InterlockedIncrement(&g_walks); g_objN = num;   // [PROF] full-walk accounting
-    for (int32_t i = 0; i < num; ++i)
+    // [2026-09-11 PERF] shared class index instead of a full GObjects walk (see ObjIndexTick).
+    for (SDK::UObject* o : ClassObjects(spawnerCls))
     {
-        auto* o = SDK::UObject::GObjects->GetByIndex(i);
-        if (!o || o->IsDefaultObject() || !o->IsA(spawnerCls)) continue;
         auto** discCls = reinterpret_cast<SDK::UClass**>(reinterpret_cast<uintptr_t>(o) + 0x498);   // DiscClass
         if (*discCls && (*discCls)->GetName().find("DeathBall") != std::string::npos)
         {
@@ -8075,12 +8221,8 @@ static void SuppressDeathBalls()
     {
         auto* c = SDK::UObject::FindClassFast(cn);
         if (!c) return;
-        for (int32_t i = 0; i < num; ++i)
-        {
-            auto* o = SDK::UObject::GObjects->GetByIndex(i);
-            if (!o || o->IsDefaultObject() || !o->IsA(c)) continue;
+        for (SDK::UObject* o : ClassObjects(c))
             if (auto* fn = o->Class->GetFunction("Actor", "K2_DestroyActor")) SafeProcessEvent(o, fn, nullptr);
-        }
     };
     destroyClass("BP_SmallDeathBall_C");
     destroyClass("BP_BigDeathBall_C");
@@ -8296,12 +8438,9 @@ static void InitTeamColors()
     if (!tmCls) return;
     static SDK::UFunction* fnSet = nullptr;
     static SDK::UFunction* fnRep = nullptr;
-    const int32_t num = SDK::UObject::GObjects->Num();
-        InterlockedIncrement(&g_walks); g_objN = num;   // [PROF] full-walk accounting
-    for (int32_t i = 0; i < num; ++i)
+    // [2026-09-11 PERF] shared class index instead of a 167k-object walk per call (see ObjIndexTick).
+    for (SDK::UObject* o : ClassObjects(tmCls))
     {
-        auto* o = SDK::UObject::GObjects->GetByIndex(i);
-        if (!o || o->IsDefaultObject() || !o->IsA(tmCls)) continue;
         const uintptr_t p = reinterpret_cast<uintptr_t>(o);
         const int tcNum = *reinterpret_cast<int*>(p + 0x2F0);            // TeamColors.Num
         auto* tcData    = *reinterpret_cast<unsigned char**>(p + 0x2E8); // TeamColors.Data
@@ -8384,8 +8523,6 @@ static void TrainingTick()
     static SDK::UClass* kioskCls = nullptr;
     if (!kioskCls) kioskCls = SDK::UObject::FindClassFast("BP_TackleballTraining_C");
     if (!kioskCls) return;
-    const int32_t num = SDK::UObject::GObjects->Num();
-        InterlockedIncrement(&g_walks); g_objN = num;   // [PROF] full-walk accounting
     const ULONGLONG now = GetTickCount64();
 
     // Report on watched balls (vel + moved) then drop stale ones.
@@ -8403,10 +8540,9 @@ static void TrainingTick()
         it->second.lastPos = pos;
         if (now - it->second.spawnedMs > 12000) it = g_trainWatch.erase(it); else ++it;
     }
-    for (int32_t i = 0; i < num; ++i)
+    // [2026-09-11 PERF] shared class index instead of a 167k-object walk per call (see ObjIndexTick).
+    for (SDK::UObject* o : ClassObjects(kioskCls))
     {
-        auto* o = SDK::UObject::GObjects->GetByIndex(i);
-        if (!o || o->IsDefaultObject() || !o->IsA(kioskCls)) continue;
         const uintptr_t k = reinterpret_cast<uintptr_t>(o);
         void* shooting = *reinterpret_cast<void**>(k + 0x350);
         void* goalie   = *reinterpret_cast<void**>(k + 0x358);
@@ -9710,23 +9846,16 @@ static void InitPlayerQuests()
     if (!qcCls) qcCls = SDK::UObject::FindClassFast("A2PlayerQuestComponent");
     if (!spCls) spCls = SDK::UObject::FindClassFast("ServerProgression");
     if (!qcCls || !spCls) return;
-    const int32_t num = SDK::UObject::GObjects->Num();
-        InterlockedIncrement(&g_walks); g_objN = num;   // [PROF] full-walk accounting
+    // [2026-09-11 PERF] shared class index instead of a 167k-object walk per call (see ObjIndexTick).
 
     // resolve the live UServerProgression subsystem
     void* sp = nullptr;
-    for (int32_t i = 0; i < num; ++i)
-    {
-        auto* o = SDK::UObject::GObjects->GetByIndex(i);
-        if (o && !o->IsDefaultObject() && o->IsA(spCls)) { sp = o; break; }
-    }
+    for (SDK::UObject* o : ClassObjects(spCls)) { sp = o; break; }
     if (!sp) return;   // subsystem not up yet — retry next pass
 
     int seen = 0, registered = 0, skippedInit = 0;
-    for (int32_t i = 0; i < num; ++i)
+    for (SDK::UObject* o : ClassObjects(qcCls))
     {
-        auto* o = SDK::UObject::GObjects->GetByIndex(i);
-        if (!o || o->IsDefaultObject() || !o->IsA(qcCls)) continue;
         // skip template/placeholder components (owned by a class-default pawn)
         if (!o->Outer || o->Outer->IsDefaultObject()) continue;
         ++seen;
@@ -10741,17 +10870,21 @@ static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, v
     {
         inHook = true;
 
+        // [2026-09-11 PERF] Refresh the shared class index FIRST, so every consumer below reads a list
+        // built by this one amortised slice instead of doing its own 167k-object walk. See ObjIndexTick.
+        PROF(SafeObjIndexTick);
+
         // Make sure g_ballSimMgr points at the live native manager (the hand-spawn that used to set it
         // is disabled). Without this the pin below is dead and no hit ever confirms to clients.
-        SafeEnsureNativeBallSimMgr();
-        SafeTuneBallNet();  // [BALLTUNE] keep jakeball net settings fresh so clients don't lag behind repPos
+        PROF(SafeEnsureNativeBallSimMgr);
+        PROF(SafeTuneBallNet);  // [BALLTUNE] keep jakeball net settings fresh so clients don't lag behind repPos
 
         // [2026-09-04 ★★ SEAT FIX] Drive the reconcile/seater ~4Hz — the game never calls it on our
         // dedicated server, so without this no player is seated (outline=0) and hits can't work. See DriveSeater.
-        SafeDriveSeater();
+        PROF(SafeDriveSeater);
 
         // [2026-09-04 20996 PARITY] one-shot: report/apply the mgr+0x2F0 OfflineBallSimSubsystem back-wire.
-        SafeWireNativeManagerSubsystem();
+        PROF(SafeWireNativeManagerSubsystem);
 
         // Keep the ball-sim results-send flag (mgr+0x412) pinned to 1 on EVERY ProcessEvent call —
         // the GAME advances the sim itself (our step loop is usually inert), and sub_543F2D0 only
