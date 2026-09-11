@@ -1996,6 +1996,31 @@ public sealed class MothershipServer : AstraHttpServer, IMothershipServer
 
     // ── INVENTORY ─────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Client inventory load (what the game calls: "/v1/inventory" + "/client", GET). This route was
+    /// missing, so every request 404'd and the client never finished loading its inventory -- and it only
+    /// reads/writes its cosmetics (userdata key "player_inventory") after that load succeeds, which is why
+    /// cosmetics never saved. Shape verified in the client parser (sub_1451752D0 / sub_14517CBE0):
+    /// { "Results": [ { "platform": string, "isPrimary": bool, "entitlements": [ ... ] } ] }.
+    /// </summary>
+    [HttpGet("/v1/inventory/client")]
+    public async Task<IHttpActionResult> GetInventoryClient(IHttpRequest request, IHttpResponse response)
+    {
+        if (!IsClient(request)) return JsonAnon(new { error = "Unauthorized", code = 401 }, HttpStatusCode.Unauthorized);   // JWT-keyed
+
+        var userId = GetUserIdFromToken(request);
+        if (string.IsNullOrEmpty(userId))
+            return JsonAnon(new { error = "Missing token subject" }, HttpStatusCode.BadRequest);
+
+        var entitlements = new List<JsonElement>();
+        foreach (var item in Database.GetCollection<MothershipInventoryItemDbObject>(true)!.Find(i => i.PlayerId == userId))
+        {
+            try { entitlements.Add(JsonSerializer.Deserialize<JsonElement>(item.ItemDataJson)); }
+            catch { /* skip a malformed stored item rather than fail the whole load */ }
+        }
+        return JsonAnon(new { Results = new[] { new { platform = "QUEST", isPrimary = true, entitlements } } });
+    }
+
     /// <summary>Returns inventory items for a player.</summary>
     [HttpGet("/v1/inventory")]
     public async Task<IHttpActionResult> GetInventory(IHttpRequest request, IHttpResponse response)
