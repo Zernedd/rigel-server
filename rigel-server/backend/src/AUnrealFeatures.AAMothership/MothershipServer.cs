@@ -1584,8 +1584,122 @@ public sealed class MothershipServer : AstraHttpServer, IMothershipServer
 
         var col = Database.GetCollection<MothershipUserDataDbObject>(true)!;
         var item = col.FindOne(d => d.UserId == userId && d.KeyName == keyName);
+        if (keyName == "player_quests")
+            item = ApplyAutoCompletedQuests(col, userId, item);
         if (item == null) return JsonAnon(new { error = "User data not found" }, HttpStatusCode.NotFound);
         return Json(item);
+    }
+
+    // ── AUTO-COMPLETED QUESTS ─────────────────────────────────────────────────
+    // Quests listed in auto_complete_quests.txt (next to the backend; one "<32-hex quest id> [completedVersion]" per
+    // line, '#' comments) are served as COMPLETED in every player's player_quests -- used to unlock everything gated
+    // behind the parkour intro. Applied on read, so the client's own fetch and the game server's trusted fetch (same
+    // route) always see identical progression; the change is written back so it sticks. No file = no change.
+    // player_quests blob: base64 of the UTF-8 JSON with every byte stored minus 1.
+    private static (DateTime Stamp, List<(string Id, int Ver)> Quests) s_autoQuests = (DateTime.MinValue, new());
+
+    private static List<(string Id, int Ver)> AutoCompleteQuests()
+    {
+        try
+        {
+            var path = Path.Combine(AppContext.BaseDirectory, "auto_complete_quests.txt");
+            if (!File.Exists(path)) return new();
+            var stamp = File.GetLastWriteTimeUtc(path);
+            if (stamp == s_autoQuests.Stamp) return s_autoQuests.Quests;
+            var list = new List<(string Id, int Ver)>();
+            foreach (var raw in File.ReadAllLines(path))
+            {
+                var line = raw.Split('#')[0].Trim();
+                if (line.Length == 0) continue;
+                var parts = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+                var id = parts[0].Replace("-", "").ToUpperInvariant();
+                if (id.Length != 32) continue;
+                list.Add((id, parts.Length > 1 && int.TryParse(parts[1], out var v) ? v : 1));
+            }
+            s_autoQuests = (stamp, list);
+            AuthLog($"[QUESTS] auto-complete list loaded: {list.Count} quest(s) from {path}");
+            return list;
+        }
+        catch { return new(); }
+    }
+
+    private static string DecodeQuestBlob(string b64)
+    {
+        var b = Convert.FromBase64String(b64);
+        for (int i = 0; i < b.Length; i++) b[i] = (byte)(b[i] + 1);
+        return Encoding.UTF8.GetString(b);
+    }
+
+    private static string EncodeQuestBlob(string json)
+    {
+        var b = Encoding.UTF8.GetBytes(json);
+        for (int i = 0; i < b.Length; i++) b[i] = (byte)(b[i] - 1);
+        return Convert.ToBase64String(b);
+    }
+
+    private static MothershipUserDataDbObject? ApplyAutoCompletedQuests(
+        LiteDB.ILiteCollection<MothershipUserDataDbObject> col, string userId, MothershipUserDataDbObject? item)
+    {
+        var autos = AutoCompleteQuests();
+        if (autos.Count == 0) return item;
+        try
+        {
+            System.Text.Json.Nodes.JsonObject root;
+            if (item == null || string.IsNullOrEmpty(item.Value))
+                root = new System.Text.Json.Nodes.JsonObject
+                {
+                    ["lastUpdate"] = "0001.01.01-00.00.00",
+                    ["quests"] = new System.Text.Json.Nodes.JsonArray(),
+                    ["savedQuestProgressionVersion"] = 3,
+                };
+            else
+                root = System.Text.Json.Nodes.JsonNode.Parse(DecodeQuestBlob(item.Value)) as System.Text.Json.Nodes.JsonObject
+                       ?? throw new InvalidDataException("player_quests is not a JSON object");
+
+            if (root["quests"] is not System.Text.Json.Nodes.JsonArray quests)
+                root["quests"] = quests = new System.Text.Json.Nodes.JsonArray();
+
+            int added = 0, finished = 0;
+            foreach (var (id, ver) in autos)
+            {
+                var q = quests.OfType<System.Text.Json.Nodes.JsonObject>()
+                              .FirstOrDefault(x => string.Equals((string?)x["iD"], id, StringComparison.OrdinalIgnoreCase));
+                if (q == null)
+                {
+                    quests.Add(new System.Text.Json.Nodes.JsonObject
+                    {
+                        ["iD"] = id, ["progress"] = 255, ["completedVersion"] = ver, ["completedTime"] = "0001.01.01-00.00.00",
+                    });
+                    ++added;
+                }
+                else if ((int?)q["progress"] != 255)
+                {
+                    q["progress"] = 255;
+                    q["completedVersion"] = ver;
+                    ++finished;
+                }
+            }
+            if (added == 0 && finished == 0) return item;
+
+            var blob = EncodeQuestBlob(root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            if (item == null)
+            {
+                item = new MothershipUserDataDbObject { DataId = NewId(), UserId = userId, KeyName = "player_quests", Value = blob, Generation = 1 };
+                col.Insert(item);
+            }
+            else
+            {
+                item.Value = blob;
+                item.Generation = item.Generation + 1;
+                col.Update(item);
+            }
+            AuthLog($"[QUESTS] auto-completed for {userId}: {added} added, {finished} finished");
+        }
+        catch (Exception ex)
+        {
+            AuthLog($"[QUESTS] auto-complete skipped for {userId}: {ex.Message}");
+        }
+        return item;
     }
 
     /// <summary>Client-scoped user data write. user_id from the JWT, not the body.</summary>

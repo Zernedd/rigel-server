@@ -1,0 +1,9 @@
+# Quests every player gets as COMPLETED (read by MothershipServer from the backend's run folder:
+# C:\Env\rigel-server\run\backend\auto_complete_quests.txt). One "<quest id> [completedVersion]" per line.
+# Applied whenever player_quests is fetched, so it reaches both the headset and the game server; delete a line
+# (or the file) to stop. Ids/versions/prerequisites come from the quest bundle the server sends (194 quests).
+#
+# Parkour intro gates -- these never complete on our servers, which kept every parkour quest locked:
+8B11E312471FA29F389F188492CE82A1 1   # LCN_PKR_Intro   -- no prereqs; 41 quests depend on it (Climb, Slide, Parkour acts...)
+2ECE0E784C2B987D4BC86992E7921052 1   # ACT_PKR_Intro   -- no prereqs; 12 quests depend on it (Intro Drift / Climb / Search)
+98A8010444398D2F275BDDBC37958ADD 1   # LCN_PKR_Climb   -- no prereqs; 22 quests depend on it (ACT_PKR_Climb_Adv chain)

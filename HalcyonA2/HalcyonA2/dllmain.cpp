@@ -9776,8 +9776,51 @@ static __int64 __fastcall QAddBundle_Hook(void* sp, void* bundle, void* a3, unsi
               SafeBundleRows(bundle), sp, (unsigned long long)(reinterpret_cast<uintptr_t>(_ReturnAddress()) - GetBase()));
     return QAddBundle_Orig(sp, bundle, a3, removing);
 }
+// One-shot dump of the quest definitions the server hands players: %TEMP%\HalcyonA2-questdefs.txt, one line per
+// FAAQuestEntry (0x120): ID (as the Mothership blob writes it: four uint32 as hex), version, repetition, title,
+// PrerequisiteQuests (TArray<FGuid> @0x50) and child count (@0xA8). Used to find the quests that gate the rest.
+static void DumpQuestDefsOnce(void* bundle)
+{
+    static bool s_done = false;
+    if (s_done || !bundle) return;
+    __try
+    {
+        const uintptr_t b = reinterpret_cast<uintptr_t>(bundle);
+        const uintptr_t rows = *reinterpret_cast<uintptr_t*>(b + 0x20);
+        const int n = *reinterpret_cast<int*>(b + 0x28);
+        if (!rows || n < 20 || n > 5000) return;
+        s_done = true;
+        wchar_t path[MAX_PATH] = {}; GetTempPathW(MAX_PATH, path); wcscat_s(path, L"HalcyonA2-questdefs.txt");
+        FILE* f = nullptr;
+        if (_wfopen_s(&f, path, L"w") != 0 || !f) return;
+        for (int i = 0; i < n; ++i)
+        {
+            const uintptr_t r = rows + static_cast<uintptr_t>(i) * 0x120;
+            const uint32_t* g = reinterpret_cast<uint32_t*>(r);
+            char title[160] = {};
+            const wchar_t* t = *reinterpret_cast<wchar_t**>(r + 0xF0);
+            int tn = *reinterpret_cast<int*>(r + 0xF8);
+            for (int k = 0; t && k < tn && k < 159 && t[k]; ++k) title[k] = (t[k] < 128) ? static_cast<char>(t[k]) : '?';
+            fprintf(f, "%08X%08X%08X%08X\tver=%d\trep=%d\t%s\tprereq=", g[0], g[1], g[2], g[3],
+                    *reinterpret_cast<int*>(r + 0x30), static_cast<int>(*reinterpret_cast<uint8_t*>(r + 0x48)), title);
+            const uintptr_t pd = *reinterpret_cast<uintptr_t*>(r + 0x50);
+            const int pn = *reinterpret_cast<int*>(r + 0x58);
+            for (int k = 0; pd && k < pn && k < 64; ++k)
+            {
+                const uint32_t* pg = reinterpret_cast<uint32_t*>(pd + static_cast<uintptr_t>(k) * 0x10);
+                fprintf(f, "%s%08X%08X%08X%08X", k ? "," : "", pg[0], pg[1], pg[2], pg[3]);
+            }
+            fprintf(f, "\tchildren=%d\n", *reinterpret_cast<int*>(r + 0xA8));
+        }
+        fclose(f);
+        HxLog("[HalcyonA2][QBUNDLE] dumped %d quest definitions to %ls\n", n, path);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
 static __int64 __fastcall QSendSet_Hook(void* comp, void* bundle, char removing)
 {
+    DumpQuestDefsOnce(bundle);
     const long n = InterlockedIncrement(&g_qClientSends);
     if (n <= 300)
         HxLog("[HalcyonA2][QBUNDLE] Client_SetQuests #%ld -> comp=%p rows=%d removing=%d caller=GAME+0x%llX\n", n, comp,
