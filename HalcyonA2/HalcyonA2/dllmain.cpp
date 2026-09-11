@@ -2063,6 +2063,22 @@ static __int64 __fastcall SendJoin_Hook(void* a1, void* tok1, void* chan1, void*
     EnsureVoipChannel();   // ensure the per-server channel is built before substituting empties
     t_joinTokenIdx = 0;    // all three builds are done; re-arm for the next request
     LogSendJoin(chan1, chan2, chan3);
+    // [2026-09-11 GODVOICE] The token<->slot mapping was inferred from the ORDER the three tokens are
+    // built in, which is reversed relative to the RPC's parameter order. If that inference is wrong the
+    // PTT slot carries a token whose "t" claim names the SPATIAL channel, Vivox refuses the PTT connect,
+    // and the god-voice button dies silently while ordinary voice keeps working -- exactly the symptom.
+    // These are JWTs, so log them and read the claim instead of trusting the inference.
+    {
+        auto tokstr = [](void* f) -> const wchar_t* {
+            if (!f) return L"<null>";
+            auto* d = *reinterpret_cast<wchar_t**>(f);
+            return (d && *reinterpret_cast<int32_t*>(reinterpret_cast<uintptr_t>(f) + 8) > 0) ? d : L"<empty>";
+        };
+        static int s_logged = 0;
+        if (s_logged++ < 6)
+            HxLog("[HalcyonA2][VOIPTOK] slot1(spatial)='%ls'\n[HalcyonA2][VOIPTOK] slot2(PTT)='%ls'\n[HalcyonA2][VOIPTOK] slot3(echo)='%ls'\n",
+                  tokstr(tok1), tokstr(tok2), tokstr(tok3));
+    }
     void* c1 = PickChannel(chan1);
     void* c2 = PickChannelPTT(chan2);
     void* c3 = PickChannel(chan3);
