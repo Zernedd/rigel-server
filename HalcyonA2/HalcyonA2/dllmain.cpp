@@ -9857,9 +9857,58 @@ static void RolesFetchedPrep(__int64 pc, __int64* roles)
                                            : "left as is (controller does not possess a VRPawn with an entity)");
 }
 static void SafeRolesFetchedPrep(__int64 pc, __int64* roles) { __try { RolesFetchedPrep(pc, roles); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+
+// [2026-09-11 *** GOD VOICE, THE ACTUAL CAUSE] A headset log settled it. Everything we suspected was
+// healthy: Vivox logged in, the spatial channel connected, the PTT channel connected ("MediaStreamUpdated
+// ... State 2 Connected" for confctl-g-...halcyonptt<dep>), and the PTT token's "t" claim matched that
+// channel exactly. Yet across the whole session there were four SessionGroup.SetTxSession calls and every
+// one named the SPATIAL session -- the transmit switch never ran. So the press handler bailed BEFORE it,
+// which leaves only its permission test: HasPermission(owner, "global_voip").
+//
+// That test reads AVRPlayerController::StationDashboardRoles (+0xA40), and the SDK says that property is
+// NOT replicated -- no Net flag. The client is supposed to be handed its roles by the Client_SetRoles RPC.
+// The client's own fallback fetch cannot help: it needs a station id the client never has, which is the
+// one line in the headset log that named the fault --
+//     LogA2StationDashboard: Warning: Station ID not set, can't get user roles
+// Meanwhile the SERVER's roles-fetched handler (sub_145510C40) ends by copying the roles into ITS OWN
+// +0xA40 and never pushes them anywhere, so the array on the player's machine stays empty for ever and
+// the button is dead for everyone, permission or not.
+//
+// The server has the roles right here (this hook's argument, n=1 for our admin), and Client_SetRoles is a
+// reflected UFunction, so we can do the push the game never does. Called BEFORE the original, because the
+// original's tail (jmp 0x1452fc560 with the array in rcx) releases that array.
+static void PushRolesToOwningClient(__int64 pc, __int64* roles)
+{
+    if (!pc || !roles) return;
+    const int num = static_cast<int>(roles[1] & 0xFFFFFFFF);
+    if (num <= 0) return;
+    // Server-only: OwnedVRPawnOnServer is set by OnPossess, which never runs on a client. RolesFetchedPrep
+    // has already aligned it with the possessed pawn, so a real server-side controller has it by now.
+    if (!*reinterpret_cast<void**>(static_cast<uintptr_t>(pc) + 0xA50)) return;
+    auto* obj = reinterpret_cast<SDK::UObject*>(pc);
+    if (!obj->Class) return;
+    static SDK::UFunction* fn = nullptr;
+    if (!fn) fn = obj->Class->GetFunction("VRPlayerController", "Client_SetRoles");
+    if (!fn) { HxLog("[HalcyonA2][ROLES] Client_SetRoles not found on %s\n", obj->GetName().c_str()); return; }
+    struct { void* Data; int32_t Num; int32_t Max; } parms{};
+    parms.Data = reinterpret_cast<void*>(roles[0]);
+    parms.Num  = num;
+    parms.Max  = static_cast<int32_t>(static_cast<uint64_t>(roles[1]) >> 32);
+    if (parms.Max < num) parms.Max = num;
+    obj->ProcessEvent(fn, &parms);
+    HxLog("[HalcyonA2][ROLES] pushed %d role(s) to the owning client via Client_SetRoles (pc=%p) -- "
+          "without this the client's StationDashboardRoles stays empty and global_voip can never pass\n",
+          num, reinterpret_cast<void*>(static_cast<uintptr_t>(pc)));
+}
+static void SafePushRolesToOwningClient(__int64 pc, __int64* roles)
+{
+    __try { PushRolesToOwningClient(pc, roles); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
 static __int64 __fastcall RolesFetched_Hook(__int64 pc, __int64* roles)
 {
     SafeRolesFetchedPrep(pc, roles);
+    SafePushRolesToOwningClient(pc, roles);
     return RolesFetched_Orig(pc, roles);
 }
 
