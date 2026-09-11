@@ -99,7 +99,30 @@ public sealed class MothershipServer : AstraHttpServer, IMothershipServer
     // DUMMY attestation) are EXEMPT from Meta verification — a real client can't present it, so a
     // real client must still attest; (2) it gates the server-only /v1/server/authorized endpoint.
     // NOTE: distinct from the legacy presence-only "x-server-api-key: x" other routes still accept.
-    const string SERVER_API_KEY = "7b93a32d659d7bb73eb74c6f3f46a6a1934d47b383295a878f91ea2852d917d2";
+    // The game servers send this as x-server-api-key (HalcyonA2 -ServerApiKey). It is loaded at startup from the
+    // RIGEL_SERVER_API_KEY environment variable or server_api_key.txt next to the backend, so a rotated key does not
+    // have to be baked into (and committed with) the source. [2026-09-11] A rebuild from source silently put the old
+    // baked key back: /v1/server/authorized returned 403 and the game server's trusted quest fetch was refused, so
+    // players registered with 0 quests. The literal below is only the legacy fallback.
+    static readonly string SERVER_API_KEY = LoadServerApiKey(out s_serverKeySource);
+    private static string? s_serverKeySource;   // no initializer: it is assigned by LoadServerApiKey above, which runs first
+    private static string LoadServerApiKey(out string source)
+    {
+        var env = Environment.GetEnvironmentVariable("RIGEL_SERVER_API_KEY");
+        if (!string.IsNullOrWhiteSpace(env)) { source = "env RIGEL_SERVER_API_KEY"; return env.Trim(); }
+        try
+        {
+            var path = Path.Combine(AppContext.BaseDirectory, "server_api_key.txt");
+            if (File.Exists(path))
+            {
+                var k = File.ReadAllText(path).Trim();
+                if (k.Length > 0) { source = path; return k; }
+            }
+        }
+        catch { /* fall through to the legacy literal */ }
+        source = "LEGACY BAKED FALLBACK (set server_api_key.txt)";
+        return "7b93a32d659d7bb73eb74c6f3f46a6a1934d47b383295a878f91ea2852d917d2";
+    }
     // Admin/automation credential for the server-only routes (moderation, automation, associations,
     // title-data, offers, deployment-automation). Distinct from SERVER_API_KEY so tooling and the
     // game server can be scoped separately if desired. Set to a strong secret; admin tools must send
@@ -180,7 +203,11 @@ public sealed class MothershipServer : AstraHttpServer, IMothershipServer
     // decision, every [QUEST-BAN]) was thrown away and a failed login left no trace in the log files. Keep a static
     // handle to this server's file logger so the static helpers can write there too.
     private static Serilog.ILogger? s_fileLog;
-    public MothershipServer() : base(HOSTNAME, PORT) { s_fileLog = Logger; }
+    public MothershipServer() : base(HOSTNAME, PORT)
+    {
+        s_fileLog = Logger;
+        AuthLog($"[AUTH] server api key loaded from {s_serverKeySource} (len={SERVER_API_KEY.Length})");
+    }
     private static void AuthLog(string line)
     {
         Console.WriteLine(line);
