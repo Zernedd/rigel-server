@@ -9624,6 +9624,54 @@ static __int64 __fastcall FetchRoles_Hook(__int64 a1, __int64 a2)
 }
 static constexpr uintptr_t FetchRoles_RVA = 0x54B04E0;
 
+// [2026-09-11 GODVOICE] Players' push-to-talk / god-voice button does nothing. The button (AVRPlayerController::
+// inputPTT -> UA2OnlineCommunicationsComponent sub_1454438A0) is gated on HasPermission("global_voip")
+// (sub_145511460), which only scans the CLIENT's StationDashboardRoles (PC+0xA40) -- filled by Client_SetRoles.
+// The server's roles-fetched handler sub_145510C40(pc, TArray<FRoleResponse>*) sends Client_SetRoles, stores the
+// roles and sets the entity role flags ONLY when OwnedVRPawnOnServer (PC+0xA50) and that pawn's Entity (+0x928)
+// exist; otherwise it silently drops the roles (the client keeps re-logging-in every minute). The field is set by
+// AVRPlayerController::OnPossess (sub_145511B10: "if the possessed pawn IsA VRPawn, OwnedVRPawnOnServer = pawn").
+// Log the state on every delivery and, when it is empty, restore that same invariant from the controller's current
+// pawn (APlayerController::Pawn @0x2D8) if it is a VRPawn with an entity -- exactly what OnPossess would have set.
+static constexpr uintptr_t RolesFetched_RVA = 0x5510C40;
+using RolesFetched_t = __int64(__fastcall*)(__int64, __int64*);
+static RolesFetched_t RolesFetched_Orig = nullptr;
+static bool IsVRPawnObject(void* obj)
+{
+    static SDK::UClass* vrPawnCls = nullptr;
+    if (!vrPawnCls) vrPawnCls = SDK::UObject::FindClassFast("VRPawn");
+    return obj && vrPawnCls && reinterpret_cast<SDK::UObject*>(obj)->IsA(vrPawnCls);
+}
+static void RolesFetchedPrep(__int64 pc, __int64* roles)
+{
+    const uintptr_t p = static_cast<uintptr_t>(pc);
+    void* owned  = *reinterpret_cast<void**>(p + 0xA50);   // OwnedVRPawnOnServer
+    void* pawn   = *reinterpret_cast<void**>(p + 0x2D8);   // APlayerController::Pawn
+    void* entity = pawn ? *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(pawn) + 0x928) : nullptr;
+    const int n  = roles ? static_cast<int>(roles[1] & 0xFFFFFFFF) : -1;
+    const bool vr = IsVRPawnObject(pawn);
+    // Only OnPossess ever sets the field and nothing clears it, so on our join flow (entry pawn -> VR pawn ->
+    // spectator -> VR pawn) it can be empty OR still point at a VR pawn that was since replaced/destroyed. Align it
+    // with the VR pawn the controller possesses NOW whenever that pawn is valid.
+    bool fixed = false;
+    if (pawn && entity && vr && owned != pawn)
+    {
+        *reinterpret_cast<void**>(p + 0xA50) = pawn;
+        fixed = true;
+    }
+    HxLog("[HalcyonA2][ROLES] roles fetched n=%d pc=%p ownedVRPawn=%p pawn=%p (VRPawn=%d) entity=%p -> %s\n",
+          n, reinterpret_cast<void*>(p), owned, pawn, vr ? 1 : 0, entity,
+          fixed ? (owned ? "REPLACED stale OwnedVRPawnOnServer with the possessed VRPawn" : "RESTORED empty OwnedVRPawnOnServer")
+                : (owned && owned == pawn) ? "owned pawn already correct"
+                                           : "left as is (controller does not possess a VRPawn with an entity)");
+}
+static void SafeRolesFetchedPrep(__int64 pc, __int64* roles) { __try { RolesFetchedPrep(pc, roles); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+static __int64 __fastcall RolesFetched_Hook(__int64 pc, __int64* roles)
+{
+    SafeRolesFetchedPrep(pc, roles);
+    return RolesFetched_Orig(pc, roles);
+}
+
 // [2026-09-11 QUEST RE-PUSH] Why quests never appeared on real clients (traced in IDA):
 // A client switches its quests on in exactly one place, sub_14468C8E0 (sets ClientProgression+0x3D9 and
 // activates the quest bundles). It is reached from OnRep_QuestProgression (exec 0x4695D00 -> sub_14468D120)
@@ -13064,6 +13112,8 @@ static void Main(HMODULE)
     MH_STATUS qc = MH_CreateHook(reinterpret_cast<void*>(base + 0x4692F30), &QAddBundle_Hook, reinterpret_cast<void**>(&QAddBundle_Orig));
     MH_STATUS qd = MH_CreateHook(reinterpret_cast<void*>(base + 0x4689030), &QSendSet_Hook, reinterpret_cast<void**>(&QSendSet_Orig));
     HxLog("[HalcyonA2][QBUNDLE] hooks: AddBundle=%s SendClientSetQuests=%s\n", MH_StatusToString(qc), MH_StatusToString(qd));
+    MH_STATUS qr = MH_CreateHook(reinterpret_cast<void*>(base + RolesFetched_RVA), &RolesFetched_Hook, reinterpret_cast<void**>(&RolesFetched_Orig));
+    HxLog("[HalcyonA2][ROLES] hook: RolesFetched=%s\n", MH_StatusToString(qr));
 
     // [PORT 22284] StreamThunk null-guard (0x54ABCC0) DISABLED — RVA unfound (tiny indirect-jmp thunk);
     // runtime crash-driven. Note: r.TextureStreaming 0 already kills the streaming path on -nullrhi.
