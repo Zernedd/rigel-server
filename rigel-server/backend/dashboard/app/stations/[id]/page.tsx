@@ -9,8 +9,9 @@ import {
   ChevronLeft, Plus, Trash2, X, Shield,
   Users, Cpu, Wifi, Clock, Rocket, Calendar, Radio,
 } from "lucide-react";
+import NetvarsTab from "./NetvarsTab";
 
-type Tab = "bans" | "roles" | "members" | "deployments" | "events" | "sessions";
+type Tab = "bans" | "roles" | "members" | "deployments" | "events" | "sessions" | "netvars";
 
 // ── Shared UI ────────────────────────────────────────────────────────────────
 
@@ -942,6 +943,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "deployments", label: "Deployments" },
   { id: "events",      label: "Events"      },
   { id: "sessions",    label: "EOS Sessions" },
+  { id: "netvars",     label: "Netvars"     },
 ];
 
 export default function StationDetailPage() {
@@ -1023,6 +1025,7 @@ export default function StationDetailPage() {
       {tab === "deployments" && <DeploymentsTab stationId={stationId} />}
       {tab === "events"      && <EventsTab      stationId={stationId} />}
       {tab === "sessions"    && <SessionsTab    stationId={stationId} />}
+      {tab === "netvars"     && <NetvarsTab     stationId={stationId} />}
     </div>
   );
 }

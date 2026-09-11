@@ -17,7 +17,15 @@ param(
     # run side by side; -Drive makes it the one that acts on a ball (enter arena, hit, spawn).
     [string] $Name = '',
     [switch] $Drive,
-    [string] $Arena = 'TKB_Prime'
+    [string] $Arena = 'TKB_Prime',
+    # Test script (one command per line: enter <SlotID> | goto x y z [secs] | wait secs | log text).
+    [string] $Script = '',
+    # Don't spawn the ball-spam test balls.
+    [switch] $NoBalls,
+    # Log-only hooks on the pawn's team join / colour / clear (value + caller).
+    [switch] $TeamHooks,
+    # World netvar path to read from this client's own copy every 5s (e.g. config/player/brakeStrength).
+    [string] $NvRead = ''
 )
 $ErrorActionPreference = 'Stop'
 function Info($m) { Write-Host "[client] $m" -ForegroundColor Cyan }
@@ -41,6 +49,10 @@ $args = @('-nullrhi','-nohmd','-nosound','-unattended','-nosplash','-log',
 if ($Name)  { $args += "-HalcyonName=$Name" }
 if ($Drive) { $args += '-HalcyonDrive'; $args += "-HalcyonArena=$Arena" }
 if ($Wasd -or $Drive) { $args += '-HalcyonWASD' }  # test clients that need to move
+if ($Script)  { $args += "-HalcyonScript=$([System.IO.Path]::GetFullPath($Script))" }
+if ($NoBalls) { $args += '-HalcyonNoBalls' }
+if ($TeamHooks) { $args += '-HalcyonTeamHooks' }
+if ($NvRead)    { $args += "-HalcyonNvRead=$NvRead" }
 
 Info "launching client$(if ($Name) { " $Name" })$(if ($Drive) { " [DRIVER]" }) -> $Connect"
 $p = Start-Process -FilePath $exe -ArgumentList $args -PassThru -RedirectStandardOutput $out -RedirectStandardError $err

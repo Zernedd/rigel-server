@@ -120,6 +120,14 @@ export type WsMessage = {
   timestamp: string;
 };
 
+export type NetvarDumpInfo = {
+  deployment_id: string;
+  event_type: string;
+  bytes: number;
+  received_at: string;
+  source: "live" | "disk";
+};
+
 export type StationEvent = {
   event_id: string;
   station_id: string;
@@ -298,4 +306,14 @@ export const api = {
   // Global admin
   grantAdmin:  (userId: string) => post<ActionResult>(`users/${userId}/grant_admin`),
   revokeAdmin: (userId: string) => del<ActionResult>(`users/${userId}/grant_admin`),
+
+  // Netvars: the live dump the game server reports, and the station config it pulls as netvars
+  netvarDumps: () => get<NetvarDumpInfo[]>("netvars/dumps"),
+  netvarDump: (deploymentId?: string, type: string = "netvars") =>
+    get<unknown>(`netvars/dump?type=${encodeURIComponent(type)}${deploymentId ? `&deployment_id=${encodeURIComponent(deploymentId)}` : ""}`),
+  stationConfig: (stationId: string) => get<Record<string, string>>(`stations/${stationId}/config`),
+  patchStationConfig: (stationId: string, kv: Record<string, string>) =>
+    patch<Record<string, string>>(`stations/${stationId}/config`, kv),
+  deleteStationConfigKey: (stationId: string, key: string) =>
+    del<{ success: boolean; key: string }>(`stations/${stationId}/config?key=${encodeURIComponent(key)}`),
 };

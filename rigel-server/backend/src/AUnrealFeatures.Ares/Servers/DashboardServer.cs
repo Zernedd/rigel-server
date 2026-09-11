@@ -290,6 +290,77 @@ public sealed class AresDashboardServer : AstraHttpServer, IAresDashboardServer
         return Task.FromResult<IHttpActionResult>(Results.Ok(new { success = true, key }));
     }
 
+    // --- NETVARS -----------------------------------------------------------------------------------
+    // The game server reports its entire netvar tree as a "netvars" server_event; NetvarDumpStore keeps
+    // the latest one per deployment. These routes expose it to the dashboard, plus direct editing of a
+    // station's config key/values -- the flat map the game pulls on its deployment fetch
+    // (GET /v1/deployments/{id}?include_station_config=true) and applies natively as netvars.
+
+    // GET /api/netvars/dumps -- which deployments have reported a dump, how big, how fresh.
+    [HttpGet("/api/netvars/dumps")]
+    public Task<IHttpActionResult> ListNetvarDumps(IHttpRequest request, IHttpResponse response)
+        => Task.FromResult<IHttpActionResult>(Results.Ok(NetvarDumpStore.List()));
+
+    // GET /api/netvars/dump?deployment_id=<id>&type=netvars|state -- the raw JSON the game sent.
+    // Omit deployment_id for the most recent one.
+    [HttpGet("/api/netvars/dump")]
+    public Task<IHttpActionResult> GetNetvarDump(IHttpRequest request, IHttpResponse response)
+    {
+        string? dep = request.GetQueryParameter("deployment_id", "");
+        string type = request.GetQueryParameter("type", "netvars") ?? "netvars";
+        var d = NetvarDumpStore.Get(dep, type);
+        if (d == null)
+            return Task.FromResult<IHttpActionResult>(Results.NotFound(new { error = "no dump received yet", deployment_id = dep, type }));
+        return Task.FromResult<IHttpActionResult>(
+            Results.Configurable(System.Net.HttpStatusCode.OK, "application/json", System.Text.Encoding.UTF8.GetBytes(d.Data)));
+    }
+
+    // GET /api/stations/{station_id}/config -- the station's own key/values (not the served defaults).
+    [HttpGet("/api/stations/{station_id}/config")]
+    public Task<IHttpActionResult> GetStationConfig(IHttpRequest request, IHttpResponse response, string station_id)
+    {
+        var station = Program.Database.GetCollection<StationDbObject>(true)?.FindOne(s => s.StationId == station_id);
+        if (station == null) return Task.FromResult<IHttpActionResult>(Results.NotFound(new { error = "no such station", station_id }));
+        return Task.FromResult<IHttpActionResult>(Results.Ok(station.Config ?? new Dictionary<string, string>()));
+    }
+
+    // PATCH /api/stations/{station_id}/config -- merge {key: value} pairs into the station config.
+    [HttpPatch("/api/stations/{station_id}/config")]
+    public Task<IHttpActionResult> PatchStationConfig(IHttpRequest request, IHttpResponse response, string station_id)
+    {
+        Dictionary<string, string>? data;
+        try { data = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(request.Body); }
+        catch { data = null; }
+        if (data == null || data.Count == 0)
+            return Task.FromResult<IHttpActionResult>(Results.BadRequest(new { error = "body must be a JSON object of string keys to string values" }));
+
+        var stations = Program.Database.GetCollection<StationDbObject>(true);
+        var station = stations?.FindOne(s => s.StationId == station_id);
+        if (station == null) return Task.FromResult<IHttpActionResult>(Results.NotFound(new { error = "no such station", station_id }));
+        station.Config ??= new Dictionary<string, string>();
+        foreach (var kv in data)
+        {
+            if (string.IsNullOrWhiteSpace(kv.Key)) continue;
+            station.Config[kv.Key.Trim()] = kv.Value ?? "";
+        }
+        stations!.Update(station);
+        NetvarOverridesFile.OnStationConfigChanged(station_id);   // push to co-located game servers
+        return Task.FromResult<IHttpActionResult>(Results.Ok(station.Config));
+    }
+
+    // DELETE /api/stations/{station_id}/config?key=<name> -- remove one key (falls back to the default).
+    [HttpDelete("/api/stations/{station_id}/config")]
+    public Task<IHttpActionResult> DeleteStationConfigKey(IHttpRequest request, IHttpResponse response, string station_id)
+    {
+        string key = request.GetQueryParameter("key", "") ?? "";
+        var stations = Program.Database.GetCollection<StationDbObject>(true);
+        var station = stations?.FindOne(s => s.StationId == station_id);
+        if (station == null) return Task.FromResult<IHttpActionResult>(Results.NotFound(new { error = "no such station", station_id }));
+        bool removed = station.Config?.Remove(key) ?? false;
+        if (removed) { stations!.Update(station); NetvarOverridesFile.OnStationConfigChanged(station_id); }
+        return Task.FromResult<IHttpActionResult>(Results.Ok(new { success = removed, key }));
+    }
+
     [HttpGet("/api/stations")]
     public async Task<IHttpActionResult> GetStations(IHttpRequest request, IHttpResponse response)
     {

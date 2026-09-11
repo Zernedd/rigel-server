@@ -1,0 +1,39 @@
+@{
+    # ---------------------------------------------------------------------------------
+    # LOCAL TEST server (this PC only). For mock-client debugging: teleports, forced triggers,
+    # netvar overrides from a local folder. Deliberately does NOT register with, or fetch from, the
+    # live Rigel backend -- so it never appears in the server browser and never creates station rows.
+    #   .\Start-Server.ps1 -Config server.localtest.psd1
+    # ---------------------------------------------------------------------------------
+    GameBuild     = '22284'
+    GameExe       = '..\..\Nov15\A2\Binaries\Win64\A2-Win64-Shipping.exe'
+    Configuration = 'Release'
+    DllPath       = ''
+    InitWaitSeconds     = 25
+    ReadyTimeoutSeconds = 150
+
+    Args = @('-nullrhi', '-nohmd', '-nosound', '-unattended', '-nosplash', '-log')
+
+    # No dashboard / registration: point the backend at a closed loopback port so those calls fail
+    # fast and harmlessly instead of reaching production.
+    DashboardApiUrl = ''
+    DashboardApiKey = ''
+    DeploymentId    = 'localtest'
+    RegisterIp      = '127.0.0.1'
+    LoadGamemode    = ''
+    GamemodeSlot    = ''
+
+    ExtraArgs = @(
+        '-NoAuthGate'                       # mock clients never do dashboard auth
+        '-TeamOverlap'                      # same as the VPS server
+        '-ServerName=Rigel-LOCALTEST'
+        '-MothershipHost=127.0.0.1'
+        '-MothershipPort=9'                 # discard port: nothing listens
+        '-BackendHost=127.0.0.1'
+        '-BackendPort=9'
+        # netvar overrides are read from this folder (localtest.txt / _latest.txt) instead of the backend
+        '-NetvarDir=C:\Users\Zern\AppData\Local\Temp\claude\C--Users-Zern-Documents-OrionDriftStuff\e1127066-f64a-456c-9a3d-24070d7a41d5\scratchpad\nvdir'
+    )
+
+    LogDir = 'logs'
+}

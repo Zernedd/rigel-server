@@ -1,0 +1,1645 @@
+{
+ "generated_from": "A2-Windows.pak (build 22284): Content/NetVars/*.json + LevelDefinitions/*/level.json moduleState.DefaultConfig + live ScraprunPrime level definition; module vars = DefaultConfig merged with Config",
+ "world": [
+  {
+   "path": "config/player/defaultPlayerGravity",
+   "type": "number",
+   "default": 0,
+   "min": -1000,
+   "max": 1000
+  },
+  {
+   "path": "config/player/brakeStrength",
+   "type": "number",
+   "default": 600,
+   "min": 0,
+   "max": 1000
+  },
+  {
+   "path": "config/player/highSpeedBrakeStrength",
+   "type": "number",
+   "default": 1000,
+   "min": 0,
+   "max": 1000
+  },
+  {
+   "path": "config/player/brakeHighSpeedThreshold",
+   "type": "number",
+   "default": 1200,
+   "min": 0,
+   "max": 1000
+  },
+  {
+   "path": "config/player/pushOffAlwaysAdds",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/pushOffMomentumProjects",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/enableHeartBall",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/player/smallThrusterDeAccelAngleStart",
+   "type": "number",
+   "default": 0,
+   "min": 0,
+   "max": 90
+  },
+  {
+   "path": "config/player/smallThrusterDeAccelMaxStrength",
+   "type": "number",
+   "default": 800,
+   "min": 0,
+   "max": 1000
+  },
+  {
+   "path": "config/player/smallThrusterBeginStrength",
+   "type": "number",
+   "default": 450,
+   "min": 0,
+   "max": 1000
+  },
+  {
+   "path": "config/player/smallThrusterEndStrength",
+   "type": "number",
+   "default": 450,
+   "min": 0,
+   "max": 1000
+  },
+  {
+   "path": "config/player/smallThrusterBeginSpeedFalloff",
+   "type": "number",
+   "default": 350,
+   "min": 0,
+   "max": 1000
+  },
+  {
+   "path": "config/player/smallThrusterEndSpeedFalloff",
+   "type": "number",
+   "default": 800,
+   "min": 0,
+   "max": 1000
+  },
+  {
+   "path": "config/player/bigBoosterStrength",
+   "type": "number",
+   "default": 500,
+   "min": -1000,
+   "max": 1000
+  },
+  {
+   "path": "config/player/chargeBoostStrength",
+   "type": "number",
+   "default": 400,
+   "min": -2000,
+   "max": 2000
+  },
+  {
+   "path": "config/player/maxBigBoosterSpeed",
+   "type": "number",
+   "default": 1250,
+   "min": 0,
+   "max": 1000
+  },
+  {
+   "path": "config/player/maxThrusterSpeed",
+   "type": "number",
+   "default": 800,
+   "min": 0,
+   "max": 1000
+  },
+  {
+   "path": "config/player/bigBoosterOnHand",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/enableThrusters",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/player/enableThrustersCausesDeAccel",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/enableThrustersCancelGravity",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/enableUpDirThrustersCancelGravity",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/player/enableThrustersFixedVerticalAccel",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/enableBoost",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/enableBrake",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/enableTools",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/enableStaticGrabbing",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/enableEdgeOnlyStaticGrabbing",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/enablePunch",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/enableHandPropBounce",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/player/enableChargeBoost",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/chargeBoostStunnerDuration",
+   "type": "number",
+   "default": 2.5,
+   "min": 0,
+   "max": 10
+  },
+  {
+   "path": "config/player/enableGrabBoost",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/enableThrowReleaseDampening",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/player/enableHockeyStop",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/enablePalmStop",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/enablePalmCollisionOffset",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/player/palmStopActivatesOnPaddle",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/enableEasyPaddleSpeedGain",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/grabIncreasesFriction",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/player/enableMagnetHands",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/player/enableBallControlHandling",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/enableBallPhysicsHandling",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/player/enableBallPaddleHandling",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/player/enablePrototypeHandBallVisuals",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/player/hideBallWhenHoldingObject",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/hideBallWhenNotColliding",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/player/hideBallOnGripButton",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/player/hideBallDuringMagnetHand",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/player/enableBallDragAfterHit",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/enableBallDragAlwaysOn",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/enableBallDragSpinBounces",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/enableEnemyPlayerGrab",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/player/boostPowerFactor",
+   "type": "number",
+   "default": 1,
+   "min": 0,
+   "max": 1000
+  },
+  {
+   "path": "config/player/enableBoostEconomy",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/player/boostRechargeRate",
+   "type": "number",
+   "default": 0.0,
+   "min": 0,
+   "max": 1000
+  },
+  {
+   "path": "config/player/boostRechargeDelay",
+   "type": "number",
+   "default": 1.0,
+   "min": 0,
+   "max": 10
+  },
+  {
+   "path": "config/player/boostImpulseCooldown",
+   "type": "number",
+   "default": 0.0,
+   "min": 0,
+   "max": 10
+  },
+  {
+   "path": "config/player/boostImpulseCost",
+   "type": "number",
+   "default": 0.25,
+   "min": 0,
+   "max": 1
+  },
+  {
+   "path": "config/player/boostForceCostRate",
+   "type": "number",
+   "default": 0.5,
+   "min": 0,
+   "max": 1000
+  },
+  {
+   "path": "config/player/headBounceRestitution",
+   "type": "number",
+   "default": 0.35,
+   "min": 0,
+   "max": 1000
+  },
+  {
+   "path": "config/player/headBounceFriction",
+   "type": "number",
+   "default": 0.1,
+   "min": 0,
+   "max": 1000
+  },
+  {
+   "path": "config/player/pushOffWindowInSecs",
+   "type": "number",
+   "default": 1.0,
+   "min": 0,
+   "max": 1000
+  },
+  {
+   "path": "config/player/initialPushOffMaxSpeedDelta",
+   "type": "number",
+   "default": 500.0,
+   "min": 0,
+   "max": 1000
+  },
+  {
+   "path": "config/player/pushOffMomentumGainCooldown",
+   "type": "number",
+   "default": 0.3,
+   "min": 0,
+   "max": 1000
+  },
+  {
+   "path": "config/player/pushOffMomentumBounce",
+   "type": "number",
+   "default": 0.0,
+   "min": 0,
+   "max": 1000
+  },
+  {
+   "path": "config/player/handsNoSlideImpactAngle",
+   "type": "number",
+   "default": 30.0,
+   "min": 0,
+   "max": 360
+  },
+  {
+   "path": "config/player/minVelForSlide",
+   "type": "number",
+   "default": 100.0,
+   "min": 0,
+   "max": 1000
+  },
+  {
+   "path": "config/player/slidingNormalForceMin",
+   "type": "number",
+   "default": 0.5,
+   "min": 0,
+   "max": 1000
+  },
+  {
+   "path": "config/player/slidingNormalForceMax",
+   "type": "number",
+   "default": 0.5,
+   "min": 0,
+   "max": 1000
+  },
+  {
+   "path": "config/player/slidingFrictionStrength",
+   "type": "number",
+   "default": 0.0,
+   "min": 0,
+   "max": 1000
+  },
+  {
+   "path": "config/player/enableHandCollision",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/player/enableLaserPointers",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/showMesh",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/useComplexMesh",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/player/transferMomentumOnGrab",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/player/slideOnlyChecksImpactAngle",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/player/stunOnTackle",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/player/stunSelfOnTackle",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/player/tackleEnemyTeamOnly",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/player/canTackleInitiator",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/transferMomentumStrength",
+   "type": "number",
+   "default": 1.0,
+   "min": 0,
+   "max": 1
+  },
+  {
+   "path": "config/player/tackleMinSpeed",
+   "type": "number",
+   "default": 200.0,
+   "min": 0,
+   "max": 1
+  },
+  {
+   "path": "config/player/tackleMinDropSpeed",
+   "type": "number",
+   "default": 400.0,
+   "min": 0,
+   "max": 1
+  },
+  {
+   "path": "config/player/tackleDisableGrabTime",
+   "type": "number",
+   "default": 0.25,
+   "min": 0,
+   "max": 1
+  },
+  {
+   "path": "config/player/tackleAnchorTackleSpeed",
+   "type": "number",
+   "default": 200.0,
+   "min": 0,
+   "max": 1600.0
+  },
+  {
+   "path": "config/player/shouldClampSpeedOnGrabbed",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/player/clampSpeedOnGrabbed",
+   "type": "number",
+   "default": 1200.0,
+   "min": 0,
+   "max": 4000
+  },
+  {
+   "path": "config/player/speedLines",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/player/slidingRechargesBoost",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/pushOffRechargesBoost",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/slidingRechargeBoostRate",
+   "type": "number",
+   "default": 0.002,
+   "min": 0,
+   "max": 1
+  },
+  {
+   "path": "config/player/pushOffRechargeBoostRate",
+   "type": "number",
+   "default": 0.05,
+   "min": 0,
+   "max": 2
+  },
+  {
+   "path": "config/player/doTackleballSpeedDecay",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/doSpeedDecay",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/slidingPreventsDecay",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/timeToStartDecay",
+   "type": "number",
+   "default": 0,
+   "min": 0,
+   "max": 2000
+  },
+  {
+   "path": "config/player/speedDecayStart",
+   "type": "number",
+   "default": 400,
+   "min": 0,
+   "max": 2000
+  },
+  {
+   "path": "config/player/speedDecayEnd",
+   "type": "number",
+   "default": 800,
+   "min": 0,
+   "max": 2000
+  },
+  {
+   "path": "config/player/speedDecayStartRate",
+   "type": "number",
+   "default": 300,
+   "min": 0,
+   "max": 1000
+  },
+  {
+   "path": "config/player/speedDecayEndRate",
+   "type": "number",
+   "default": 300,
+   "min": 0,
+   "max": 1000
+  },
+  {
+   "path": "config/player/discInteractionDebug",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/clientPredictedHits",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/player/bigChinDistance",
+   "type": "number",
+   "default": 55,
+   "min": 0,
+   "max": 2000
+  },
+  {
+   "path": "config/player/enableMagnetBall",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/magnetBallUsesGrip",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/player/magnetBallStrength",
+   "type": "number",
+   "default": 350,
+   "min": 0,
+   "max": 1000
+  },
+  {
+   "path": "config/player/magnetBallDotOffset",
+   "type": "number",
+   "default": -1,
+   "min": -1,
+   "max": 1
+  },
+  {
+   "path": "config/player/canMagnetHandStopAnySurface",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/rollbackInputOffset",
+   "type": "number",
+   "default": 0,
+   "min": 0,
+   "max": 10
+  },
+  {
+   "path": "config/player/combineBallPushbackStrength",
+   "type": "number",
+   "default": 0.3,
+   "min": 0,
+   "max": 1
+  },
+  {
+   "path": "config/player/doRollbackCombineVel",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/doRollbackAlwaysPushback",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/rollbackAlwaysPushbackPct",
+   "type": "number",
+   "default": 0.1,
+   "min": 0,
+   "max": 1
+  },
+  {
+   "path": "config/player/doRollbackPlayerPushback",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/player/rollbackPlayerPushbackPct",
+   "type": "number",
+   "default": 0.15,
+   "min": 0,
+   "max": 1
+  },
+  {
+   "path": "config/player/rollbackPushbackBallSlowdown",
+   "type": "number",
+   "default": 0.1,
+   "min": 0,
+   "max": 1
+  },
+  {
+   "path": "config/player/rollbackPushbackClamp",
+   "type": "number",
+   "default": 300,
+   "min": 0,
+   "max": 400
+  },
+  {
+   "path": "config/player/rollbackPushbackDisableContactTime",
+   "type": "number",
+   "default": 0.1
+  },
+  {
+   "path": "config/player/rollbackClientVerification",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/player/rollbackClientRecord",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/player/pushOffSpeedKey1",
+   "type": "number",
+   "default": 500
+  },
+  {
+   "path": "config/player/pushOffSpeedKey2",
+   "type": "number",
+   "default": 650
+  },
+  {
+   "path": "config/player/pushOffSpeedKey3",
+   "type": "number",
+   "default": 900
+  },
+  {
+   "path": "config/player/pushOffSpeedKey4",
+   "type": "number",
+   "default": 1050
+  },
+  {
+   "path": "config/player/pushOffSpeedValue1",
+   "type": "number",
+   "default": 150
+  },
+  {
+   "path": "config/player/pushOffSpeedValue2",
+   "type": "number",
+   "default": 80
+  },
+  {
+   "path": "config/player/pushOffSpeedValue3",
+   "type": "number",
+   "default": 50
+  },
+  {
+   "path": "config/player/pushOffSpeedValue4",
+   "type": "number",
+   "default": 10
+  },
+  {
+   "path": "config/player/FrictionClimbFrictionStrength",
+   "type": "number",
+   "default": 0,
+   "min": 0,
+   "max": 12000
+  },
+  {
+   "path": "config/player/FrictionClimbGripFrictionStrength",
+   "type": "number",
+   "default": 6600,
+   "min": 0,
+   "max": 12000
+  },
+  {
+   "path": "config/player/StrongFrictionClimbImpactSurfaceAngleThreshold",
+   "type": "number",
+   "default": 45,
+   "min": 0,
+   "max": 180
+  },
+  {
+   "path": "config/player/WeakFrictionClimbImpactSurfaceAngleThreshold",
+   "type": "number",
+   "default": 75,
+   "min": 0,
+   "max": 180
+  },
+  {
+   "path": "config/player/EnableTouchUI",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/ballSettings/canHold",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/ballSettings/speedLimitWhileHolding",
+   "type": "number",
+   "default": 650,
+   "min": 0,
+   "max": 1000
+  },
+  {
+   "path": "config/ballSettings/brakeStrengthWhileHolding",
+   "type": "number",
+   "default": 200,
+   "min": 0,
+   "max": 1000
+  },
+  {
+   "path": "config/ballSettings/thrusterBeginStrengthWhileHolding",
+   "type": "number",
+   "default": 250,
+   "min": 0,
+   "max": 1000
+  },
+  {
+   "path": "config/ballSettings/maxSpeed",
+   "type": "number",
+   "default": 0,
+   "min": 0,
+   "max": 100000
+  },
+  {
+   "path": "config/ballSettings/gravityScale",
+   "type": "number",
+   "default": 1,
+   "min": -5,
+   "max": 5
+  },
+  {
+   "path": "config/ballSettings/restitution",
+   "type": "number",
+   "default": 0.6,
+   "min": 0,
+   "max": 1
+  },
+  {
+   "path": "config/ballSettings/pushOffClampDeltaMulti",
+   "type": "number",
+   "default": 0.6,
+   "min": 0,
+   "max": 1
+  },
+  {
+   "path": "config/ballSettings/ballHolderTerminalVelocity",
+   "type": "number",
+   "default": 250,
+   "min": 0,
+   "max": 1000
+  },
+  {
+   "path": "config/ballSettings/rollingBounceSpeedThreshold",
+   "type": "number",
+   "default": 50,
+   "min": 0,
+   "max": 1000
+  },
+  {
+   "path": "config/ballSettings/frictionAffectsBounceDirection",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/ballSettings/frictionBounceScale",
+   "type": "number",
+   "default": 1,
+   "min": 0,
+   "max": 100
+  },
+  {
+   "path": "config/ballSettings/spinBounceFrictionScale",
+   "type": "number",
+   "default": 1,
+   "min": 0,
+   "max": 100
+  },
+  {
+   "path": "config/ballSettings/crossSpinCurveStrength",
+   "type": "number",
+   "default": 0.001,
+   "min": 0,
+   "max": 10
+  },
+  {
+   "path": "config/ballSettings/crossSpinAngularDecayFactor",
+   "type": "number",
+   "default": 5,
+   "min": 0,
+   "max": 100
+  },
+  {
+   "path": "config/ballSettings/bounceMode",
+   "type": "number",
+   "default": 1,
+   "min": 0,
+   "max": 2
+  },
+  {
+   "path": "config/ballSettings/massDistribution",
+   "type": "number",
+   "default": 1,
+   "min": 0,
+   "max": 1
+  },
+  {
+   "path": "config/ballSettings/useSurfacePhysicsMaterials",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/ballSettings/rollingFriction",
+   "type": "number",
+   "default": 0.05,
+   "min": 0,
+   "max": 1
+  },
+  {
+   "path": "config/ballSettings/kineticFriction",
+   "type": "number",
+   "default": 0.5,
+   "min": 0,
+   "max": 1
+  },
+  {
+   "path": "config/ballSettings/staticFriction",
+   "type": "number",
+   "default": 0.8,
+   "min": 0,
+   "max": 1
+  },
+  {
+   "path": "config/ballSettings/angularDamping",
+   "type": "number",
+   "default": 0.01,
+   "min": 0,
+   "max": 1
+  },
+  {
+   "path": "config/ballSettings/angularDampingWhenStopped",
+   "type": "number",
+   "default": 10,
+   "min": 0,
+   "max": 1
+  },
+  {
+   "path": "config/ballSettings/rollingGravityMultiplier",
+   "type": "number",
+   "default": 1,
+   "min": 0,
+   "max": 10
+  },
+  {
+   "path": "config/ballSettings/effectiveMass",
+   "type": "number",
+   "default": 0.6,
+   "min": 0.01,
+   "max": 50
+  },
+  {
+   "path": "config/ballSettings/applyMagnusEffect",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/ballSettings/magnusEffectFactor",
+   "type": "number",
+   "default": 1.0,
+   "min": 0,
+   "max": 100
+  },
+  {
+   "path": "config/gameStateSettings/visualizePriorityProps",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/ticketSettings/homeMaxVerifiedTickets",
+   "type": "number",
+   "default": 4
+  },
+  {
+   "path": "config/ticketSettings/awayMaxVerifiedTickets",
+   "type": "number",
+   "default": 4
+  },
+  {
+   "path": "config/instantReplaySettings/notablePlayerDistance",
+   "type": "number",
+   "default": 300
+  },
+  {
+   "path": "config/instantReplaySettings/playOnGoal",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/instantReplaySettings/enabled",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/instantReplaySettings/highQuality",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/serverReplaySettings/enableServerReplays",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/serverReplaySettings/maxDurationSeconds",
+   "type": "number",
+   "default": 300
+  },
+  {
+   "path": "config/serverReplaySettings/maxSizeMb",
+   "type": "number",
+   "default": 100
+  },
+  {
+   "path": "config/networkingSettings/enableNetFiltering",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/defaultUsername",
+   "type": "string",
+   "default": "Username123",
+   "min": null,
+   "max": null
+  },
+  {
+   "path": "config/canFly",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/debugMovingActorSpeed",
+   "type": "number",
+   "default": 400,
+   "min": 0,
+   "max": 500
+  },
+  {
+   "path": "config/practiceMode",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/halfcourtMode1",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/halfcourtMode2",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/featureFlags/CoolFeatureString",
+   "type": "string",
+   "default": "This value is even cooler, seriously"
+  },
+  {
+   "path": "config/manualResetTrigger",
+   "type": "number",
+   "default": 0
+  },
+  {
+   "path": "config/developmentInsightsProfileURL",
+   "type": "string",
+   "default": ""
+  },
+  {
+   "path": "config/developmentBotBehavior",
+   "type": "string",
+   "default": ""
+  },
+  {
+   "path": "config/stationConfig/StationAnnouncement",
+   "type": "string",
+   "default": "Welcome to Halcyon Ring"
+  },
+  {
+   "path": "config/stationConfig/BoardTextureUrl1",
+   "type": "string",
+   "default": ""
+  },
+  {
+   "path": "config/stationConfig/BoardTextureUrl2",
+   "type": "string",
+   "default": ""
+  },
+  {
+   "path": "config/stationConfig/BoardTextureUrl3",
+   "type": "string",
+   "default": ""
+  },
+  {
+   "path": "config/stationConfig/BoardTextureUrl4",
+   "type": "string",
+   "default": ""
+  },
+  {
+   "path": "config/stationConfig/BoardTextureUrl5",
+   "type": "string",
+   "default": ""
+  },
+  {
+   "path": "config/stationConfig/BoardTextureUrl6",
+   "type": "string",
+   "default": ""
+  },
+  {
+   "path": "config/stationConfig/SignPlazaFront",
+   "type": "string",
+   "default": ""
+  },
+  {
+   "path": "config/stationConfig/SignPlazaWest",
+   "type": "string",
+   "default": ""
+  },
+  {
+   "path": "config/stationConfig/SignPlazaEast",
+   "type": "string",
+   "default": ""
+  },
+  {
+   "path": "config/stationConfig/SignComplexWest",
+   "type": "string",
+   "default": ""
+  },
+  {
+   "path": "config/stationConfig/SignComplexEast",
+   "type": "string",
+   "default": ""
+  },
+  {
+   "path": "config/stationConfig/SignComplexBasement",
+   "type": "string",
+   "default": ""
+  },
+  {
+   "path": "config/stationConfig/SignArenaPrime",
+   "type": "string",
+   "default": ""
+  },
+  {
+   "path": "config/stationConfig/statusBoardTKBMainUrl",
+   "type": "string",
+   "default": ""
+  },
+  {
+   "path": "config/stationConfig/statusBoardTKBSidesUrl",
+   "type": "string",
+   "default": ""
+  },
+  {
+   "path": "config/stationConfig/statusBoardTKBBack1Url",
+   "type": "string",
+   "default": ""
+  },
+  {
+   "path": "config/stationConfig/statusBoardTKBBack2Url",
+   "type": "string",
+   "default": ""
+  },
+  {
+   "path": "config/stationConfig/kingsCourtTeamLogosUrl",
+   "type": "string",
+   "default": ""
+  },
+  {
+   "path": "config/outOfBoundsSettings/outOfBoundsMode",
+   "type": "number",
+   "default": 0
+  },
+  {
+   "path": "config/enableRoboRoaches",
+   "type": "bool",
+   "default": true
+  },
+  {
+   "path": "config/allowSpectatorVoip",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/spectator/scaleRendererWhenClose",
+   "type": "bool",
+   "default": false
+  },
+  {
+   "path": "config/spectator/scaleRendererWhenCloseDistance",
+   "type": "number",
+   "default": 500
+  }
+ ],
+ "presets": {
+  "DisableBoostEconomy": [
+   {
+    "path": "config/player/enableBoostEconomy",
+    "value": false
+   }
+  ],
+  "architectMode": [
+   {
+    "path": "config/player/enableLaserPointers",
+    "value": true
+   }
+  ],
+  "betaTest": [
+   {
+    "path": "config/player/smallThrusterBeginStrength",
+    "value": 4000
+   },
+   {
+    "path": "config/player/smallThrusterEndStrength",
+    "value": 1000
+   }
+  ],
+  "disableThrusters": [
+   {
+    "path": "config/player/enableThrusters",
+    "value": false
+   },
+   {
+    "path": "config/player/enableBoost",
+    "value": false
+   },
+   {
+    "path": "config/player/enableMagnetHands",
+    "value": false
+   },
+   {
+    "path": "config/player/tackleEnemyTeamOnly",
+    "value": false
+   }
+  ],
+  "jakeball_config": [
+   {
+    "path": "config/player/defaultPlayerGravity",
+    "value": 550
+   },
+   {
+    "path": "config/player/enableBoostEconomy",
+    "value": true
+   },
+   {
+    "path": "config/player/enableThrusters",
+    "value": true
+   }
+  ],
+  "jordan_arena_config": [
+   {
+    "path": "config/player/enableStaticGrabbing",
+    "value": true
+   },
+   {
+    "path": "config/player/smallThrusterBeginStrength",
+    "value": 275
+   },
+   {
+    "path": "config/player/smallThrusterEndStrength",
+    "value": 225
+   },
+   {
+    "path": "config/player/maxThrusterSpeed",
+    "value": 500
+   },
+   {
+    "path": "config/player/initialPushOffMaxSpeedDelta",
+    "value": 500.0
+   },
+   {
+    "path": "config/player/pushOffMaxSpeedDelta",
+    "value": 300.0
+   },
+   {
+    "path": "config/player/pushOffAlwaysAdds",
+    "value": false
+   },
+   {
+    "path": "config/player/clampSpeedOnGrabbed",
+    "value": 1500.0
+   },
+   {
+    "path": "config/player/brakeStrength",
+    "value": 700
+   },
+   {
+    "path": "config/player/highSpeedBrakeStrength",
+    "value": 1000
+   },
+   {
+    "path": "config/ballSettings/speedLimitWhileHolding",
+    "value": 450
+   },
+   {
+    "path": "config/ballSettings/brakeStrengthWhileHolding",
+    "value": 500
+   },
+   {
+    "path": "config/ballSettings/thrusterBeginStrengthWhileHolding",
+    "value": 225
+   }
+  ],
+  "spawnRoom_config": [
+   {
+    "path": "config/player/defaultPlayerGravity",
+    "value": 0
+   },
+   {
+    "path": "config/player/enableBoostEconomy",
+    "value": false
+   }
+  ],
+  "uncappedThrusters": [
+   {
+    "path": "config/player/smallThrusterBeginStrength",
+    "value": 75
+   },
+   {
+    "path": "config/player/smallThrusterEndStrength",
+    "value": 75
+   },
+   {
+    "path": "config/player/maxThrusterSpeed",
+    "value": 400
+   },
+   {
+    "path": "config/player/brakeStrength",
+    "value": 2000
+   }
+  ],
+  "weakThrusters": [
+   {
+    "path": "config/player/smallThrusterBeginStrength",
+    "value": 75
+   },
+   {
+    "path": "config/player/smallThrusterEndStrength",
+    "value": 75
+   }
+  ]
+ },
+ "modules": [
+  {
+   "level": "deathrun2_a2level (ScrapRun)",
+   "slot_key": "ScraprunPrime",
+   "vars": [
+    {
+     "name": "matchLengthSeconds",
+     "type": "number",
+     "default": 180
+    },
+    {
+     "name": "TicketManagerSettings",
+     "type": "json",
+     "default": {
+      "MaxTeamSizes": {
+       "0": 100,
+       "1": 100
+      }
+     }
+    },
+    {
+     "name": "bScraprunOpen",
+     "type": "bool",
+     "default": false
+    }
+   ]
+  },
+  {
+   "level": "arena_jakeballKingsCourt_a2level",
+   "slot_key": "TKB_Prime",
+   "vars": [
+    {
+     "name": "bKickLosingTeam",
+     "type": "bool",
+     "default": true
+    },
+    {
+     "name": "MatchLengthSeconds",
+     "type": "number",
+     "default": 300
+    },
+    {
+     "name": "MercyScoreDifference",
+     "type": "number",
+     "default": 6
+    },
+    {
+     "name": "bUseWhitelist",
+     "type": "bool",
+     "default": false
+    },
+    {
+     "name": "Team0Whitelist",
+     "type": "string",
+     "default": ""
+    },
+    {
+     "name": "Team1Whitelist",
+     "type": "string",
+     "default": ""
+    },
+    {
+     "name": "bUseBestOf",
+     "type": "bool",
+     "default": false
+    },
+    {
+     "name": "RoundsPerMatch",
+     "type": "number",
+     "default": 1
+    },
+    {
+     "name": "TicketManagerSettings",
+     "type": "json",
+     "default": {
+      "MaxTeamSizes": {
+       "0": 3,
+       "1": 3
+      }
+     }
+    },
+    {
+     "name": "Team0Name",
+     "type": "string",
+     "default": ""
+    },
+    {
+     "name": "Team1Name",
+     "type": "string",
+     "default": ""
+    },
+    {
+     "name": "TimeBetweenRounds",
+     "type": "number",
+     "default": 45
+    },
+    {
+     "name": "Team0ImageURL",
+     "type": "string",
+     "default": ""
+    },
+    {
+     "name": "Team1ImageURL",
+     "type": "string",
+     "default": ""
+    },
+    {
+     "name": "bShuffleTeamsAfterMatch",
+     "type": "bool",
+     "default": false
+    }
+   ]
+  },
+  {
+   "level": "arena_jakeball_a2level",
+   "slot_key": "TKB_PlazaFront",
+   "vars": [
+    {
+     "name": "bKickLosingTeam",
+     "type": "bool",
+     "default": false
+    },
+    {
+     "name": "MatchLengthSeconds",
+     "type": "number",
+     "default": 300
+    },
+    {
+     "name": "MercyScoreDifference",
+     "type": "number",
+     "default": 6
+    },
+    {
+     "name": "bUseWhitelist",
+     "type": "bool",
+     "default": false
+    },
+    {
+     "name": "Team0Whitelist",
+     "type": "string",
+     "default": ""
+    },
+    {
+     "name": "Team1Whitelist",
+     "type": "string",
+     "default": ""
+    },
+    {
+     "name": "bUseBestOf",
+     "type": "bool",
+     "default": false
+    },
+    {
+     "name": "RoundsPerMatch",
+     "type": "number",
+     "default": 1
+    },
+    {
+     "name": "TicketManagerSettings",
+     "type": "json",
+     "default": {
+      "MaxTeamSizes": {
+       "0": 3,
+       "1": 3
+      }
+     }
+    },
+    {
+     "name": "Team0Name",
+     "type": "string",
+     "default": ""
+    },
+    {
+     "name": "Team1Name",
+     "type": "string",
+     "default": ""
+    },
+    {
+     "name": "TimeBetweenRounds",
+     "type": "number",
+     "default": 45
+    },
+    {
+     "name": "Team0ImageURL",
+     "type": "string",
+     "default": ""
+    },
+    {
+     "name": "Team1ImageURL",
+     "type": "string",
+     "default": ""
+    },
+    {
+     "name": "bShuffleTeamsAfterMatch",
+     "type": "bool",
+     "default": false
+    }
+   ]
+  },
+  {
+   "level": "deathrun_old_a2level",
+   "slot_key": "deathrun_old",
+   "vars": [
+    {
+     "name": "TicketManagerSettings",
+     "type": "json",
+     "default": {
+      "MaxTeamSizes": {
+       "0": 100,
+       "1": 4
+      },
+      "TeamColors": {
+       "0": 4,
+       "1": 0
+      }
+     }
+    }
+   ]
+  },
+  {
+   "level": "events/prototype/racingv1_0_0_a2level",
+   "slot_key": "TKB_Custom_Full_72582085",
+   "vars": [
+    {
+     "name": "LapNumber",
+     "type": "number",
+     "default": 1
+    },
+    {
+     "name": "PlayersToGetOff",
+     "type": "string",
+     "default": ""
+    },
+    {
+     "name": "PlayersToGetOn",
+     "type": "string",
+     "default": ""
+    },
+    {
+     "name": "TicketManagerSettings",
+     "type": "json",
+     "default": {
+      "maxTeamSizes": {
+       "0": 20,
+       "1": 20
+      },
+      "TeamColors": {
+       "0": 4,
+       "1": 0
+      }
+     }
+    }
+   ]
+  },
+  {
+   "level": "justSpleef_a2level",
+   "slot_key": "Spleef1",
+   "vars": [
+    {
+     "name": "TicketManagerSettings",
+     "type": "json",
+     "default": {
+      "MaxTeamSizes": {
+       "0": 20,
+       "1": 20
+      },
+      "TeamColors": {
+       "0": 4,
+       "1": 0
+      }
+     }
+    }
+   ]
+  }
+ ],
+ "station_keys": [
+  "StationAnnouncement",
+  "BoardTextureUrl1",
+  "BoardTextureUrl2",
+  "BoardTextureUrl3",
+  "BoardTextureUrl4",
+  "BoardTextureUrl5",
+  "BoardTextureUrl6",
+  "SignPlazaFront",
+  "SignPlazaWest",
+  "SignPlazaEast",
+  "SignComplexWest",
+  "SignComplexEast",
+  "SignComplexBasement",
+  "SignArenaPrime",
+  "statusBoardTKBMainUrl",
+  "statusBoardTKBSidesUrl",
+  "statusBoardTKBBack1Url",
+  "statusBoardTKBBack2Url",
+  "kingsCourtTeamLogosUrl"
+ ]
+}

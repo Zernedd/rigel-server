@@ -175,6 +175,14 @@ namespace AUnrealFeatures.Ares.Servers
             "kingsCourtTeamLogosUrl",
         };
 
+        // Dashboard-set netvar overrides live in the station Config under this reserved prefix:
+        //   nv.module.<SlotID>.<Variable>   a gamemode config variable (UModuleState::GetGamemode*Variable)
+        //   nv.world.<path>                  a world netvar, e.g. config/player/brakeStrength
+        // They are never served in the game's native config fetch (the station keys there are applied
+        // straight into config/stationConfig); the injected DLL polls /v1/deployments/{id}/netvar_overrides
+        // and applies them itself.
+        public const string NetvarOverridePrefix = "nv.";
+
         // Where uploaded board images live on disk, and the max size we accept.
         private static readonly string BoardUploadDir =
             Path.Combine(Environment.CurrentDirectory, "boards");
@@ -2312,6 +2320,10 @@ namespace AUnrealFeatures.Ares.Servers
             if (body == null || string.IsNullOrEmpty(body.EventType))
                 return Results.Ok(new SuccessBoolean { Success = false });
 
+            // Keep the latest full netvar/state dump for the dashboard's netvar editor (in memory, disk
+            // throttled to 1/min) -- the size filter below still keeps it out of LiteDB.
+            NetvarDumpStore.Record(deployment_id, body.EventType, body.EventData);
+
             // Only persist small events. The game fires "netvars" (~1.6 MB) and "state" (~40 KB)
             // every few seconds; storing those would bloat production.db fast, and we don't read
             // them back. Keep tiny events for monitoring, skip the big spammy ones.
@@ -2420,7 +2432,8 @@ namespace AUnrealFeatures.Ares.Servers
                     var station = stationCollection?.FindOne(s => s.StationId == deployment.StationId);
                     if (station != null)
                         foreach (var kv in station.Config)
-                            config.TryAdd(kv.Key, kv.Value);
+                            if (!kv.Key.StartsWith(NetvarOverridePrefix))   // overrides go via netvar_overrides, not here
+                                config.TryAdd(kv.Key, kv.Value);
                 }
                 // Halcyon board/sign URLs (served even for an unknown/fixed deployment id).
                 foreach (var kv in DefaultStationConfig)
@@ -2483,7 +2496,8 @@ namespace AUnrealFeatures.Ares.Servers
                 var station = stationCollection?.FindOne(s => s.StationId == deployment.StationId);
                 if (station != null)
                     foreach (var kv in station.Config)
-                        resp.Config.TryAdd(kv.Key, kv.Value);
+                        if (!kv.Key.StartsWith(NetvarOverridePrefix))   // overrides go via netvar_overrides, not here
+                            resp.Config.TryAdd(kv.Key, kv.Value);
                 // Halcyon board/sign URLs (a real station config, if present, overrides these).
                 foreach (var kv in DefaultStationConfig)
                     resp.Config.TryAdd(kv.Key, kv.Value);
@@ -2491,6 +2505,38 @@ namespace AUnrealFeatures.Ares.Servers
             }
 
             return Results.Ok(resp);
+        }
+
+        // GET /v1/deployments/{deployment_id}/netvar_overrides
+        // Polled over loopback by the injected DLL (~every 10s). Deliberately plain text, not JSON, so the
+        // C++ side needs no parser:
+        //   v=<sha1 of the lines below>          -- unchanged hash => the DLL does nothing
+        //   module<TAB><SlotID|*><TAB><Variable><TAB><value>
+        //   world<TAB><TAB><netvar path><TAB><value>
+        [HttpGet("v1/deployments/{deployment_id}/netvar_overrides")]
+        public async Task<IHttpActionResult> GetNetvarOverrides(
+            IHttpRequest request, IHttpResponse response, string deployment_id)
+        {
+            var deploymentCollection = Program.Database.GetCollection<DeploymentDbObject>(true);
+            var deployment = deploymentCollection?.FindOne(d => d.DeploymentId == deployment_id);
+            string stationId = deployment?.StationId ?? "";
+            if (string.IsNullOrEmpty(stationId))
+            {
+                // Same fallback as GetDeploymentV1: a fixed launch id resolves to the station of the most
+                // recent online deployment. (FindAll().Where -- never FindOne(captured) -- LiteDB gotcha.)
+                var latest = deploymentCollection?.FindAll()
+                    .Where(d => d.Online && !string.IsNullOrEmpty(d.StationId))
+                    .OrderByDescending(d => d.CreatedAt)
+                    .FirstOrDefault();
+                stationId = latest?.StationId ?? "";
+            }
+            var station = string.IsNullOrEmpty(stationId) ? null
+                : Program.Database.GetCollection<StationDbObject>(true)?.FindOne(s => s.StationId == stationId);
+
+            // The game server calls this once at startup; make sure the watched files exist too.
+            NetvarOverridesFile.EnsureAllWritten();
+            return Results.Configurable(HttpStatusCode.OK, "text/plain; charset=utf-8",
+                System.Text.Encoding.UTF8.GetBytes(NetvarOverridesFile.BuildText(station)));
         }
 
         // GET /v1/deployments/{deployment_id}/config
@@ -2516,7 +2562,8 @@ namespace AUnrealFeatures.Ares.Servers
                     var station = stationCollection?.FindOne(s => s.StationId == deployment.StationId);
                     if (station != null)
                         foreach (var kv in station.Config)
-                            config.TryAdd(kv.Key, kv.Value);
+                            if (!kv.Key.StartsWith(NetvarOverridePrefix))   // overrides go via netvar_overrides, not here
+                                config.TryAdd(kv.Key, kv.Value);
                 }
                 // Halcyon board/sign URLs (served even for an unknown/fixed deployment id).
                 foreach (var kv in DefaultStationConfig)

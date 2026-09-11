@@ -11,6 +11,9 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <mutex>
+#include <map>
+#include <atomic>
+#include <intrin.h>
 #include <vector>
 #include <cstdarg>
 #include <cmath>
@@ -382,6 +385,10 @@ static unsigned char __fastcall CosmeticCmp_Hook(void* a1, void* a2)
 // stayed {}), so the backend station-config route can NOT reach it. FIX server-side: when the requested config
 // var name is "bScraprunOpen", return true; every other var passes through untouched. Authoritative on our
 // (client-as-)server, no backend dependency; onConfigChanged re-reads it so the wall drops live.
+// [2026-09-10 NETVARS] Dashboard gamemode-config overrides are answered inside the three
+// UModuleStateLuaAPI config getters (bool here, number/string below). Defined with the rest of the
+// override code further down; returns false instantly when no override exists.
+static bool NvLookupOverride(void* api, void* nameFStr, std::string* out);
 static constexpr uintptr_t GetBoolCfg_RVA = 0x46DA020;   // sub_7FF67673A020 (UModuleStateLuaAPI::GetBoolConfigVariable impl)
 using GetBoolCfg_t = unsigned char (__fastcall*)(void* ctx, void* nameFStr, __int64 a3, __int64 a4);
 static GetBoolCfg_t GetBoolCfg_Orig = nullptr;
@@ -396,10 +403,71 @@ static unsigned char __fastcall GetBoolCfg_Hook(void* ctx, void* nameFStr, __int
             static volatile LONG s_scr = 0;
             if (InterlockedIncrement(&s_scr) <= 4)
                 printf("[HalcyonA2][SCRAPRUN] getBoolConfigVariable(\"bScraprunOpen\") -> forced TRUE (scraprun open)\n");
+            // A dashboard override for bScraprunOpen wins over the forced default. The impl
+            // (sub_1446DA020) frees the name FString it is handed, so it must still run either way.
+            std::string ovScr;
+            const bool hasScr = NvLookupOverride(ctx, nameFStr, &ovScr);
+            GetBoolCfg_Orig(ctx, nameFStr, a3, a4);
+            if (hasScr) return (ovScr == "true" || ovScr == "1") ? 1 : 0;
             return 1;
         }
     }
-    return GetBoolCfg_Orig(ctx, nameFStr, a3, a4);
+    std::string ov;
+    const bool has = NvLookupOverride(ctx, nameFStr, &ov);   // must read the name BEFORE the impl frees it
+    const unsigned char r = GetBoolCfg_Orig(ctx, nameFStr, a3, a4);
+    if (has) return (ov == "true" || ov == "1") ? 1 : 0;
+    return r;
+}
+
+// UModuleStateLuaAPI::GetNumberConfigVariable impl (sub_1446DDB20): float (api, FString* name); frees name.
+static constexpr uintptr_t GetNumCfg_RVA = 0x46DDB20;
+using GetNumCfg_t = float (__fastcall*)(void* api, void* nameFStr);
+static GetNumCfg_t GetNumCfg_Orig = nullptr;
+static float __fastcall GetNumCfg_Hook(void* api, void* nameFStr)
+{
+    std::string ov;
+    const bool has = NvLookupOverride(api, nameFStr, &ov);
+    const float r = GetNumCfg_Orig(api, nameFStr);
+    if (has)
+    {
+        char* e = nullptr;
+        const double d = strtod(ov.c_str(), &e);
+        if (e && *e == '\0' && !ov.empty()) return static_cast<float>(d);
+    }
+    return r;
+}
+
+// UModuleStateLuaAPI::GetStringConfigVariable impl (sub_1446DE7B0): FString* (api, FString* out, FString* name);
+// fills `out`, frees `name`. An override replaces out's buffer using the engine's own allocator path:
+// FMemory::Free (sub_1410153A0) for the old buffer, the FString reserve helper (sub_140FCC220) for the new.
+static constexpr uintptr_t GetStrCfg_RVA = 0x46DE7B0;
+using GetStrCfg_t = void* (__fastcall*)(void* api, void* outFStr, void* nameFStr);
+static GetStrCfg_t GetStrCfg_Orig = nullptr;
+static void* __fastcall GetStrCfg_Hook(void* api, void* outFStr, void* nameFStr)
+{
+    std::string ov;
+    const bool has = NvLookupOverride(api, nameFStr, &ov);
+    void* r = GetStrCfg_Orig(api, outFStr, nameFStr);
+    if (has && outFStr)
+    {
+        using FreeFn    = void (__fastcall*)(void*);
+        using ReserveFn = void (__fastcall*)(void* fstr, int count, int slack);
+        const uintptr_t base = GetBase();
+        auto** data = reinterpret_cast<wchar_t**>(outFStr);
+        auto*  numP = reinterpret_cast<int32_t*>(reinterpret_cast<uintptr_t>(outFStr) + 8);
+        auto*  maxP = reinterpret_cast<int32_t*>(reinterpret_cast<uintptr_t>(outFStr) + 12);
+        if (*data) reinterpret_cast<FreeFn>(base + 0x10153A0)(*data);
+        *data = nullptr; *numP = 0; *maxP = 0;
+        const int n = static_cast<int>(ov.size()) + 1;                 // include terminator
+        reinterpret_cast<ReserveFn>(base + 0xFCC220)(outFStr, n, 0);
+        if (*data)
+        {
+            for (int i = 0; i < n - 1; ++i) (*data)[i] = static_cast<wchar_t>(static_cast<unsigned char>(ov[i]));
+            (*data)[n - 1] = L'\0';
+            *numP = n;
+        }
+    }
+    return r;
 }
 
 // [2026-09-03 ★ DEATHRUN/SCRAPRUN MATCH-STATE DIAG] Log every match-state transition. Every Luau
@@ -426,6 +494,90 @@ static UpdGameState_t UpdGameState_Orig = nullptr;
 // out to be needed, upgrade to broadcasting the GameTimer onCountdownEnd delegate instead.
 static std::unordered_map<void*, unsigned long long> g_gameBeginAt;   // GSM -> GetTickCount64() at GAME_BEGIN entry
 static bool g_endTriggerFired = false;   // deathrun finish->overtime latch; re-armed at each GAME_BEGIN (see DetectRunnerAtFinish)
+// [2026-09-09 *** SCRAPRUN EARLY-EXIT -- what actually goes wrong, and the fix]
+// The gamemode's own source (deathrun2_a2level/Scripts/gamemode.luau) ends the round here:
+//     function PlayerLeftTeam(teamSize, teamIndex)
+//         if (currentState == RUNNING or OVERTIME_RUNNING) and teamSize == 0 then
+//             GameScore:incrementScore(...); SwitchState(State.GAME_EXIT)
+//     RunnerTeamChanger.teamSizeDecreased.Listen(PlayerLeftTeam)
+// so the rule really is "end when a team empties", and it is right AS LONG AS the roster holds every
+// runner. On this server it does not: the 10Hz [ROSTER] poll never once saw a team-0 changer above 1 --
+// every transition in the whole log is 0->1 or 1->0. With a roster of one, a single death empties the
+// team and the Luau exits exactly as designed. That is the "one player dies and the gamemode ends".
+//
+// Enrolment itself is out of reach: UTeamChangeComponent::HandleFiringSwitcherOverlapOnServer (real impl
+// 0x53A2B10, reached from the natives-table entry for its name at 0x1485378F8) does nothing but fire the
+// Luau event "_TeamChangeActor_SwitcherOverlap_OnServer", and NO script in A2-Windows.pak listens for it
+// (searched all 2519 entries) -- the listener ships with the prefab, not the level. That is why firing
+// the switcher behaved so erratically: sometimes 0->1, sometimes 0->0, sometimes it removed the player
+// who was already in.
+//
+// So stop trying to fill the roster and stop it EMPTYING instead. A death must not take a player off the
+// team while their ScrapRun round is running -- which is precisely what was asked for ("the game should
+// only end if all of the runners are dead not if one dies"). Every team-clear path is a reflected
+// UFunction, so ProcessEvent_Hook can simply swallow it for a pawn that is inside ScrapRun mid-round.
+// Leaving the arena removes the pawn from this set first, so a real departure still clears normally, and
+// the guard drops the moment the round ends.
+static bool  g_seatRound = false;           // -SeatRound re-enables round-start seating
+// TeamSize@0x4DC of the first team-0 ScrapRun changer, refreshed by the roster poll. A raw int* so the
+// per-dispatch probe at the bottom of ProcessEvent_Hook is a plain load rather than a walk.
+static int* g_scrapRosterCell = nullptr;
+static void* g_scrapPawns[32];
+static int   g_scrapPawnN = 0;
+static void* g_scrapGsm = nullptr;          // the GameStateManagerComponent running ScrapRun
+static bool  g_scrapRoundActive = false;
+static bool  g_teamClearGuard = true;       // -NoTeamClearGuard turns the suppression off
+static long  g_scrapGuardHits = 0;
+// [2026-09-09 *** THE CLEAR *IS* THE DEATH EVENT -- so it is also the win condition]
+// Blanket-suppressing team clears fixed "one death ends the round" and broke the other half: with the
+// roster unable to fall, all runners could die and nothing happened, because the scrappers' win is the
+// SAME signal -- the Luau only ever learns about a death through teamSizeDecreased -> teamSize == 0.
+//
+// So do not swallow the clear unconditionally. Swallow it only while another runner is still alive, and
+// remember who went down. When the LAST live runner is cleared, release everything: re-fire the clear for
+// each runner held back this round, then let this one through. The roster drains to 0 in one go, the Luau
+// runs its normal teamIndex == 0 branch (GoalInfo "Scrappers", incrementScore, GAME_EXIT), and the
+// scrappers win properly -- with no dependence on how many players the roster actually managed to hold.
+//
+// Re-firing uses ATeamChangeActor::TeamClearerOverlappedOnServer(PlayerIndex) (impl 0x53C4770): it
+// resolves the pawn from the index, no-ops if the pawn has no team, and otherwise calls
+// ATicketManager::HandleClearTeam(pawn, bResetCurrentTicket=1, bSilent=0, bPawnBeingDestroyed=0,
+// bResetPawnCollision=1) -- the game's own removal, not a poke at a mirror field.
+struct ScrapDead { void* pawn; int pidx; };
+static ScrapDead g_scrapDead[32];
+static int  g_scrapDeadN = 0;
+static bool g_scrapReleasing = false;      // re-entrancy: our own release must bypass the guard
+static bool ScrapIsDead(void* pw)
+{
+    for (int i = 0; i < g_scrapDeadN; ++i) if (g_scrapDead[i].pawn == pw) return true;
+    return false;
+}
+static void ScrapMarkDead(void* pw, int pidx)
+{
+    if (!pw || ScrapIsDead(pw) || g_scrapDeadN >= 32) return;
+    g_scrapDead[g_scrapDeadN].pawn = pw;
+    g_scrapDead[g_scrapDeadN].pidx = pidx;
+    ++g_scrapDeadN;
+}
+static bool ScrapHasPawn(void* pw)
+{
+    for (int i = 0; i < g_scrapPawnN; ++i) if (g_scrapPawns[i] == pw) return true;
+    return false;
+}
+static void ScrapAddPawn(void* pw)
+{
+    if (!pw || ScrapHasPawn(pw) || g_scrapPawnN >= 32) return;
+    g_scrapPawns[g_scrapPawnN++] = pw;
+}
+static void ScrapRemovePawn(void* pw)
+{
+    for (int i = 0; i < g_scrapPawnN; ++i)
+        if (g_scrapPawns[i] == pw) { g_scrapPawns[i] = g_scrapPawns[--g_scrapPawnN]; return; }
+}
+
+static bool ScrapGsmFarFromScrapRun(void* gsm, double* distOut);   // defined with the finish-gate code below
+static void SafeSeatEveryoneForRound();   // defined with the team-changer code below
+void ResetSeatedForNewRound();            // ditto
 static __int64 __fastcall UpdGameState_Hook(void* self, unsigned char newState)
 {
     static const char* const kNm[] = {
@@ -433,7 +585,59 @@ static __int64 __fastcall UpdGameState_Hook(void* self, unsigned char newState)
         "RUNNING","TEAM_SCORED_ENTER","TEAM_SCORED","?8","?9","GAME_EXIT","?11",
         "OVERTIME_COUNTDOWN","OVERTIME_RUNNING","BEGIN_PLAY" };
     const char* s = (newState < 15) ? kNm[newState] : "?";
-    printf("[HalcyonA2][GSMSTATE] mgr=%p -> %u (%s)\n", self, static_cast<unsigned>(newState), s);
+    // t= so the OVERTIME_COUNTDOWN(12) -> OVERTIME_RUNNING(13) gap is measurable: it should be the
+    // Luau's 15s startTimerWithCountdown. "Spleef started instantly" would show up as a ~0ms gap.
+    printf("[HalcyonA2][GSMSTATE] mgr=%p -> %u (%s) t=%llu\n", self, static_cast<unsigned>(newState), s,
+           (unsigned long long)GetTickCount64());
+    if (newState == 12 && self == g_scrapGsm) g_endTriggerFired = true;   // spleef is under way
+    // [2026-09-09] Round start is the correct moment to fill the roster: BEGIN_PLAY(14) has just
+    // kicked everyone out (see SeatEveryoneForRound), so whoever is about to play currently has no
+    // team. Seating here means the round begins with a full runner roster instead of an empty one.
+    // BEGIN_PLAY(14) is where the gamemode's KickEveryoneOutTeleporter empties the rosters, and
+    // WAITING_TO_START(1) follows it -- both mean the next round starts from scratch, so forget who
+    // we seated.
+    if (newState == 14 || newState == 1)
+        ResetSeatedForNewRound();
+
+    // [2026-09-09] Round-start seating is OFF. It fired the switcher, which we now know is an unowned
+    // Luau event with no listener in the pak -- so it added, did nothing, or REMOVED the player already
+    // in, which is what made the roster oscillate 0<->1. Nothing about the fix needs it: with the clear
+    // guard below, a roster of 1 survives a death, and a roster of 0 can never decrement at all.
+    // -SeatRound restores it if the enrolment path is ever identified.
+    if (newState == 5 && g_seatRound)     // RUNNING
+        SafeSeatEveryoneForRound();
+
+    // Arm the team-clear guard for the ScrapRun round. Identify ScrapRun's manager as the one that
+    // enters RUNNING/OVERTIME_RUNNING while players are actually standing in the ScrapRun arena -- the
+    // other seven managers on this level never coincide with that.
+    // [2026-09-11] They DO coincide: the VPS log shows a JAKEBALL manager (11 -> 12 -> 13 overtime) taking
+    // g_scrapGsm while a player sat in the ScrapRun set -- which latched g_endTriggerFired (spleef detector
+    // off) and armed the ScrapRun clear guard on the wrong manager. Skip a manager whose owner is positively
+    // located far from the finish gate; an unknown/unplaced owner keeps the old behaviour.
+    double scrapDist = -1.0;
+    const bool farGsm = ((newState == 5 || newState == 13) && g_scrapPawnN > 0 && self != g_scrapGsm)
+                        && ScrapGsmFarFromScrapRun(self, &scrapDist);
+    if (farGsm)
+        printf("[HalcyonA2][SCRAPGUARD] ignoring mgr=%p -> %u: owner is %.0f from the ScrapRun finish gate (another arena)\n",
+               self, static_cast<unsigned>(newState), scrapDist);
+    if ((newState == 5 || newState == 13) && g_scrapPawnN > 0 && !farGsm)
+    {
+        g_scrapGsm = self;
+        if (!g_scrapRoundActive)
+            printf("[HalcyonA2][SCRAPGUARD] round ACTIVE on mgr=%p (%d player(s) in ScrapRun) -- "
+                   "team clears suppressed until it ends\n", self, g_scrapPawnN);
+        g_scrapRoundActive = true;
+        g_scrapGuardHits = 0;
+        if (newState == 5) g_scrapDeadN = 0;   // fresh round -> everybody is alive again
+    }
+    else if (self == g_scrapGsm && newState != 5 && newState != 13)
+    {
+        if (g_scrapRoundActive)
+            printf("[HalcyonA2][SCRAPGUARD] round OVER on mgr=%p -> %u (%s); guard off, suppressed %ld "
+                   "clear(s) this round\n", self, static_cast<unsigned>(newState), s, g_scrapGuardHits);
+        g_scrapRoundActive = false;
+    }
+
     if (newState == 3)                    // entered GAME_BEGIN -> arm the countdown watchdog
     {
         g_gameBeginAt[self] = GetTickCount64();
@@ -5029,8 +5233,13 @@ static void PushTeamColorToClient(void* pawnV, uintptr_t tm, int teamIndex)
     auto* tcData    = *reinterpret_cast<unsigned char**>(tm + 0x2E8);   // TeamColors.Data
     const int tcNum = *reinterpret_cast<int*>(tm + 0x2F0);              // TeamColors.Num
     if (!tcData || teamIndex >= tcNum) { printf("[HalcyonA2][TCOL] Client bail: TeamColors empty/oob (data=%p num=%d team=%d)\n", tcData, tcNum, teamIndex); return; }
-    struct { unsigned char TeamColor[0x14]; signed char TeamIndex; unsigned char pad[7]; } parms{};
-    memcpy(parms.TeamColor, tcData + teamIndex * 0x14, 0x14);           // FTeamColor is 0x14 bytes
+    // [2026-09-11 22284 LAYOUT] FTeamColor is 0x1C here (Primary, Secondary, TeamLogoIndex, TeamName, TeamRowId) and
+    // VRPawn_Client_UpdateTeamColors is 0x20 with TeamIndex @0x1C; the native GiveAndCheckTicket reads TeamColors
+    // with a 28-byte stride. The old 20996 layout (0x14 colour, index @0x14, 0x1C struct) made UE read TeamIndex one
+    // byte PAST this buffer -> the owning client got a stray stack byte as its team (-5 seen for team 0: no colour,
+    // team checks like ball grabbing fail).
+    struct { unsigned char TeamColor[0x1C]; signed char TeamIndex; unsigned char pad[3]; } parms{};
+    memcpy(parms.TeamColor, tcData + teamIndex * 0x1C, 0x1C);
     parms.TeamIndex = static_cast<signed char>(teamIndex);
     const bool ok = SafeProcessEvent(pawn, fn, &parms);
     printf("[HalcyonA2][TCOL] Client_UpdateTeamColors SENT pawn=%s team=%d color=(%u,%u,%u,%u) pe_ok=%d\n",
@@ -5056,8 +5265,9 @@ static void PushReplicatedTeamColor(void* pawnV, uintptr_t tm, int teamIndex)
     auto* tcData    = *reinterpret_cast<unsigned char**>(tm + 0x2E8);   // TeamColors.Data
     const int tcNum = *reinterpret_cast<int*>(tm + 0x2F0);              // TeamColors.Num
     if (!tcData || teamIndex >= tcNum) { printf("[HalcyonA2][TCOL] Rep bail: TeamColors empty/oob (data=%p num=%d team=%d)\n", tcData, tcNum, teamIndex); return; }
-    struct { unsigned char TeamColor[0x14]; signed char NewTeamIndex; unsigned char pad[3]; } parms{};
-    memcpy(parms.TeamColor, tcData + teamIndex * 0x14, 0x14);
+    // [2026-09-11 22284 LAYOUT] A2PlayerEntity_Server_SetCurrentColor = FTeamColor(0x1C) + NewTeamIndex @0x1C (0x20).
+    struct { unsigned char TeamColor[0x1C]; signed char NewTeamIndex; unsigned char pad[3]; } parms{};
+    memcpy(parms.TeamColor, tcData + teamIndex * 0x1C, 0x1C);
     parms.NewTeamIndex = static_cast<signed char>(teamIndex);
     // The Server_SetCurrentColor RPC writes only the Mass fragment, whose color never syncs to the
     // replicated copy -> register this player so the fast path stamps the color into the entity's
@@ -5506,7 +5716,160 @@ static double    g_endTriggerLoc[3]  = {};        // its world center
 static ULONGLONG g_lastEndScan       = 0;         // EndTrigger (re)locate throttle
 static ULONGLONG g_lastFinishTick    = 0;         // detector run throttle
 static ULONGLONG g_lastFinishNearLog = 0;         // "runner near finish" log throttle
-static double    g_spleefRadius      = 2000.0;    // fire radius around the finish (tunable via -SpleefRadius=N)
+static ULONGLONG g_lastFinishFire    = 0;         // retry throttle for a fire the Luau rejected
+
+// [2026-09-11] True only when the GameStateManager's owner actor is placed more than 25000 units from the
+// ScrapRun finish gate (the jakeball complex is ~42000+ away, ScrapRun's own slot ~6000, its farthest
+// checkpoint ~19400). Gate not located yet, owner unresolvable or at the origin -> false (can't tell).
+static bool ScrapGsmFarFromScrapRun(void* gsm, double* distOut)
+{
+    *distOut = -1.0;
+    if (!g_endTrigger || !gsm) return false;
+    double loc[3] = {};
+    __try
+    {
+        auto* owner = reinterpret_cast<SDK::UObject*>(gsm)->Outer;
+        if (!owner || !WireActorLoc(owner, loc)) return false;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+    if (loc[0] == 0.0 && loc[1] == 0.0 && loc[2] == 0.0) return false;
+    const double dx = loc[0] - g_endTriggerLoc[0], dy = loc[1] - g_endTriggerLoc[1], dz = loc[2] - g_endTriggerLoc[2];
+    *distOut = sqrt(dx * dx + dy * dy + dz * dz);
+    return *distOut > 25000.0;
+}
+// [2026-09-09] AVRPawn::GetPawnTeamIndex (impl 0x54EB150). This is the function the Luau's
+// VRPawn.getTeamIndexByID resolves to, so it is the ONLY team value worth testing against: it reads a
+// fragment off AVRPawn::Entity@0x928 and falls back to the byte at pawn+0x1D78, returning -1 (0xFF) for
+// "no team". Every hand-rolled read we have used instead (AAxPlayerState::TeamIndex@0x380) has disagreed
+// with it at some point, which is how a "runner" kept failing the Luau's `team == 0` test.
+// DELIBERATELY NOT WRAPPED IN A CALLABLE. Calling it crashed the server six times in one boot (see the
+// note in DetectRunnerAtFinish): it is only safe on a pawn known to be live THIS frame, which none of our
+// cached pawn lists can promise. Recorded here so nobody reaches for it again without that guarantee.
+
+// [2026-09-09 *** WHY SPLEEF NEVER STARTED -- the fire radius was ~40x the trigger]
+// The detector DID fire ("id=2 at finish d=1721 (r=2000) -> firing onOverlapByPlayerServer") but the
+// gamemode never reached OVERTIME_COUNTDOWN(12); its whole session reads [1,3,5,10,14] x4. The fire was
+// simply nowhere near the finish: PlayerOverlapAtEnd is a thin GATE, not a blob.
+//
+// From deathrun2_a2level/level.json, PlayerOverlapAtEnd is a PrimitiveCubePurpleTrigger at local
+// (-2840,-3770,3858), yaw 90, scale (32.75, 1, 19) -> prefab half-extents (1637.5, 50, 950); the yaw
+// swaps X/Y to (50, 1637.5, 950) in level space. The module transform was pinned exactly from two
+// logged anchors (TeamChanger and TeamChangeCheckpoint, both [TEAMVOL]-confirmed):
+//     world.x = local.z - 33850      world.y = local.x + 11775      world.z = local.y + 4000
+// which maps the trigger to (-29992, 8935, 230) -- matching the logged trig() on all three axes -- and
+// permutes the half-extents to X +/-950, Y +/-50, Z +/-1637.5. So the finish is a 1900 x 100 x 3275
+// slab you run through, while the runner start sits only ~3060 away in a straight line. A 2000-unit
+// SPHERE therefore covers most of a course that winds back on itself: it clipped mid-run, and because
+// the fire is latched once per round (g_endTriggerFired, re-armed at GAME_BEGIN), reaching the real
+// finish afterwards did nothing at all.
+//
+// Test the actual slab instead. The thin axis is padded because the detector samples at 5Hz and a
+// sprinting player would tunnel straight through 100 units between samples; X and Z stay tight, so a
+// pad on Y alone cannot re-introduce a mid-course hit.
+static double    g_spleefHalfX       = 950.0;
+static double    g_spleefHalfY       = 50.0;
+static double    g_spleefHalfZ       = 1637.5;
+static double    g_spleefPad         = 350.0;     // -SpleefPad=N; slack on the thin (Y) axis only
+static double    g_spleefRadius      = 2000.0;    // legacy sphere, kept only for the near-miss log
+
+// [2026-09-10 *** SPLEEF: BROADCAST THE EVENT THE LUAU ACTUALLY LISTENS TO]
+// The slab detection works -- the last session logged `IN FINISH GATE off=(-404,360,61) state=5` with the
+// tester on team 0 ([ROSTER] team-0: 0 -> 1 joined) -- yet the Luau never left RUNNING. The hand-off was
+// the problem: we called the raw OverlapBegin_Implementation as a 3-argument function, but the reflected
+// signature (A2_parameters.hpp, PhysicalComponent_OverlapBegin, 0x118 bytes) is
+//     OverlappedComponent, OtherActor, OtherComp, OtherBodyIndex, FromSweep, FHitResult SweepResult
+// so OtherComp and the hit result were whatever happened to be in the registers.
+//
+// The gamemode listens to UPhysicalComponent::OnOverlapByPlayerServer (@0x4E0,
+// TMulticastInlineDelegate<void(int32 PlayerIndex)>; the Luau type is `Listen: (playerIndex: int32)`).
+// A multicast inline delegate is a TArray<FScriptDelegate>, each {FWeakObjectPtr Object; FName FunctionName},
+// so it can be broadcast exactly the way UE does it: resolve each bound object, find its UFunction by
+// FName, ProcessEvent with the PlayerIndex. That is the "geometric detection instead of overlaps" approach
+// that got spleef starting before. If nothing is bound (the Luau binds natively), fall back to the
+// reflected OverlapBegin with a properly built parameter block.
+struct RawDelegateList { SDK::FScriptDelegate* Data; int32_t Num; int32_t Max; };
+
+static SDK::UFunction* FindFuncByFName(SDK::UObject* obj, const SDK::FName& name)
+{
+    if (!obj) return nullptr;
+    for (SDK::UStruct* s = obj->Class; s; s = s->SuperStruct)
+        for (SDK::UField* f = s->Children; f; f = f->Next)
+            if (f->HasTypeFlag(SDK::EClassCastFlags::Function) && f->Name == name)
+                return static_cast<SDK::UFunction*>(f);
+    return nullptr;
+}
+
+static void DumpTriggerListeners(SDK::UObject* trig)
+{
+    const uintptr_t t = reinterpret_cast<uintptr_t>(trig);
+    const auto* srv = reinterpret_cast<RawDelegateList*>(t + 0x4E0);
+    printf("[HalcyonA2][SPLEEF] EndTrigger listeners: OnOverlapByPlayerServer=%d OnOverlapByPlayer=%d "
+           "OnOverlapByPlayerSimple=%d\n", srv->Num,
+           reinterpret_cast<RawDelegateList*>(t + 0x470)->Num, reinterpret_cast<RawDelegateList*>(t + 0x4B0)->Num);
+    for (int i = 0; i < srv->Num && i < 8 && srv->Data; ++i)
+    {
+        const SDK::FScriptDelegate& d = srv->Data[i];
+        SDK::UObject* obj = d.Object.Get();
+        printf("[HalcyonA2][SPLEEF]   server listener[%d] obj=%s func=%s\n", i,
+               obj ? obj->GetName().c_str() : "<stale>", d.FunctionName.ToString().c_str());
+    }
+}
+static void SafeDumpTriggerListeners(SDK::UObject* trig)
+{
+    __try { DumpTriggerListeners(trig); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+// Returns how many bound listeners were actually invoked.
+static int BroadcastOverlapServer(SDK::UObject* trig, int32_t playerIndex)
+{
+    const auto* list = reinterpret_cast<RawDelegateList*>(reinterpret_cast<uintptr_t>(trig) + 0x4E0);
+    int n = list->Num;
+    if (n <= 0 || !list->Data) return 0;
+    if (n > 16) n = 16;
+    // Snapshot first: a listener (SwitchState's onEnter) may rebind and reallocate the list mid-broadcast.
+    struct Entry { int32_t objIndex; SDK::FName fn; };
+    Entry copy[16];
+    for (int i = 0; i < n; ++i) { copy[i].objIndex = list->Data[i].Object.ObjectIndex; copy[i].fn = list->Data[i].FunctionName; }
+    int called = 0;
+    for (int i = 0; i < n; ++i)
+    {
+        SDK::UObject* obj = SDK::UObject::GObjects->GetByIndex(copy[i].objIndex);
+        SDK::UFunction* fn = FindFuncByFName(obj, copy[i].fn);
+        if (!fn) continue;
+        uint8_t parms[64] = {};                        // zeroed, oversized: the int32 PlayerIndex is at 0
+        memcpy(parms, &playerIndex, sizeof(playerIndex));
+        obj->ProcessEvent(fn, parms);
+        ++called;
+    }
+    return called;
+}
+static int SafeBroadcastOverlapServer(SDK::UObject* trig, int32_t playerIndex)
+{
+    __try { return BroadcastOverlapServer(trig, playerIndex); } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+}
+
+// Fallback: the reflected UPhysicalComponent::OverlapBegin with every argument filled in.
+static bool CallReflectedOverlapBegin(SDK::UObject* trig, SDK::UObject* pawn)
+{
+    static SDK::UFunction* fn = nullptr;
+    if (!fn)
+        if (SDK::UClass* cls = SDK::UObject::FindClassFast("PhysicalComponent"))
+            fn = cls->GetFunction("PhysicalComponent", "OverlapBegin");
+    if (!fn) return false;
+    uint8_t parms[0x118] = {};                                        // SweepResult (FHitResult) stays zeroed
+    void* collider = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(trig) + 0x4F0);   // UPhysicalComponent::Collider
+    void* root     = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(pawn) + 0x1A8);   // AActor::RootComponent
+    void* actor    = pawn;
+    memcpy(parms + 0x00, &collider, 8);                               // OverlappedComponent
+    memcpy(parms + 0x08, &actor,    8);                               // OtherActor
+    memcpy(parms + 0x10, &root,     8);                               // OtherComp
+    trig->ProcessEvent(fn, parms);                                    // OtherBodyIndex 0, FromSweep false
+    return true;
+}
+static bool SafeCallReflectedOverlapBegin(SDK::UObject* trig, SDK::UObject* pawn)
+{
+    __try { return CallReflectedOverlapBegin(trig, pawn); } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
 
 static void DetectRunnerAtFinish()
 {
@@ -5555,7 +5918,12 @@ static void DetectRunnerAtFinish()
     if (!g_endTrigger) return;
 
     // Cached VRPawn list (rebuilt ~1s) so we don't walk GObjects at detector rate (starves replication).
-    static SDK::UObject* pawns[128]; static int nPawn = 0; static ULONGLONG lastPawnRebuild = 0;
+    // [2026-09-10 *** THE CRASH] This cache used to hold raw UObject pointers for 3-8s between rebuilds.
+    // Eleven AVs in one boot, every one `rip in HalcyonA2.dll +0x101F1` = DetectRunnerAtFinish+0x8A1
+    // (resolved from HalcyonA2.map): the near-gate log called GetName() on a pawn that had been destroyed
+    // since the last rebuild. Store GObjects INDICES instead and re-resolve every pass -- a destroyed
+    // object's slot reads back null, so a dead pawn is skipped without ever being dereferenced.
+    static int32_t pawnIdx[128]; static int nPawn = 0; static ULONGLONG lastPawnRebuild = 0;
         // Same per-tick full-scan trap as the other caches: an empty result must not mean
         // "re-walk the whole GObjects array every tick, forever". Retry on a timer.
     // [BACKOFF] A full GObjects walk costs ~50ms on the VPS core. A fixed 500ms empty-retry
@@ -5587,15 +5955,18 @@ static void DetectRunnerAtFinish()
             for (int32_t i = 0; i < num && nPawn < 128; ++i)
             {
                 auto* o = SDK::UObject::GObjects->GetByIndex(i);
-                if (o && !o->IsDefaultObject() && o->IsA(pawnCls)) pawns[nPawn++] = o;
+                if (o && !o->IsDefaultObject() && o->IsA(pawnCls)) pawnIdx[nPawn++] = i;
             }
         }
     }
 
     const double R2 = g_spleefRadius * g_spleefRadius;
+    static SDK::UClass* s_liveCls = nullptr;
+    if (!s_liveCls) s_liveCls = SDK::UObject::FindClassFast("VRPawn");
     for (int i = 0; i < nPawn; ++i)
     {
-        auto* o = pawns[i];
+        auto* o = SDK::UObject::GObjects->GetByIndex(pawnIdx[i]);       // null once destroyed
+        if (!o || o->IsDefaultObject() || (s_liveCls && !o->IsA(s_liveCls))) continue;
         const uintptr_t p = reinterpret_cast<uintptr_t>(o);
         void* entity = *reinterpret_cast<void**>(p + 0x928);   // AVRPawn.Entity
         if (!entity) continue;
@@ -5604,30 +5975,81 @@ static void DetectRunnerAtFinish()
         // (UA2PlayerEntity ends ~0x338; 0x418 is a 20996 VRPlayerRepData offset). This whole detector was
         // dormant until now only because Entity@0x840 always read null — fixing that to 0x928 would have
         // turned it into a live OOB read. Keep it dormant until the real TeamIndex is mapped for this build
-        // (SDK shows TeamIndex on other classes at 0x368 / 0x380 Net+RepNotify, not on UA2PlayerEntity).
-        continue;
+        // [2026-09-09 *** RE-ENABLED] This detector has been switched off at this line ever since the
+        // team read was found to be an out-of-bounds `*(signed char*)(entity + 0x418)` (a 20996
+        // VRPlayerRepData offset; UA2PlayerEntity ends ~0x338 on 22284). Switching it off is why the
+        // spleef finale never starts -- runners reach the end and the match just keeps running, because
+        // EndTrigger.onOverlapByPlayerServer is never broadcast headless and nothing else drives
+        // CheckWhoHitEndTrigger.
+        //
+        // [2026-09-09 *** DO NOT CALL GAME CODE IN THIS LOOP]
+        // Calling AVRPawn::GetPawnTeamIndex (0x54EB150) here to pre-filter Scrappers crashed the server
+        // six times in one boot; both crash stacks name it outright:
+        //     rip in HalcyonA2.dll +0x34BF1 ... stack[+0x070] GAME +0x54EB15E
+        //     rip in GAME +0x3509ACC        ... stack[+0x098] GAME +0x54EB15E
+        // (0x54EB15E is the return address 14 bytes into that function.) The reason is this loop's own
+        // pawn cache: it is rebuilt only every 3-8s, so between rebuilds it holds pawns that have been
+        // destroyed -- SEATDRIVE logged `pawns=0` while these fired. Raw field reads off a stale pointer
+        // are survivable and always have been; walking into engine code with one is not.
+        //
+        // So: cheap reads only, and no team filter at all. The Luau re-checks
+        // `getTeamIndexByID(pawnID) == 0 and currentState == RUNNING` itself, and the latch below is now
+        // conditional on the state actually moving -- which is a stronger guarantee than the team test
+        // ever was, because a Scrapper (or a stale pawn) simply fails to move it and costs us nothing.
+        if (!*reinterpret_cast<void**>(p + 0x2D0)) continue;          // orphan pawn, not a player
+        // NOT gated on the ScrapRun arena set either: Server_NotifyPlayerEnteredArena proved unreliable
+        // as a roster (in a two-player session only ONE pawn ever sent it, five times), so requiring it
+        // would silently skip a runner who reached the end. The slab test is ScrapRun-specific on its
+        // own -- nothing outside that arena is inside it.
         double px = *reinterpret_cast<double*>(e + 0x100);               // localData FrequentData.Root.pos (server working copy)
         double py = *reinterpret_cast<double*>(e + 0x108);
         double pz = *reinterpret_cast<double*>(e + 0x110);
         if (px == 0.0 && py == 0.0 && pz == 0.0) continue;               // no pose yet
         double dx = px - g_endTriggerLoc[0], dy = py - g_endTriggerLoc[1], dz = pz - g_endTriggerLoc[2];
         double d2 = dx * dx + dy * dy + dz * dz;
-        if (d2 <= R2)
+        const bool inSlab = fabs(dx) <= g_spleefHalfX
+                         && fabs(dy) <= g_spleefHalfY + g_spleefPad
+                         && fabs(dz) <= g_spleefHalfZ;
+        if (inSlab)
         {
-            unsigned char pawnID = *reinterpret_cast<unsigned char*>(p + 0x1C22);   // PlayerIndex
-            printf("[HalcyonA2][SPLEEF] Runner pawn=%s id=%u at finish d=%.0f (r=%.0f) -> firing onOverlapByPlayerServer\n",
-                   o->GetName().c_str(), pawnID, sqrt(d2), g_spleefRadius);
-            auto ob = reinterpret_cast<OverlapBegin_t>(GetBase() + 0x53B2B20);
-            ob(g_endTrigger, 0, o);          // -> Luau CheckWhoHitEndTrigger -> SwitchState(OVERTIME_COUNTDOWN)
-            g_endTriggerFired = true;
+            if (now - g_lastFinishFire < 3000) continue;   // a rejected fire must not spin
+            g_lastFinishFire = now;
+            const int32_t pawnID = *reinterpret_cast<unsigned char*>(p + 0x1C22);   // AVRPawn::PlayerIndex
+            // UGameStateManagerComponent::currentState@0x4BC either side. Latch on the OUTCOME, never on the
+            // attempt: one rejected fire must not burn the round's only shot at spleef.
+            const int before = g_scrapGsm
+                ? *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(g_scrapGsm) + 0x4BC) : -1;
+            static bool s_dumped = false;
+            if (!s_dumped) { s_dumped = true; SafeDumpTriggerListeners(static_cast<SDK::UObject*>(g_endTrigger)); }
+
+            const int called = SafeBroadcastOverlapServer(static_cast<SDK::UObject*>(g_endTrigger), pawnID);
+            const char* via = "OnOverlapByPlayerServer broadcast";
+            if (called <= 0)
+                via = SafeCallReflectedOverlapBegin(static_cast<SDK::UObject*>(g_endTrigger), o)
+                    ? "reflected OverlapBegin (no bound script listeners)"
+                    : "NOTHING -- no listeners and no OverlapBegin UFunction";
+            const int after = g_scrapGsm
+                ? *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(g_scrapGsm) + 0x4BC) : -1;
+            printf("[HalcyonA2][SPLEEF] id=%d IN FINISH GATE off=(%.0f,%.0f,%.0f) t=%llu via %s "
+                   "(%d listener call(s)) state %d -> %d\n",
+                   pawnID, dx, dy, dz, (unsigned long long)now, via, called, before, after);
+            if (after != before || g_endTriggerFired)
+            {
+                g_endTriggerFired = true;    // it took -- spleef is starting, stop looking
+                printf("[HalcyonA2][SPLEEF] ACCEPTED (12 = OVERTIME_COUNTDOWN, 13 = OVERTIME_RUNNING)\n");
+            }
+            else
+            {
+                printf("[HalcyonA2][SPLEEF] not accepted yet (state still %d) -- retry in 3s\n", before);
+            }
             break;
         }
         else if (d2 <= R2 * 4.0 && now - g_lastFinishNearLog > 1000)     // diagnostic: near but not firing
         {
             g_lastFinishNearLog = now;
-            printf("[HalcyonA2][SPLEEF] Runner pawn=%s near finish d=%.0f (fire<%.0f) at (%.0f,%.0f,%.0f) trig(%.0f,%.0f,%.0f)\n",
-                   o->GetName().c_str(), sqrt(d2), g_spleefRadius, px, py, pz,
-                   g_endTriggerLoc[0], g_endTriggerLoc[1], g_endTriggerLoc[2]);
+            printf("[HalcyonA2][SPLEEF] near gate: id=%u off-axis dx=%.0f/%.0f dy=%.0f/%.0f dz=%.0f/%.0f\n",
+                   (unsigned)*reinterpret_cast<unsigned char*>(p + 0x1C22),
+                   fabs(dx), g_spleefHalfX, fabs(dy), g_spleefHalfY + g_spleefPad, fabs(dz), g_spleefHalfZ);
         }
     }
 }
@@ -5848,6 +6270,14 @@ static void DetectPlayerAtTeamChanger()
 
         for (int v = 0; v < g_teamVolN; ++v)
         {
+            // [2026-09-09] RUNNER changers ONLY. A live round was lost because the detector walked a
+            // player onto the team-1 (Scrapper) changer:
+            //     (pidx=2) team -1 -> joined team-0 changer: roster 0->1
+            //     (pidx=2) team  0 -> joined team-1 changer: roster 0->1
+            // which emptied team 0, and the Luau rule (teamSize == 0 -> GAME_EXIT) then ended the
+            // round correctly. The requirement is that a round ends only when ALL RUNNERS are dead,
+            // so everyone here should be a runner; never seat anyone onto the Scrapper side.
+            if (g_teamVols[v].teamIndex != 0) continue;
             const double dx = px - g_teamVols[v].loc[0];
             const double dy = py - g_teamVols[v].loc[1];
             const double dz = pz - g_teamVols[v].loc[2];
@@ -5877,9 +6307,15 @@ static void DetectPlayerAtTeamChanger()
             const int curTeam = ps ? *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(ps) + 0x380) : -1;
             if (curTeam == g_teamVols[v].teamIndex) continue;   // already on this team -> a fire would REMOVE them
 
-            // ENTER edge: run the game's own server-side switcher handler for THIS player on THIS
-            // changer. Reflected call, so the normal team-change path (sizes, delegates, scoreboards,
-            // the Luau listeners) all runs as if the volume had been touched.
+            // [2026-09-09 *** DISABLED -- THREE PATHS WERE FIGHTING] The switcher is a TOGGLE, and we
+            // ended up with three independent things firing it: this geometric detector, arena-entry
+            // seating, and round-start seating, each with its own idea of who was enrolled. Live log:
+            //     seated (pidx=3): roster 1->0     <- "seating" a player who was already in REMOVED them
+            //     ROUND START: seated 2 player(s), runner roster now 0
+            // and the roster poll showed 0->1, 1->0 oscillating. Round-start seating alone is the
+            // deterministic path (it runs once per round, right after BEGIN_PLAY empties the roster),
+            // so this one no longer fires. Volume discovery stays, purely for the [TEAMVOL] log.
+            continue;
             const int32_t pidx = *reinterpret_cast<unsigned char*>(pw + 0x1C22);
             struct { int32_t PlayerIndex; } parms{ pidx };
             const int before = *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(g_teamVols[v].trigger) + 0x4DC);
@@ -5895,6 +6331,222 @@ static void DetectPlayerAtTeamChanger()
     g_volInsideN = nStillIn;
 }
 static void SafeDetectTeamChanger() { __try { DetectPlayerAtTeamChanger(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+
+// [2026-09-09 *** SEAT ON ARENA ENTRY -- why geometry was never going to be enough]
+// With the toggle fixed, exactly ONE player was ever enrolled in a live round:
+//     fires: 1   roster grew: 1   roster shrank: 0
+// and ScrapRun's manager (identified as the only one matching deathrun2's enum -- no state 4, no
+// state 8) still ran 1 -> 3 -> 5 -> 10, i.e. WAITING_TO_START, GAME_BEGIN, RUNNING, GAME_EXIT.
+// That exit is CORRECT: with a single runner enrolled and nobody else, the first death empties team
+// 0 and the Luau rule (teamSize == 0 -> GAME_EXIT) fires exactly as designed.
+//
+// So the rule is fine and the roster is the problem. Waiting for players to physically walk into a
+// changer volume cannot be relied on here -- the engine's own overlap never fires headless, which is
+// the whole reason we are doing this, and our geometric stand-in only catches someone who happens to
+// pass within range.
+//
+// But we already know precisely when a player enters ScrapRun: they send
+// AVRPawn::Server_NotifyPlayerEnteredArena with slot 'ScraprunPrime' (already traced in this file).
+// Seat them there instead. Onto the RUNNER team (index 0), because the requirement is that a round
+// ends only when ALL runners are dead -- which needs several runners, not a runner/killer split.
+// Only ever seats a player who currently has NO team (TeamIndex < 0), so it can never fight the
+// switcher toggle or override someone's own choice.
+static long g_arenaSeats = 0;
+static void SeatPlayerOnArenaEntry(SDK::UObject* pawn)
+{
+    // [2026-09-09] This produced ZERO log lines across eight EnteredArena RPCs, because every one of
+    // its bail-outs was silent. Say which one fires -- a silent early return is exactly the failure
+    // mode that cost three rounds of guesswork on the locate.
+    if (!pawn) return;
+    if (!g_teamOverlap) { HxLog("[HalcyonA2][TEAMSEAT] skip: -TeamOverlap is off\n"); return; }
+    if (g_teamVolN == 0)
+    {
+        FindTeamVolumes();
+        if (g_teamVolN == 0) { HxLog("[HalcyonA2][TEAMSEAT] skip: no ScrapRun changers located yet\n"); return; }
+    }
+
+    const uintptr_t pw = reinterpret_cast<uintptr_t>(pawn);
+    auto* ps = *reinterpret_cast<SDK::UObject**>(pw + 0x2B8);          // APawn::PlayerState
+    if (!ps) { HxLog("[HalcyonA2][TEAMSEAT] skip: %s has no PlayerState\n", pawn->GetName().c_str()); return; }
+    const int curTeam = *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(ps) + 0x380);
+    if (curTeam >= 0)
+    {
+        HxLog("[HalcyonA2][TEAMSEAT] skip: %s already on team %d\n", pawn->GetName().c_str(), curTeam);
+        return;                                                        // already on a team -> leave alone
+    }
+
+    // The main RUNNER changer. Prefer the non-checkpoint one (checkpoints are mid-course re-joins).
+    void* runnerComp = nullptr;
+    for (int v = 0; v < g_teamVolN; ++v)
+        if (g_teamVols[v].teamIndex == 0) { runnerComp = g_teamVols[v].trigger; break; }
+    if (!runnerComp) { HxLog("[HalcyonA2][TEAMSEAT] skip: no team-0 (runner) changer among %d\n", g_teamVolN); return; }
+
+    SDK::UClass* tcCls = SDK::UObject::FindClassFast("TeamChangeComponent");
+    if (!tcCls) { HxLog("[HalcyonA2][TEAMSEAT] skip: TeamChangeComponent class not found\n"); return; }
+    SDK::UFunction* fnJoin = tcCls->GetFunction("TeamChangeComponent", "HandleFiringSwitcherOverlapOnServer");
+    if (!fnJoin) { HxLog("[HalcyonA2][TEAMSEAT] skip: switcher UFunction not found\n"); return; }
+
+    const int32_t pidx = *reinterpret_cast<unsigned char*>(pw + 0x1C22);
+    const int before = *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(runnerComp) + 0x4DC);
+    struct { int32_t PlayerIndex; } parms{ pidx };
+    static_cast<SDK::UObject*>(runnerComp)->ProcessEvent(fnJoin, &parms);
+    const int after = *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(runnerComp) + 0x4DC);
+    ++g_arenaSeats;
+    HxLog("[HalcyonA2][TEAMSEAT] %s (pidx=%d) entered ScraprunPrime with no team -> seated as RUNNER: "
+          "roster %d->%d (seats=%ld)\n",
+          pawn->GetName().c_str(), pidx, before, after, g_arenaSeats);
+}
+// [2026-09-09 *** WHAT IS CLEARING THE TEAM?] Seating works and the toggle guard holds, yet the
+// roster still collapses to 0 between fires:
+//     (pidx=2) team -1 -> joined team-0: roster 0->1
+//     (pidx=3) team -1 -> joined team-0: roster 1->1
+//     (pidx=4) team -1 -> joined team-0: roster 0->1     <- it was back at 0
+// With team-1 seating disabled and the already-on-team guard in place, our code is no longer firing
+// the toggle at anyone, so something in the GAME is removing them.
+//
+// Poll every ScrapRun changer's TeamSize@0x4DC at 10Hz and print each transition. Paired with the
+// [CLEARER] ProcessEvent watch below, a removal either lands next to a clearer call -- naming the
+// mechanism outright -- or it does not, which rules the clearer out just as cleanly.
+static int g_rosterPrev[8] = { -1, -1, -1, -1, -1, -1, -1, -1 };
+static void PollTeamRosters()
+{
+    if (!g_teamOverlap || g_teamVolN == 0) return;
+    static ULONGLONG s_last = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (now - s_last < 100) return;
+    s_last = now;
+    g_scrapRosterCell = nullptr;
+    for (int v = 0; v < g_teamVolN && v < 8; ++v)
+    {
+        void* comp = g_teamVols[v].trigger;
+        if (!comp) continue;
+        if (!g_scrapRosterCell && g_teamVols[v].teamIndex == 0)
+            g_scrapRosterCell = reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(comp) + 0x4DC);
+        const int size = *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(comp) + 0x4DC);
+        if (g_rosterPrev[v] < 0) { g_rosterPrev[v] = size; continue; }
+        if (size != g_rosterPrev[v])
+        {
+            HxLog("[HalcyonA2][ROSTER] changer[%d] team-%d: %d -> %d  %s\n",
+                  v, g_teamVols[v].teamIndex, g_rosterPrev[v], size,
+                  (size > g_rosterPrev[v]) ? "joined" : "*** REMOVED ***");
+            g_rosterPrev[v] = size;
+        }
+    }
+}
+static void SafePollTeamRosters() { __try { PollTeamRosters(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+
+// [2026-09-09 *** WHAT CLEARS THE TEAMS -- from the gamemode's own source]
+// deathrun2_a2level/Scripts/gamemode.luau, State.BEGIN_PLAY onEnter:
+//     -- this teleporter kicks everyone out who is part of the gamemode still when the game is ready
+//     -- to start again
+//     KickEveryoneOutTeleporter:activateTeleporter()
+// So the rosters are emptied deliberately BETWEEN ROUNDS. ScrapRun's observed state sequence
+// [1,3,5,10,14,1,3,5] runs straight through 14 = BEGIN_PLAY after every exit, which is exactly when
+// everyone is kicked out and loses their team.
+//
+// That is normal behaviour, and it means seating on ARENA ENTRY is at the wrong moment: players are
+// seated, BEGIN_PLAY clears them, and the next round then starts with an EMPTY roster -- so the
+// first death satisfies teamSize == 0 and the round exits immediately. That is the loop we have been
+// chasing.
+//
+// Seat at ROUND START instead: when ScrapRun's manager enters RUNNING(5), put every live player who
+// has no team onto the Runner side. That guarantees a full roster for the round that is about to be
+// played, which is precisely what the "end only when ALL runners are dead" rule needs.
+static long g_runStartSeats = 0;
+
+// [2026-09-09 *** TeamIndex AND TeamSize DISAGREE] Round-start seating reported:
+//     ROUND START: seated 0 player(s) as RUNNER, 2 already had a team, runner roster now 0
+// i.e. both players' AAxPlayerState::TeamIndex@0x380 said "on a team" while the changer's
+// TeamSize@0x4DC said the roster was EMPTY. They are two different sources of truth and they do not
+// agree -- PlayerState keeps a stale team from the previous round after BEGIN_PLAY's
+// KickEveryoneOutTeleporter empties the roster. Gating on TeamIndex therefore skipped everybody and
+// the round began with nobody enrolled, which is exactly the bug we were trying to fix.
+//
+// Track who WE have seated since the last round reset instead. The switcher is a toggle, so the only
+// thing that must not happen is firing twice for the same player in one round; this set guarantees
+// that without trusting either disputed field.
+static void*  g_seatedThisRound[32];
+static int    g_seatedThisRoundN = 0;
+static bool SeatedAlready(void* pawn)
+{
+    for (int i = 0; i < g_seatedThisRoundN; ++i) if (g_seatedThisRound[i] == pawn) return true;
+    return false;
+}
+static void MarkSeated(void* pawn)
+{
+    if (g_seatedThisRoundN < 32) g_seatedThisRound[g_seatedThisRoundN++] = pawn;
+}
+void ResetSeatedForNewRound()   // called from UpdGameState_Hook on BEGIN_PLAY / WAITING_TO_START
+{
+    if (g_seatedThisRoundN)
+        HxLog("[HalcyonA2][TEAMSEAT] round reset -- clearing %d seated marker(s)\n", g_seatedThisRoundN);
+    g_seatedThisRoundN = 0;
+}
+static void SeatEveryoneForRound()
+{
+    if (!g_teamOverlap) return;
+    if (g_teamVolN == 0) { FindTeamVolumes(); if (g_teamVolN == 0) { HxLog("[HalcyonA2][TEAMSEAT] round-start: no changers located\n"); return; } }
+
+    void* runnerComp = nullptr;
+    for (int v = 0; v < g_teamVolN; ++v)
+        if (g_teamVols[v].teamIndex == 0) { runnerComp = g_teamVols[v].trigger; break; }
+    if (!runnerComp) { HxLog("[HalcyonA2][TEAMSEAT] round-start: no runner changer\n"); return; }
+
+    SDK::UClass* tcCls   = SDK::UObject::FindClassFast("TeamChangeComponent");
+    SDK::UClass* pawnCls = SDK::UObject::FindClassFast("VRPawn");
+    if (!tcCls || !pawnCls) return;
+    SDK::UFunction* fnJoin = tcCls->GetFunction("TeamChangeComponent", "HandleFiringSwitcherOverlapOnServer");
+    if (!fnJoin) return;
+
+    int seated = 0, already = 0;
+    const int32_t num = SDK::UObject::GObjects->Num();
+    for (int32_t i = 0; i < num; ++i)
+    {
+        auto* o = SDK::UObject::GObjects->GetByIndex(i);
+        if (!o || o->IsDefaultObject() || !o->IsA(pawnCls)) continue;
+        const uintptr_t pw = reinterpret_cast<uintptr_t>(o);
+        if (!*reinterpret_cast<void**>(pw + 0x2D0)) continue;              // orphan, not a player
+        // Do NOT gate on PlayerState::TeamIndex here -- it reported "on a team" for both players
+        // while the roster was 0, and skipping on it is what left the round empty. Gate on whether
+        // WE have already seated this pawn since the last round reset, which is the only thing that
+        // actually needs to be true (the switcher is a toggle).
+        if (SeatedAlready(o)) { ++already; continue; }
+
+        // The switcher is a TOGGLE and we cannot see per-player membership -- PlayerState::TeamIndex
+        // disagreed with the roster, and the roster is only a count. So VERIFY: fire, and if the
+        // count went DOWN we just removed someone who was already in, so fire again to put them
+        // back. That makes the seat idempotent whatever the prior state, which is what the three
+        // competing paths never were.
+        const int32_t pidx = *reinterpret_cast<unsigned char*>(pw + 0x1C22);
+        struct { int32_t PlayerIndex; } parms{ pidx };
+        auto roster = [&]() { return *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(runnerComp) + 0x4DC); };
+
+        const int rBefore = roster();
+        static_cast<SDK::UObject*>(runnerComp)->ProcessEvent(fnJoin, &parms);
+        int rAfter = roster();
+        bool corrected = false;
+        if (rAfter < rBefore)                       // toggled OFF someone already enrolled -> undo it
+        {
+            static_cast<SDK::UObject*>(runnerComp)->ProcessEvent(fnJoin, &parms);
+            rAfter = roster();
+            corrected = true;
+        }
+        MarkSeated(o);
+        ++seated; ++g_runStartSeats;
+        HxLog("[HalcyonA2][TEAMSEAT]   %s (pidx=%d): roster %d->%d%s\n",
+              o->GetName().c_str(), pidx, rBefore, rAfter,
+              corrected ? "  (was already in -- re-fired to restore)" : "");
+    }
+    const int roster = *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(runnerComp) + 0x4DC);
+    HxLog("[HalcyonA2][TEAMSEAT] ROUND START: seated %d player(s) as RUNNER, %d already seated this round, "
+          "runner roster now %d (total=%ld)\n", seated, already, roster, g_runStartSeats);
+}
+static void SafeSeatEveryoneForRound() { __try { SeatEveryoneForRound(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+
+static void SafeSeatOnArenaEntry(SDK::UObject* pawn)
+{
+    __try { SeatPlayerOnArenaEntry(pawn); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
 
 // Goal-collider state: is UGoalComponent::Collider@0x5A0 a valid PrimitiveComponent, is the
 // goal enabled (bGoalEnabled@0x5A9), and where is it vs the ball? If OverlapBegin never fires
@@ -8088,6 +8740,773 @@ static void PlayerCountReportTick()
 }
 static void SafePlayerCountReportTick() { __try { PlayerCountReportTick(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
 
+// =====================================================================================================
+// [2026-09-10 NETVAR OVERRIDES FROM THE DASHBOARD]
+// The dashboard stores overrides in the station config as reserved "nv." keys; the backend serves them,
+// already filtered and hashed, at GET /v1/deployments/{id}/netvar_overrides as plain text:
+//     v=<sha1>
+//     module<TAB><SlotID|*><TAB><Variable><TAB><value>
+//     world<TAB><TAB><netvar path><TAB><value>
+//
+// Why the DLL does this: the game only pulls station config ONCE, at dashboard init
+// (sub_54B13D0 -> sub_54D24D0 -> fetch builder sub_54ACBF0), and that path only ever lands in
+// config/stationConfig. Gamemode settings (MatchLengthSeconds, TimeBetweenRounds, ...) live in each
+// UModuleState's own netvar object (built by sub_46DAF90: Config / DefaultConfig / BasicConfigOverrides /
+// DashboardConfigOverrides ...), which the game reads back through UModuleState::GetGamemode*Variable --
+// a reflected UFunction returning the U{Number,Bool,String}NetVar, whose reflected SetValue replicates.
+//
+// Cost model (the requirement was "only if it does not bog the server down"):
+//   * polling is a loopback HTTP GET every 10s on a detached thread -- never on the game thread;
+//   * an unchanged version hash does nothing at all;
+//   * the game thread only does work when a NEW version is queued: one GObjects pass to find the module
+//     states, then a handful of reflected calls, and only for values that actually changed.
+// Clearing an override restores the value the variable had before we first touched it.
+struct NvOverride { std::string kind, slot, name, value; };
+static std::mutex               g_nvMu;
+static std::string              g_nvVersion;          // last version queued (poller side)
+static std::vector<NvOverride>  g_nvPending;           // guarded by g_nvMu
+static std::atomic<bool>        g_nvHasPending{ false };
+static std::atomic<bool>        g_nvPollerStarted{ false };
+static std::map<std::string, std::string> g_nvApplied;   // "slot|var" -> value we last wrote   (game thread only)
+static std::map<std::string, std::string> g_nvOriginal;  // "slot|var" -> value before our first write
+static int                      g_nvRetries = 0;
+
+// ---------------------------------------------------------------------------------------------------
+// [2026-09-11 v4] LOADING: change-driven, not polled.
+// The backend (same box) writes the override set to <backend>\netvar_overrides\<deploymentId>.txt (and
+// _latest.txt) atomically whenever a station's config changes. This thread fetches once at startup over
+// loopback, then blocks in ReadDirectoryChangesW on that folder -- zero CPU until a file actually changes,
+// at which point it reads just that file. Only if the folder does not exist (a server not co-located with
+// its backend) does it fall back to a slow 60s poll.
+static std::wstring g_nvDir;   // -NetvarDir=<folder>; default C:\Env\rigel-server\run\backend\netvar_overrides
+
+static std::string NvCleanValue(std::string v)
+{
+    while (!v.empty() && (v.back() == ' ' || v.back() == '\r')) v.pop_back();
+    size_t s = 0; while (s < v.size() && v[s] == ' ') ++s;
+    v = v.substr(s);
+    if (v.size() >= 2 && v.front() == '"' && v.back() == '"') v = v.substr(1, v.size() - 2);   // typed "quoted"
+    return v;
+}
+
+static bool NvParseAndQueue(const std::string& body, const char* source)
+{
+    if (body.rfind("v=", 0) != 0) return false;
+    const size_t nl = body.find('\n');
+    std::string ver = body.substr(2, nl == std::string::npos ? std::string::npos : nl - 2);
+    while (!ver.empty() && (ver.back() == '\r' || ver.back() == ' ')) ver.pop_back();
+    std::vector<NvOverride> parsed;
+    size_t pos = (nl == std::string::npos) ? body.size() : nl + 1;
+    while (pos < body.size())
+    {
+        size_t end = body.find('\n', pos);
+        if (end == std::string::npos) end = body.size();
+        const std::string line = body.substr(pos, end - pos);
+        pos = end + 1;
+        size_t a = line.find('\t'); if (a == std::string::npos) continue;
+        size_t b = line.find('\t', a + 1); if (b == std::string::npos) continue;
+        size_t c = line.find('\t', b + 1); if (c == std::string::npos) continue;
+        parsed.push_back({ line.substr(0, a), line.substr(a + 1, b - a - 1), line.substr(b + 1, c - b - 1), NvCleanValue(line.substr(c + 1)) });
+    }
+    std::lock_guard<std::mutex> lk(g_nvMu);
+    if (ver == g_nvVersion) return false;
+    g_nvVersion = ver;
+    g_nvPending = std::move(parsed);
+    g_nvHasPending = true;
+    HxLog("[HalcyonA2][NETVARS] override set %s loaded from %s\n", ver.c_str(), source);
+    return true;
+}
+
+static std::string NvReadFileA(const std::wstring& path)
+{
+    for (int attempt = 0; attempt < 10; ++attempt)
+    {
+        HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE)
+        {
+            if (GetLastError() == ERROR_FILE_NOT_FOUND) return std::string();
+            Sleep(50); continue;                                   // being replaced right now
+        }
+        std::string out;
+        char buf[4096]; DWORD rd = 0;
+        while (ReadFile(h, buf, sizeof(buf), &rd, nullptr) && rd) out.append(buf, rd);
+        CloseHandle(h);
+        return out;
+    }
+    return std::string();
+}
+
+static bool NvLoadFromDir()
+{
+    const std::wstring dep(g_deploymentId.begin(), g_deploymentId.end());
+    std::string body = NvReadFileA(g_nvDir + L"\\" + dep + L".txt");
+    const char* src = "deployment file";
+    if (body.empty()) { body = NvReadFileA(g_nvDir + L"\\_latest.txt"); src = "_latest file"; }
+    return !body.empty() && NvParseAndQueue(body, src);
+}
+
+static void NvPollerThread()
+{
+    if (g_nvDir.empty()) g_nvDir = L"C:\\Env\\rigel-server\\run\\backend\\netvar_overrides";
+    while (g_deploymentId.empty()) Sleep(2000);
+
+    // One loopback fetch at startup. It also makes the backend write the files we are about to watch.
+    const std::wstring path = L"/v1/deployments/" + std::wstring(g_deploymentId.begin(), g_deploymentId.end()) + L"/netvar_overrides";
+    DWORD status = 0;
+    const std::string first = HttpReq(kBackendHost, kBackendPort, L"GET", path.c_str(), std::string(), std::wstring(), &status);
+    if (status == 200) NvParseAndQueue(first, "startup fetch");
+
+    for (;;)
+    {
+        HANDLE dir = CreateFileW(g_nvDir.c_str(), FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                 nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        if (dir == INVALID_HANDLE_VALUE)
+        {
+            // No shared folder: slow fallback poll, and keep checking whether the folder appears.
+            static bool once = false;
+            if (!once) { once = true; HxLog("[HalcyonA2][NETVARS] override folder %ls not found -- falling back to a 60s poll\n", g_nvDir.c_str()); }
+            Sleep(60000);
+            status = 0;
+            const std::string body = HttpReq(kBackendHost, kBackendPort, L"GET", path.c_str(), std::string(), std::wstring(), &status);
+            if (status == 200) NvParseAndQueue(body, "fallback poll");
+            continue;
+        }
+        HxLog("[HalcyonA2][NETVARS] watching %ls for override changes (no polling)\n", g_nvDir.c_str());
+        NvLoadFromDir();
+        uint8_t buf[8192];
+        DWORD got = 0;
+        while (ReadDirectoryChangesW(dir, buf, sizeof(buf), FALSE,
+                                     FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_SIZE,
+                                     &got, nullptr, nullptr))
+        {
+            if (got == 0) continue;                 // overflow: just re-read below
+            Sleep(40);                               // let the atomic rename settle
+            NvLoadFromDir();
+        }
+        CloseHandle(dir);
+        Sleep(5000);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------
+// [2026-09-11 v4] APPLYING: write the value into the gamemode's real config.
+// Every consumer reads module config from UModuleState+0xE8 (the ticket manager's whitelist loader
+// sub_1447284F0, the scoreboard team names sub_1453A9580, the script getters sub_1446BA400/B9F40/BA150),
+// found by FindChild(container, iter, FName) (sub_14463FE20). The engine's own netvar setters take that
+// iterator and check the node's type themselves: number sub_144643F30, bool sub_1446443B0, string
+// sub_144644120 (it copies the FString) -- the same setters Gamemode:set*Variable uses, so the change is
+// a real netvar write that replicates. Afterwards the ticket manager's OnConfigChanged re-reads it (the
+// whitelist copy lives on ATicketManager+0x2D2/+0x2D8) and the script OnConfigChanged is broadcast.
+// Variables that are not config keys of that slot fall back to the getter hooks (scripts only).
+namespace NvNative {
+    constexpr uintptr_t FindChild = 0x463FE20, NumGet = 0x46B2280, BoolGet = 0x4640580, StrGet = 0x46B2360,
+                        NumSet = 0x4643F30, BoolSet = 0x46443B0, StrSet = 0x4644120, IterRelease = 0x4675A60,
+                        MemFree = 0x10153A0;
+    constexpr int TBool = 2, TNumber = 3, TString = 4;
+}
+struct NvOrig { float num; uint8_t b; wchar_t str[512]; };
+
+// Release a FindChild iterator exactly the way every game call site does. sub_144675A60 is a tail-call stub
+// into sub_144675870 that FORWARDS rdx/r8, and that callee reads iter+0x20/+0x22/+0x30 through them -- so it
+// needs (*(iter+0x38), iter+8, iter), not one argument. The game also only releases when that handle is
+// non-null. (Passing one argument handed the callee garbage in rdx/r8 and faulted at null+0x18.)
+static void NvReleaseIter(uintptr_t base, uint8_t* iter)
+{
+    void* handle = *reinterpret_cast<void**>(iter + 0x38);
+    if (handle)
+        reinterpret_cast<void(__fastcall*)(void*, uint8_t*, uint8_t*)>(base + NvNative::IterRelease)(handle, iter + 8, iter);
+    iter[0x48] = 0;
+}
+
+// POD-only (it holds the SEH frame): find `name` in the container and report its node type, or -1.
+static int NvNodeType(void* container, uint64_t fname)
+{
+    int type = -1;
+    uint8_t iter[0x100] = {};
+    __try
+    {
+        const uintptr_t base = GetBase();
+        reinterpret_cast<void*(__fastcall*)(void*, uint8_t*, uint64_t, char)>(base + NvNative::FindChild)(container, iter, fname, 0);
+        if (iter[0x48])
+        {
+            const uint32_t idx = *reinterpret_cast<uint32_t*>(iter + 0x20);
+            const uintptr_t tbl = *reinterpret_cast<uintptr_t*>(iter + 0x28);
+            const uintptr_t chunks = *reinterpret_cast<uintptr_t*>(tbl + ((idx & 0xFF) ? 408 : 432));
+            const uintptr_t entry = *reinterpret_cast<uintptr_t*>(chunks + 8 * (idx >> 16));
+            const uintptr_t node = *reinterpret_cast<uintptr_t*>(entry + 8);
+            type = *reinterpret_cast<uint8_t*>(node + 24);
+        }
+        NvReleaseIter(base, iter);                 // only releases when FindChild handed out a handle
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { if (type < 0) type = -2; }   // keep a type that was already read
+    return type;
+}
+
+// POD-only: read the current value into *orig (if non-null), then write the new one. 1 = ok, <=0 = failed.
+static int NvWriteNative(void* container, uint64_t fname, int type, float num, uint8_t b,
+                         const wchar_t* str, int32_t strLenInclNul, NvOrig* orig)
+{
+    int rc = 0;
+    uint8_t iter[0x100] = {};
+    __try
+    {
+        const uintptr_t base = GetBase();
+        reinterpret_cast<void*(__fastcall*)(void*, uint8_t*, uint64_t, char)>(base + NvNative::FindChild)(container, iter, fname, 0);
+        if (!iter[0x48]) { NvReleaseIter(base, iter); return -1; }
+        if (type == NvNative::TNumber)
+        {
+            if (orig) orig->num = reinterpret_cast<float(__fastcall*)(uint8_t*)>(base + NvNative::NumGet)(iter);
+            float v = num;
+            reinterpret_cast<void(__fastcall*)(uint8_t*, float*)>(base + NvNative::NumSet)(iter, &v);
+        }
+        else if (type == NvNative::TBool)
+        {
+            if (orig) orig->b = static_cast<uint8_t>(reinterpret_cast<__int64(__fastcall*)(uint8_t*)>(base + NvNative::BoolGet)(iter) & 0xFF);
+            uint8_t v = b;
+            reinterpret_cast<void(__fastcall*)(uint8_t*, uint8_t*)>(base + NvNative::BoolSet)(iter, &v);
+        }
+        else if (type == NvNative::TString)
+        {
+            if (orig)
+            {
+                struct { wchar_t* data; int32_t num; int32_t max; } cur{ nullptr, 0, 0 };
+                reinterpret_cast<void*(__fastcall*)(uint8_t*, void*)>(base + NvNative::StrGet)(iter, &cur);
+                int n = 0;
+                if (cur.data) for (; n < 511 && n < cur.num && cur.data[n]; ++n) orig->str[n] = cur.data[n];
+                orig->str[n] = 0;
+                if (cur.data) reinterpret_cast<void(__fastcall*)(void*)>(base + NvNative::MemFree)(cur.data);
+            }
+            struct { const wchar_t* data; int32_t num; int32_t max; } v{ str, strLenInclNul, strLenInclNul };
+            reinterpret_cast<void(__fastcall*)(uint8_t*, void*)>(base + NvNative::StrSet)(iter, &v);
+        }
+        rc = 1;
+        NvReleaseIter(base, iter);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { rc = -3; }
+    return rc;
+}
+
+// POD-only: read the current value of `name` (already known to be `type`) without writing. 1 = ok.
+static int NvReadNative(void* container, uint64_t fname, int type, NvOrig* out)
+{
+    int rc = 0;
+    uint8_t iter[0x100] = {};
+    __try
+    {
+        const uintptr_t base = GetBase();
+        reinterpret_cast<void*(__fastcall*)(void*, uint8_t*, uint64_t, char)>(base + NvNative::FindChild)(container, iter, fname, 0);
+        if (!iter[0x48]) { NvReleaseIter(base, iter); return -1; }
+        if (type == NvNative::TNumber)
+            out->num = reinterpret_cast<float(__fastcall*)(uint8_t*)>(base + NvNative::NumGet)(iter);
+        else if (type == NvNative::TBool)
+            out->b = static_cast<uint8_t>(reinterpret_cast<__int64(__fastcall*)(uint8_t*)>(base + NvNative::BoolGet)(iter) & 0xFF);
+        else if (type == NvNative::TString)
+        {
+            struct { wchar_t* data; int32_t num; int32_t max; } cur{ nullptr, 0, 0 };
+            reinterpret_cast<void*(__fastcall*)(uint8_t*, void*)>(base + NvNative::StrGet)(iter, &cur);
+            int n = 0;
+            if (cur.data) for (; n < 511 && n < cur.num && cur.data[n]; ++n) out->str[n] = cur.data[n];
+            out->str[n] = 0;
+            if (cur.data) reinterpret_cast<void(__fastcall*)(void*)>(base + NvNative::MemFree)(cur.data);
+        }
+        rc = 1;
+        NvReleaseIter(base, iter);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { rc = -3; }
+    return rc;
+}
+
+static SRWLOCK g_nvLock = SRWLOCK_INIT;
+static std::unordered_map<void*, std::string> g_nvApiSlot;          // UModuleStateLuaAPI* -> SlotID (hook fallback)
+static std::unordered_map<std::string, std::string> g_nvValues;     // "slot|var" -> value (hook fallback)
+static std::atomic<bool> g_nvHookActive{ false };
+static std::atomic<long> g_nvHits{ 0 };
+struct NvApplied { int type; std::string value; std::string original; };
+static std::map<std::string, NvApplied> g_nvNative;                  // "slot|var" written natively
+
+static bool NvLookupOverride(void* api, void* nameFStr, std::string* out)
+{
+    if (!g_nvHookActive.load(std::memory_order_relaxed) || !api || !nameFStr) return false;
+    const wchar_t* data = *reinterpret_cast<const wchar_t**>(nameFStr);
+    const int32_t  num  = *reinterpret_cast<int32_t*>(reinterpret_cast<uintptr_t>(nameFStr) + 8);
+    if (!data || num <= 1 || num > 128) return false;
+    std::string name;
+    name.reserve(num);
+    for (int32_t k = 0; k < num - 1 && data[k]; ++k) name.push_back(static_cast<char>(data[k]));
+    AcquireSRWLockShared(&g_nvLock);
+    bool found = false;
+    auto s = g_nvApiSlot.find(api);
+    if (s != g_nvApiSlot.end())
+    {
+        auto v = g_nvValues.find(s->second + "|" + name);
+        if (v == g_nvValues.end()) v = g_nvValues.find("*|" + name);
+        if (v != g_nvValues.end()) { *out = v->second; found = true; }
+    }
+    ReleaseSRWLockShared(&g_nvLock);
+    if (found) g_nvHits.fetch_add(1, std::memory_order_relaxed);
+    return found;
+}
+
+static void NvBroadcastConfigChanged(SDK::UObject* api)
+{
+    const auto* list = reinterpret_cast<RawDelegateList*>(reinterpret_cast<uintptr_t>(api) + 0x30);   // OnConfigChanged
+    int n = list->Num;
+    if (n <= 0 || !list->Data) return;
+    if (n > 16) n = 16;
+    struct Entry { int32_t objIndex; SDK::FName fn; };
+    Entry copy[16];
+    for (int i = 0; i < n; ++i) { copy[i].objIndex = list->Data[i].Object.ObjectIndex; copy[i].fn = list->Data[i].FunctionName; }
+    for (int i = 0; i < n; ++i)
+    {
+        SDK::UObject* obj = SDK::UObject::GObjects->GetByIndex(copy[i].objIndex);
+        SDK::UFunction* fn = FindFuncByFName(obj, copy[i].fn);
+        if (!fn) continue;
+        uint8_t parms[32] = {};
+        obj->ProcessEvent(fn, parms);
+    }
+}
+
+// [SLOTMAP] One-shot map of every arena slot and every team door, by slot id and world position -- what the
+// mock-client scripts teleport to. Logged at ~60s and ~180s (arenas stream in).
+static void NvSlotMap()
+{
+    SDK::UClass* slotCls = SDK::UObject::FindClassFast("ModuleSlot");
+    SDK::UClass* doorCls = SDK::UObject::FindClassFast("TeamChangeActor");
+    if (!slotCls) return;
+    int slots = 0, doors = 0;
+    const int32_t num = SDK::UObject::GObjects->Num();
+    for (int32_t i = 0; i < num; ++i)
+    {
+        auto* o = SDK::UObject::GObjects->GetByIndex(i);
+        if (!o || o->IsDefaultObject()) continue;
+        if (o->IsA(slotCls))
+        {
+            const std::string id = FStringToNarrow(reinterpret_cast<char*>(o) + 0x390);
+            if (id.empty()) continue;
+            const SDK::FVector l = static_cast<SDK::AActor*>(o)->K2_GetActorLocation();
+            auto* ms = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(o) + 0x300);
+            auto* tm = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(o) + 0x438);
+            HxLog("[HalcyonA2][SLOTMAP] slot %s at (%.0f, %.0f, %.0f) moduleState=%p ticketManager=%p actor=%s\n",
+                  id.c_str(), l.X, l.Y, l.Z, ms, tm, o->GetName().c_str());
+            ++slots;
+        }
+        else if (doorCls && o->IsA(doorCls))
+        {
+            auto* comp = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(o) + 0x318);
+            if (!comp) continue;
+            const int team = *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(comp) + 0x524);
+            auto* slot = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(comp) + 0x4D0);
+            const std::string sid = slot ? FStringToNarrow(reinterpret_cast<char*>(slot) + 0x390) : std::string("?");
+            const SDK::FVector l = static_cast<SDK::AActor*>(o)->K2_GetActorLocation();
+            HxLog("[HalcyonA2][SLOTMAP] door %s team=%d slot=%s at (%.0f, %.0f, %.0f) ticketManager=%p\n",
+                  o->GetName().c_str(), team, sid.c_str(), l.X, l.Y, l.Z,
+                  *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(comp) + 0x508));
+            ++doors;
+        }
+    }
+    HxLog("[HalcyonA2][SLOTMAP] %d slot(s), %d door(s)\n", slots, doors);
+}
+static void SafeNvSlotMap() { __try { NvSlotMap(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+
+static SDK::FName NvName(const std::string& s)
+{
+    const std::wstring w(s.begin(), s.end());
+    return SDK::UKismetStringLibrary::Conv_StringToName(SDK::FString(w.c_str()));
+}
+static uint64_t NvNameBits(const SDK::FName& n) { uint64_t v = 0; memcpy(&v, &n, sizeof(v)); return v; }
+
+static std::string NvOrigToString(int type, const NvOrig& o)
+{
+    if (type == NvNative::TNumber) { char nb[32]; snprintf(nb, sizeof(nb), "%g", o.num); return nb; }
+    if (type == NvNative::TBool) return o.b ? "true" : "false";
+    std::string s; for (int k = 0; k < 511 && o.str[k]; ++k) s.push_back(static_cast<char>(o.str[k])); return s;
+}
+static bool NvValueMatches(int type, const NvOrig& o, const std::string& v)
+{
+    if (type == NvNative::TNumber) return fabs(o.num - static_cast<float>(atof(v.c_str()))) < 1e-4f;
+    if (type == NvNative::TBool) return (o.b != 0) == (v == "true" || v == "1");
+    return NvOrigToString(type, o) == v;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// [2026-09-11 WORLD NETVARS] Why they never applied: the world tree (config/player/brakeStrength, ...) is not
+// made of UObjects -- NVCENSUS found 0 ObjectNetVar instances, and UNetVarsManager::LoadJSONIntoRootObject is an
+// empty stub -- so there was nothing to call. It lives natively in UNetVarsManager::NetVarSystem (+0x58); the
+// netvar dump reporter sub_1454D2ED0 takes its root handle from NetVarSystem+0x150 (sub_1411918E0 = a1+336).
+// A FindChild result is itself a registered handle with the container layout (node iterator @+0x20/+0x28,
+// system @+0x38), so a path is walked by FindChild-ing each segment from the previous result and the leaf is
+// written with the same typed setters as module config. Handles are registered by ADDRESS, so the buffers
+// must not move until they are released, innermost first.
+static int32_t g_nvMgrIdx = -1;
+static void* NvWorldRoot()
+{
+    static SDK::UClass* mgrCls = nullptr;
+    if (!mgrCls) mgrCls = SDK::UObject::FindClassFast("NetVarsManager");
+    if (!mgrCls) return nullptr;
+    SDK::UObject* mgr = (g_nvMgrIdx >= 0) ? SDK::UObject::GObjects->GetByIndex(g_nvMgrIdx) : nullptr;
+    if (!mgr || mgr->IsDefaultObject() || !mgr->IsA(mgrCls))
+    {
+        mgr = nullptr; g_nvMgrIdx = -1;
+        const int32_t num = SDK::UObject::GObjects->Num();
+        for (int32_t i = 0; i < num; ++i)
+        {
+            auto* o = SDK::UObject::GObjects->GetByIndex(i);
+            if (o && !o->IsDefaultObject() && o->IsA(mgrCls)) { mgr = o; g_nvMgrIdx = i; break; }
+        }
+    }
+    if (!mgr) return nullptr;
+    const uintptr_t sys = *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(mgr) + 0x58);   // NetVarSystem
+    return sys ? reinterpret_cast<void*>(sys + 0x150) : nullptr;
+}
+
+static constexpr int kNvMaxDepth = 12;
+struct NvWalk { uint8_t it[kNvMaxDepth][0x100]; int held; };
+// POD-only: FindChild each of segs[0..nParents-1] from `root`; on success *parent is the container of the leaf.
+static bool NvWorldWalk(void* root, const uint64_t* segs, int nParents, NvWalk* w, void** parent, int* failAt)
+{
+    w->held = 0; *failAt = -1;
+    __try
+    {
+        const uintptr_t base = GetBase();
+        void* container = root;
+        for (int i = 0; i < nParents; ++i)
+        {
+            reinterpret_cast<void*(__fastcall*)(void*, uint8_t*, uint64_t, char)>(base + NvNative::FindChild)(container, w->it[i], segs[i], 0);
+            w->held = i + 1;
+            if (!w->it[i][0x48]) { *failAt = i; return false; }
+            container = w->it[i];
+        }
+        *parent = container;
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { *failAt = 1000 + w->held; return false; }
+}
+static void NvWalkRelease(NvWalk* w)
+{
+    __try
+    {
+        const uintptr_t base = GetBase();
+        for (int i = w->held - 1; i >= 0; --i) NvReleaseIter(base, w->it[i]);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
+    w->held = 0;
+}
+// Read (write=false) or write `path` in the world tree. 1 = ok, 0 = world tree not up yet, -1 = path not
+// found, -2 = the leaf is not a bool/number/string, <= -3 = fault. *before receives the value prior to a write.
+static int NvWorldAccess(const std::string& path, bool write, const std::string& value, int* typeOut, NvOrig* before)
+{
+    *typeOut = -1;
+    void* root = NvWorldRoot();
+    if (!root) return 0;
+    std::vector<uint64_t> segs;
+    for (size_t p = 0; p <= path.size(); )
+    {
+        size_t e = path.find('/', p);
+        if (e == std::string::npos) e = path.size();
+        if (e > p) segs.push_back(NvNameBits(NvName(path.substr(p, e - p))));
+        p = e + 1;
+    }
+    if (segs.empty() || segs.size() > static_cast<size_t>(kNvMaxDepth) + 1) return -1;
+    auto* w = new NvWalk{};                                     // 3KB: keep it off the game thread's stack
+    void* parent = nullptr; int failAt = -1;
+    int rc;
+    if (!NvWorldWalk(root, segs.data(), static_cast<int>(segs.size()) - 1, w, &parent, &failAt))
+        rc = (failAt >= 1000) ? -3 : -1;
+    else
+    {
+        const uint64_t leaf = segs.back();
+        const int type = NvNodeType(parent, leaf);
+        *typeOut = type;
+        if (type != NvNative::TBool && type != NvNative::TNumber && type != NvNative::TString)
+            rc = (type == -1) ? -1 : (type == -2 ? -3 : -2);
+        else if (!write)
+            rc = NvReadNative(parent, leaf, type, before);
+        else
+        {
+            const std::wstring wv(value.begin(), value.end());
+            rc = NvWriteNative(parent, leaf, type, static_cast<float>(atof(value.c_str())), (value == "true" || value == "1") ? 1 : 0,
+                               wv.c_str(), static_cast<int32_t>(wv.size() + 1), before);
+        }
+    }
+    NvWalkRelease(w);
+    delete w;
+    return rc;
+}
+
+static void NvApplyTick()
+{
+    if (!g_nvPollerStarted.exchange(true))
+    {
+        if (const wchar_t* d = wcsstr(GetCommandLineW(), L"-NetvarDir="))
+        {
+            d += wcslen(L"-NetvarDir=");
+            while (*d && *d != L' ' && *d != L'"') { g_nvDir += *d; ++d; }
+        }
+        std::thread(NvPollerThread).detach();
+        HxLog("[HalcyonA2][NETVARS] override loader started (startup fetch + folder watch)\n");
+    }
+    static ULONGLONG s_boot = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (!s_boot) s_boot = now;
+    static int s_mapDone = 0;
+    if ((s_mapDone == 0 && now - s_boot > 60000) || (s_mapDone == 1 && now - s_boot > 180000)) { ++s_mapDone; SafeNvSlotMap(); }
+
+    static ULONGLONG s_lastRemap = 0;
+    // [2026-09-11] s_unresolved = overrides that could not land yet (no slots loaded, the named slot not loaded,
+    // world tree not up). Without it a set that arrived BEFORE the arenas loaded -- which is exactly what the VPS
+    // startup fetch does -- was never looked at again, because nothing had been written to switch the re-check on.
+    static bool s_unresolved = false;
+    const bool newVersion = g_nvHasPending.exchange(false);
+    const bool periodic = (g_nvHookActive.load() || !g_nvNative.empty() || s_unresolved)
+                          && (now - s_lastRemap > (s_unresolved ? 15000u : 30000u));
+    if (!newVersion && !periodic) return;
+    s_lastRemap = now;
+
+    std::vector<NvOverride> todo;
+    { std::lock_guard<std::mutex> lk(g_nvMu); todo = g_nvPending; }
+
+    static SDK::UClass* msCls = nullptr, *apiCls = nullptr, *tmCls = nullptr;
+    if (!msCls)  msCls  = SDK::UObject::FindClassFast("ModuleState");
+    if (!apiCls) apiCls = SDK::UObject::FindClassFast("ModuleStateLuaAPI");
+    if (!tmCls)  tmCls  = SDK::UObject::FindClassFast("TicketManager");
+    if (!msCls || !apiCls) return;
+
+    struct Loaded { SDK::UObject* ms; SDK::UObject* api; SDK::UObject* slot; std::string id; };
+    std::vector<Loaded> states;
+    std::unordered_map<void*, std::string> apiSlot;
+    const int32_t num = SDK::UObject::GObjects->Num();
+    for (int32_t i = 0; i < num; ++i)
+    {
+        auto* o = SDK::UObject::GObjects->GetByIndex(i);
+        if (!o || o->IsDefaultObject() || !o->IsA(msCls)) continue;
+        const uintptr_t ms = reinterpret_cast<uintptr_t>(o);
+        const std::string id = reinterpret_cast<SDK::FName*>(ms + 0x208)->ToString();   // UModuleState::SlotID
+        if (id.empty() || id == "None") continue;
+        auto* api  = *reinterpret_cast<SDK::UObject**>(ms + 0x90);                     // LuaAPI
+        auto* slot = *reinterpret_cast<SDK::UObject**>(ms + 0x210);                    // Slot
+        if (api && api->IsA(apiCls)) apiSlot[api] = id; else api = nullptr;
+        states.push_back({ o, api, slot, id });
+    }
+
+    // Desired values per concrete slot ("*" expands to every loaded slot that has the key natively).
+    std::map<std::string, NvOverride> want;
+    std::unordered_set<std::string> wantWorld;
+    int moduleOverrides = 0, slotNotLoaded = 0;
+    for (const auto& ov : todo)
+    {
+        if (ov.kind == "world") { if (!ov.name.empty()) wantWorld.insert("world|" + ov.name); continue; }
+        if (ov.kind != "module" || ov.name.empty() || ov.slot.empty()) continue;
+        ++moduleOverrides;
+        bool matched = false;
+        for (const auto& st : states)
+            if (ov.slot == "*" || ov.slot == st.id)
+            {
+                NvOverride c = ov; c.slot = st.id; c.kind = (ov.slot == "*") ? "module*" : "module";
+                want[st.id + "|" + ov.name] = c;
+                matched = true;
+            }
+        if (!matched && ov.slot != "*") ++slotNotLoaded;
+    }
+
+    std::unordered_map<std::string, std::string> hookValues;             // keys we could not write natively
+    std::unordered_map<std::string, int> touchedSlots;
+    int wrote = 0, restored = 0, same = 0, notConfig = 0;
+
+    // Restore anything we wrote that is no longer wanted.
+    for (auto it = g_nvNative.begin(); it != g_nvNative.end(); )
+    {
+        if (want.count(it->first) || wantWorld.count(it->first)) { ++it; continue; }
+        const size_t bar = it->first.find('|');
+        const std::string sid = it->first.substr(0, bar), var = it->first.substr(bar + 1);
+        if (sid == "world")
+        {
+            int t = -1;
+            const int rc = NvWorldAccess(var, true, it->second.original, &t, nullptr);
+            HxLog("[HalcyonA2][NETVARS] restored world %s = %s (rc=%d)\n", var.c_str(), it->second.original.c_str(), rc);
+            ++restored;
+            it = g_nvNative.erase(it);
+            continue;
+        }
+        for (const auto& st : states)
+            if (st.id == sid)
+            {
+                const std::wstring wv(it->second.original.begin(), it->second.original.end());
+                float f = static_cast<float>(atof(it->second.original.c_str()));
+                const int rc = NvWriteNative(reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(st.ms) + 0xE8) ? reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(st.ms) + 0xE8) : nullptr,
+                                             NvNameBits(NvName(var)), it->second.type, f, it->second.original == "true" ? 1 : 0,
+                                             wv.c_str(), static_cast<int32_t>(wv.size() + 1), nullptr);
+                HxLog("[HalcyonA2][NETVARS] restored %s.%s = %s (rc=%d)\n", sid.c_str(), var.c_str(), it->second.original.c_str(), rc);
+                ++touchedSlots[sid]; ++restored;
+            }
+        it = g_nvNative.erase(it);
+    }
+
+    for (const auto& kv : want)
+    {
+        const NvOverride& ov = kv.second;
+        const Loaded* st = nullptr;
+        for (const auto& s : states) if (s.id == ov.slot) { st = &s; break; }
+        if (!st) continue;
+        auto done = g_nvNative.find(kv.first);
+        void* container = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(st->ms) + 0xE8);
+        const uint64_t fname = NvNameBits(NvName(ov.name));
+        if (done != g_nvNative.end() && done->second.value == ov.value)
+        {
+            // Recorded as written -- but a gamemode that reloads gets a fresh ModuleState with its defaults, so
+            // check the live value and write it again if it no longer matches.
+            NvOrig cur{};
+            if (NvReadNative(container, fname, done->second.type, &cur) == 1 && NvValueMatches(done->second.type, cur, ov.value))
+            { ++same; continue; }
+        }
+        const int type = NvNodeType(container, fname);
+        if (type != NvNative::TBool && type != NvNative::TNumber && type != NvNative::TString)
+        {
+            if (ov.kind == "module") { hookValues[kv.first] = ov.value; ++notConfig; }
+            continue;                                   // "*" on a slot without this key: nothing to do
+        }
+        const std::wstring wv(ov.value.begin(), ov.value.end());
+        const float f = static_cast<float>(atof(ov.value.c_str()));
+        const uint8_t b = (ov.value == "true" || ov.value == "1") ? 1 : 0;
+        NvOrig orig{};
+        const bool first = (done == g_nvNative.end());
+        const int rc = NvWriteNative(container, fname, type, f, b, wv.c_str(), static_cast<int32_t>(wv.size() + 1), first ? &orig : nullptr);
+        if (rc != 1) { HxLog("[HalcyonA2][NETVARS] write %s.%s failed rc=%d\n", ov.slot.c_str(), ov.name.c_str(), rc); continue; }
+
+        std::string original = first ? std::string() : done->second.original;
+        if (first)
+        {
+            if (type == NvNative::TNumber) { char nb[32]; snprintf(nb, sizeof(nb), "%g", orig.num); original = nb; }
+            else if (type == NvNative::TBool) original = orig.b ? "true" : "false";
+            else { for (int k = 0; orig.str[k]; ++k) original.push_back(static_cast<char>(orig.str[k])); }
+        }
+        g_nvNative[kv.first] = { type, ov.value, original };
+        HxLog("[HalcyonA2][NETVARS] wrote %s.%s = %s (%s, was %s)\n", ov.slot.c_str(), ov.name.c_str(), ov.value.c_str(),
+              type == NvNative::TNumber ? "number" : type == NvNative::TBool ? "bool" : "string", original.c_str());
+        ++touchedSlots[ov.slot]; ++wrote;
+    }
+
+    // World netvars: walk the path from the NetVarSystem root and write the leaf (see NvWorldAccess).
+    int worldWrote = 0, worldSame = 0, worldWaiting = 0, worldBad = 0;
+    static std::unordered_set<std::string> s_worldWarned;
+    for (const auto& ov : todo)
+    {
+        if (ov.kind != "world" || ov.name.empty()) continue;
+        const std::string key = "world|" + ov.name;
+        auto done = g_nvNative.find(key);
+        int type = -1; NvOrig cur{};
+        int rc = NvWorldAccess(ov.name, false, std::string(), &type, &cur);
+        if (rc == 0) { ++worldWaiting; continue; }
+        if (rc != 1)
+        {
+            if (s_worldWarned.insert(key + "|" + ov.value).second)
+                HxLog("[HalcyonA2][NETVARS] world %s cannot be set: %s (rc=%d type=%d)\n", ov.name.c_str(),
+                      rc == -1 ? "no such path in the world tree" : rc == -2 ? "not a bool/number/string" : "fault while reading", rc, type);
+            ++worldBad; continue;
+        }
+        if (NvValueMatches(type, cur, ov.value))
+        {
+            if (done == g_nvNative.end()) g_nvNative[key] = { type, ov.value, NvOrigToString(type, cur) };
+            ++worldSame; continue;
+        }
+        const std::string original = (done == g_nvNative.end()) ? NvOrigToString(type, cur) : done->second.original;
+        NvOrig before{}; int t2 = -1;
+        rc = NvWorldAccess(ov.name, true, ov.value, &t2, &before);
+        if (rc != 1) { HxLog("[HalcyonA2][NETVARS] write world %s failed rc=%d\n", ov.name.c_str(), rc); ++worldBad; continue; }
+        NvOrig after{}; int t3 = -1;
+        const int rb = NvWorldAccess(ov.name, false, std::string(), &t3, &after);
+        g_nvNative[key] = { type, ov.value, original };
+        HxLog("[HalcyonA2][NETVARS] wrote world %s = %s (%s, was %s, reads back %s)\n", ov.name.c_str(), ov.value.c_str(),
+              type == NvNative::TNumber ? "number" : type == NvNative::TBool ? "bool" : "string", original.c_str(),
+              rb == 1 ? NvOrigToString(t3, after).c_str() : "?");
+        ++worldWrote;
+    }
+
+    // Re-run the consumers that cache config: the ticket manager (whitelist) and the gamemode script.
+    SDK::UFunction* tmCfg = tmCls ? tmCls->GetFunction("TicketManager", "OnConfigChanged") : nullptr;
+    for (const auto& t : touchedSlots)
+        for (const auto& st : states)
+        {
+            if (st.id != t.first) continue;
+            if (st.slot && tmCfg)
+                if (auto* tm = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(st.slot) + 0x438))
+                    tm->ProcessEvent(tmCfg, nullptr);
+            if (st.api) NvBroadcastConfigChanged(st.api);
+        }
+
+    AcquireSRWLockExclusive(&g_nvLock);
+    g_nvApiSlot.swap(apiSlot);
+    g_nvValues.clear();
+    for (const auto& hv : hookValues) g_nvValues[hv.first] = hv.second;
+    ReleaseSRWLockExclusive(&g_nvLock);
+    g_nvHookActive = !hookValues.empty();
+
+    const bool wasUnresolved = s_unresolved;
+    s_unresolved = worldWaiting > 0 || slotNotLoaded > 0 || (moduleOverrides > 0 && states.empty());
+    if (newVersion || wrote || restored || worldWrote || (wasUnresolved && !s_unresolved))
+        HxLog("[HalcyonA2][NETVARS] apply: %d written to config, %d restored, %d unchanged, %d not config keys (script-only fallback); "
+              "world: %d written, %d unchanged, %d waiting, %d invalid; %zu loaded slot(s), %d override slot(s) not loaded yet%s; getter hits %ld\n",
+              wrote, restored, same, notConfig, worldWrote, worldSame, worldWaiting, worldBad, states.size(), slotNotLoaded,
+              s_unresolved ? " -> re-checking every 15s" : "", g_nvHits.load());
+}
+static void SafeNvApplyTick() { __try { NvApplyTick(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+
+// One-shot, log-only census of the WORLD netvar tree, so world overrides can be wired to the right objects
+// once we can see how they are organised (object names / outers / whether GetSubObject resolves by name).
+static void NvWorldCensus()
+{
+    static bool s_done = false;
+    static ULONGLONG s_first = 0;
+    if (s_done) return;
+    const ULONGLONG now = GetTickCount64();
+    if (!s_first) s_first = now;
+    if (now - s_first < 90000) return;                // after the world has settled
+    s_done = true;
+
+    SDK::UClass* objCls = SDK::UObject::FindClassFast("ObjectNetVar");
+    SDK::UClass* numCls = SDK::UObject::FindClassFast("NumberNetVar");
+    SDK::UClass* boolCls = SDK::UObject::FindClassFast("BoolNetVar");
+    SDK::UClass* strCls = SDK::UObject::FindClassFast("StringNetVar");
+    if (!objCls) { HxLog("[HalcyonA2][NVCENSUS] ObjectNetVar class not found\n"); return; }
+    SDK::UFunction* fSubObj = objCls->GetFunction("ObjectNetVar", "GetSubObject");
+    SDK::UFunction* fSubNum = objCls->GetFunction("ObjectNetVar", "GetSubNumber");
+
+    int nObj = 0, nNum = 0, nBool = 0, nStr = 0, printed = 0;
+    const SDK::FName nPlayer = SDK::UKismetStringLibrary::Conv_StringToName(SDK::FString(L"player"));
+    const SDK::FName nBrake  = SDK::UKismetStringLibrary::Conv_StringToName(SDK::FString(L"brakeStrength"));
+    const int32_t num = SDK::UObject::GObjects->Num();
+    for (int32_t i = 0; i < num; ++i)
+    {
+        auto* o = SDK::UObject::GObjects->GetByIndex(i);
+        if (!o || o->IsDefaultObject()) continue;
+        if (numCls && o->IsA(numCls)) { ++nNum; continue; }
+        if (boolCls && o->IsA(boolCls)) { ++nBool; continue; }
+        if (strCls && o->IsA(strCls)) { ++nStr; continue; }
+        if (!o->IsA(objCls)) continue;
+        ++nObj;
+        // Probe: does this object have a "player" child with a "brakeStrength" number? That identifies config.
+        SDK::UObject* player = nullptr;
+        if (fSubObj) { struct { SDK::FName n; SDK::UObject* r; } q{ nPlayer, nullptr }; o->ProcessEvent(fSubObj, &q); player = q.r; }
+        float brake = -1.0f; bool hasBrake = false;
+        if (player && fSubNum)
+        {
+            struct { SDK::FName n; SDK::UObject* r; } q{ nBrake, nullptr }; player->ProcessEvent(fSubNum, &q);
+            if (q.r && numCls) { SDK::UFunction* fv = numCls->GetFunction("NumberNetVar", "GetValue");
+                                 struct { float v; } g{}; if (fv) { q.r->ProcessEvent(fv, &g); brake = g.v; hasBrake = true; } }
+        }
+        if (printed < 12 || player)
+        {
+            ++printed;
+            HxLog("[HalcyonA2][NVCENSUS] ObjectNetVar %s outer=%s outer2=%s  player-child=%s brakeStrength=%s%.1f\n",
+                  o->GetName().c_str(), o->Outer ? o->Outer->GetName().c_str() : "-",
+                  (o->Outer && o->Outer->Outer) ? o->Outer->Outer->GetName().c_str() : "-",
+                  player ? "YES" : "no", hasBrake ? "" : "n/a ", brake);
+        }
+    }
+    HxLog("[HalcyonA2][NVCENSUS] totals: ObjectNetVar=%d NumberNetVar=%d BoolNetVar=%d StringNetVar=%d\n", nObj, nNum, nBool, nStr);
+}
+static void SafeNvWorldCensus() { __try { NvWorldCensus(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+
 static void AuthGateTick()
 {
     auto* world = SDK::UWorld::GetWorld();
@@ -8468,6 +9887,28 @@ static int32_t g_idxEnterArena  = 0;
 static int32_t g_idxHitResponse = 0;
 static int32_t g_idxSendPhys    = 0;
 static int32_t g_idxSetFreqData = 0;   // A2PlayerEntity::Server_SetFrequentData — ingest ping-correction site
+// [2026-09-09] HandleFiringClearerOverlapOnServer is the switcher's counterpart -- it REMOVES a
+// player from a team. Both are reflected UFunctions, so any call the GAME makes passes through
+// ProcessEvent and can simply be observed. This is what tells us whether the clearer is responsible.
+static int32_t g_idxTeamClearer  = 0;
+static int32_t g_idxTeamSwitcher = 0;
+// Every reflected path that can take a pawn off its team. AVRPawn::GetTicketManagerAndClearTeam is the
+// one a death/respawn is expected to travel (its first arg is bPawnBeingDestroyed), but all of them are
+// watched and suppressed so the fix does not hinge on guessing which one this build uses.
+static int32_t g_idxLeaveArena     = 0;   // AVRPawn::Server_NotifyPlayerLeftArena
+static int32_t g_idxClearPawnTeam  = 0;   // AVRPawn::Server_ClearPawnTeam
+static int32_t g_idxClearTeam      = 0;   // AVRPawn::ClearTeam
+static int32_t g_idxGetTmClearTeam = 0;   // AVRPawn::GetTicketManagerAndClearTeam
+static int32_t g_idxTeamClearSucc  = 0;   // AVRPawn::TeamClearSuccess
+static int32_t g_idxActorClearer   = 0;   // ATeamChangeActor::TeamClearerOverlappedOnServer
+// [2026-09-10 DOORTRACE -- LOG ONLY] Jakeball: one side's team door never assigns a team. Every door has the
+// right team index ([TEAMDIAG]) and identical level config, so trace the real join path end to end:
+// the door RPC, the door's TicketManager link, that manager's per-team sizes/limits, and the verdict the
+// server sends back to the pawn. Nothing here alters behaviour.
+static int32_t g_idxActorSwitcher  = 0;   // ATeamChangeActor::TeamSwitcherOverlappedOnServer
+static int32_t g_idxTicketOk       = 0;   // AVRPawn::Client_TicketCheckSuccess
+static int32_t g_idxTicketFail     = 0;   // AVRPawn::Client_TicketCheckFailure
+static int32_t g_idxTicketGiveFail = 0;   // AVRPawn::Client_TicketGiveFailure
 static bool    g_rpcIdxDone     = false;
 
 static void ResolveRpcIndices()
@@ -8485,10 +9926,39 @@ static void ResolveRpcIndices()
     g_idxEnterArena  = grab("Server_NotifyPlayerEnteredArena");
     g_idxHitResponse = grab("Client_HitProp_Response");
     g_idxSendPhys    = grab("Server_SendPhysicsPropData");
+    g_idxLeaveArena     = grab("Server_NotifyPlayerLeftArena");
+    g_idxClearPawnTeam  = grab("Server_ClearPawnTeam");
+    g_idxClearTeam      = grab("ClearTeam");
+    g_idxGetTmClearTeam = grab("GetTicketManagerAndClearTeam");
+    g_idxTeamClearSucc  = grab("TeamClearSuccess");
+    if (auto* tcA = SDK::UObject::FindClassFast("TeamChangeActor"))
+        if (auto* f = tcA->GetFunction("TeamChangeActor", "TeamClearerOverlappedOnServer"))
+            g_idxActorClearer = f->Name.ComparisonIndex;
+    if (auto* tcA2 = SDK::UObject::FindClassFast("TeamChangeActor"))
+        if (auto* f = tcA2->GetFunction("TeamChangeActor", "TeamSwitcherOverlappedOnServer"))
+            g_idxActorSwitcher = f->Name.ComparisonIndex;
+    g_idxTicketOk       = grab("Client_TicketCheckSuccess");
+    g_idxTicketFail     = grab("Client_TicketCheckFailure");
+    g_idxTicketGiveFail = grab("Client_TicketGiveFailure");
+    HxLog("[HalcyonA2][DOORTRACE] idx: switcher=%d ticketOk=%d ticketFail=%d giveFail=%d\n",
+          g_idxActorSwitcher, g_idxTicketOk, g_idxTicketFail, g_idxTicketGiveFail);
+    HxLog("[HalcyonA2][SCRAPGUARD] clear-path idx: Server_ClearPawnTeam=%d ClearTeam=%d "
+          "GetTicketManagerAndClearTeam=%d TeamClearSuccess=%d ActorClearer=%d LeaveArena=%d\n",
+          g_idxClearPawnTeam, g_idxClearTeam, g_idxGetTmClearTeam, g_idxTeamClearSucc,
+          g_idxActorClearer, g_idxLeaveArena);
     // Server_SetFrequentData lives on A2PlayerEntity (the pose-ingest RPC), not VRPawn.
     if (auto* peCls = SDK::UObject::FindClassFast("A2PlayerEntity"))
         if (auto* f = peCls->GetFunction("A2PlayerEntity", "Server_SetFrequentData"))
             g_idxSetFreqData = f->Name.ComparisonIndex;
+    if (auto* tcC = SDK::UObject::FindClassFast("TeamChangeComponent"))
+    {
+        if (auto* f = tcC->GetFunction("TeamChangeComponent", "HandleFiringClearerOverlapOnServer"))
+            g_idxTeamClearer = f->Name.ComparisonIndex;
+        if (auto* f = tcC->GetFunction("TeamChangeComponent", "HandleFiringSwitcherOverlapOnServer"))
+            g_idxTeamSwitcher = f->Name.ComparisonIndex;
+        HxLog("[HalcyonA2][CLEARER] watching clearer(idx=%d) / switcher(idx=%d)\n",
+              g_idxTeamClearer, g_idxTeamSwitcher);
+    }
     g_rpcIdxDone = true;
     HxLog("[HalcyonA2][RPCTRACE] name idx: HitProp=%d SpawnBall=%d EnterArena=%d HitResponse=%d\n",
           g_idxHitProp, g_idxSpawnBall, g_idxEnterArena, g_idxHitResponse);
@@ -8573,8 +10043,31 @@ static void TraceBallRpc(SDK::UObject* Context, SDK::UFunction* Function, void* 
     else if (idx == g_idxEnterArena)
     {
         auto* p = reinterpret_cast<SDK::FString*>(Parms);
+        const std::string slot = FStringToNarrow(p);
         HxLog("[HalcyonA2][RPCTRACE] Server_NotifyPlayerEnteredArena from %s: slot='%s'\n",
-              Context ? Context->GetName().c_str() : "<null>", FStringToNarrow(p).c_str());
+              Context ? Context->GetName().c_str() : "<null>", slot.c_str());
+        // Entering ScrapRun with no team is the reliable moment to seat someone -- far more so than
+        // hoping they walk through a volume the engine cannot detect headless.
+        // [2026-09-09] Seating here is gone (see the note on the clear guard). What entry IS good for is
+        // knowing exactly who is inside ScrapRun, which is what the guard keys on.
+        if (Context && slot.find("Scraprun") != std::string::npos)
+        {
+            ScrapAddPawn(Context);
+            HxLog("[HalcyonA2][SCRAPGUARD] %s entered ScrapRun (%d inside)\n",
+                  Context->GetName().c_str(), g_scrapPawnN);
+        }
+    }
+    else if (g_idxLeaveArena && idx == g_idxLeaveArena)
+    {
+        auto* p = reinterpret_cast<SDK::FString*>(Parms);
+        const std::string slot = FStringToNarrow(p);
+        // Drop them BEFORE the clear that follows a real departure, so leaving still empties the team.
+        if (Context && slot.find("Scraprun") != std::string::npos)
+        {
+            ScrapRemovePawn(Context);
+            HxLog("[HalcyonA2][SCRAPGUARD] %s left ScrapRun (%d inside)\n",
+                  Context->GetName().c_str(), g_scrapPawnN);
+        }
     }
     else if (idx == g_idxSendPhys)
     {
@@ -8608,6 +10101,208 @@ static void TraceBallRpc(SDK::UObject* Context, SDK::UFunction* Function, void* 
               p->Actor ? p->Actor->GetName().c_str() : "<null>", (int)p->Success);
     }
 }
+static void LogRosterDrop(SDK::UFunction* f, SDK::UObject* c, int before, int after)
+{
+    HxLog("[HalcyonA2][SCRAPGUARD] *** ROSTER %d -> %d during %s on %s -- this is the call that removed "
+          "the player\n", before, after,
+          f ? f->GetName().c_str() : "<null>", c ? c->GetName().c_str() : "<null>");
+}
+static void SafeLogRosterDrop(SDK::UFunction* f, SDK::UObject* c, int b, int a)
+{
+    __try { LogRosterDrop(f, c, b, a); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+// Is this the ScrapRun team changer we already located for [TEAMVOL]? Keeps the component-level clearer
+// suppression from touching driftball's or any other arena's changers.
+// A player who has picked the Scrapper side (AAxPlayerState::TeamIndex@0x380 == 1) is not a runner:
+// never count them as one, and never hold back their clear -- the Luau's teamIndex == 1 branch is how
+// the RUNNERS win when the scrappers all leave, and swallowing it would break that too.
+static bool ScrapIsScrapper(void* pw)
+{
+    if (!pw) return false;
+    // Plain field read, deliberately. The authoritative resolver (AVRPawn::GetPawnTeamIndex) would be
+    // more accurate but AVs on any pawn that is not provably live, and this runs off an RPC context we do
+    // not own. A wrong answer here mis-counts one runner; an AV takes the server down.
+    auto* ps = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(pw) + 0x2B8);
+    if (!ps) return false;
+    return *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(ps) + 0x380) == 1;
+}
+// The clearer RPCs carry a PlayerIndex, not a pawn. Resolve it against the players we know are inside
+// ScrapRun (AVRPawn::PlayerIndex is the uint8 at 0x1C22).
+static SDK::UObject* ScrapPawnByIndex(int pidx)
+{
+    if (pidx < 0) return nullptr;
+    for (int i = 0; i < g_scrapPawnN; ++i)
+    {
+        void* pw = g_scrapPawns[i];
+        if (pw && *reinterpret_cast<unsigned char*>(reinterpret_cast<uintptr_t>(pw) + 0x1C22) == pidx)
+            return static_cast<SDK::UObject*>(pw);
+    }
+    return nullptr;
+}
+// Runners still standing, ignoring one pawn (the one whose clear we are deciding about).
+static int ScrapLiveRunnersOtherThan(void* except)
+{
+    int n = 0;
+    for (int i = 0; i < g_scrapPawnN; ++i)
+    {
+        void* pw = g_scrapPawns[i];
+        if (!pw || pw == except) continue;
+        if (ScrapIsDead(pw) || ScrapIsScrapper(pw)) continue;
+        ++n;
+    }
+    return n;
+}
+// The ScrapRun RUNNER team's TeamChangeActor (UTeamChangeComponent::TeamChangeActor@0x4C8).
+static SDK::UObject* ScrapRunnerChangeActor()
+{
+    for (int v = 0; v < g_teamVolN; ++v)
+    {
+        void* comp = g_teamVols[v].trigger;
+        if (!comp || g_teamVols[v].teamIndex != 0) continue;
+        auto* a = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(comp) + 0x4C8);
+        if (a) return a;
+    }
+    return nullptr;
+}
+// The last runner is down: put everyone we held back onto the pile so the roster empties in one pass and
+// the Luau's teamSize == 0 rule fires exactly once, with the scrappers scoring.
+static void ScrapReleaseHeldClears(void* except)
+{
+    if (g_scrapDeadN == 0) return;
+    SDK::UObject* actor = ScrapRunnerChangeActor();
+    if (!actor)
+    {
+        HxLog("[HalcyonA2][SCRAPGUARD] last runner down but no runner TeamChangeActor cached -- "
+              "letting the clear through on its own\n");
+        return;
+    }
+    SDK::UClass* cls = SDK::UObject::FindClassFast("TeamChangeActor");
+    SDK::UFunction* fn = cls ? cls->GetFunction("TeamChangeActor", "TeamClearerOverlappedOnServer") : nullptr;
+    if (!fn) return;
+
+    g_scrapReleasing = true;
+    int fired = 0;
+    for (int i = 0; i < g_scrapDeadN; ++i)
+    {
+        if (g_scrapDead[i].pawn == except) continue;
+        struct { int32_t PlayerIndex; } parms{ g_scrapDead[i].pidx };
+        actor->ProcessEvent(fn, &parms);
+        ++fired;
+    }
+    g_scrapReleasing = false;
+    HxLog("[HalcyonA2][SCRAPGUARD] last runner down -- released %d held clear(s) so the roster empties "
+          "and the Scrappers score\n", fired);
+}
+static bool IsScrapChanger(void* comp)
+{
+    for (int v = 0; v < g_teamVolN; ++v) if (g_teamVols[v].trigger == comp) return true;
+    return false;
+}
+// Same question for the ATeamChangeActor that owns one of those components (UTeamChangeComponent::
+// TeamChangeActor @0x4C8). Without this the actor-level clearer would be swallowed for EVERY arena,
+// which would stop driftball players leaving their team while a ScrapRun round happened to be running.
+static bool IsScrapChangeActor(void* actor)
+{
+    if (!actor) return false;
+    for (int v = 0; v < g_teamVolN; ++v)
+    {
+        void* comp = g_teamVols[v].trigger;
+        if (!comp) continue;
+        if (*reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(comp) + 0x4C8) == actor) return true;
+    }
+    return false;
+}
+static void LogScrapGuard(const char* what, SDK::UObject* Context)
+{
+    HxLog("[HalcyonA2][SCRAPGUARD] held back %s for %s -- %d runner(s) still alive, round continues "
+          "(%ld held this round)\n",
+          what, Context ? Context->GetName().c_str() : "<null>",
+          ScrapLiveRunnersOtherThan(Context), g_scrapGuardHits);
+}
+static void SafeReleaseHeldClears(void* except)
+{
+    __try { ScrapReleaseHeldClears(except); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+static void SafeLogScrapGuard(const char* what, SDK::UObject* c)
+{
+    __try { LogScrapGuard(what, c); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+static std::string IntArrayStr(uintptr_t arr)   // TArray<int32>: Data@0, Num@8
+{
+    const int32_t* d = *reinterpret_cast<int32_t**>(arr);
+    const int32_t  n = *reinterpret_cast<int32_t*>(arr + 8);
+    std::string s = "[";
+    for (int32_t i = 0; d && i < n && i < 8; ++i) { if (i) s += ","; s += std::to_string(d[i]); }
+    return s + "] n=" + std::to_string(n);
+}
+static void DoorTrace(SDK::UObject* ctx, int32_t which, void* parms)
+{
+    if (which == g_idxActorSwitcher)
+    {
+        const uintptr_t a = reinterpret_cast<uintptr_t>(ctx);
+        const int32_t pidx = parms ? *reinterpret_cast<int32_t*>(parms) : -1;
+        double loc[3] = {};
+        WireActorLoc(ctx, loc);
+        void* comp = *reinterpret_cast<void**>(a + 0x318);                        // ATeamChangeActor::TeamChangeComp
+        if (!comp)
+        {
+            HxLog("[HalcyonA2][DOORTRACE] door %s at (%.0f,%.0f,%.0f) pidx=%d -- NO TeamChangeComp\n",
+                  ctx->GetName().c_str(), loc[0], loc[1], loc[2], pidx);
+            return;
+        }
+        const uintptr_t c = reinterpret_cast<uintptr_t>(comp);
+        void* tm = *reinterpret_cast<void**>(c + 0x508);                          // UTeamChangeComponent::TicketManager
+        std::string tmInfo = "TicketManager=NULL (join cannot run)";
+        if (tm)
+        {
+            const uintptr_t t = reinterpret_cast<uintptr_t>(tm);
+            char buf[160];
+            snprintf(buf, sizeof(buf), " override=%d curTicket=%.0f reqTicket=%.0f",
+                     *reinterpret_cast<unsigned char*>(t + 0x368), *reinterpret_cast<float*>(t + 0x36C),
+                     *reinterpret_cast<float*>(t + 0x370));
+            tmInfo = std::string("TM=") + static_cast<SDK::UObject*>(tm)->GetName() +
+                     " TeamSizes=" + IntArrayStr(t + 0x3E0) + " MaxTeamSizes=" + IntArrayStr(t + 0x3F0) + buf;
+        }
+        HxLog("[HalcyonA2][DOORTRACE] door %s at (%.0f,%.0f,%.0f) pidx=%d comp.team=%d comp.size=%d comp.max=%d "
+              "entranceDelay=%d %s\n",
+              ctx->GetName().c_str(), loc[0], loc[1], loc[2], pidx,
+              *reinterpret_cast<int*>(c + 0x524), *reinterpret_cast<int*>(c + 0x4DC), *reinterpret_cast<int*>(c + 0x4E0),
+              *reinterpret_cast<unsigned char*>(a + 0x2C0), tmInfo.c_str());
+    }
+    else if (which == g_idxTicketOk)
+        HxLog("[HalcyonA2][DOORTRACE]   -> %s Client_TicketCheckSuccess team=%d ticket=%d\n",
+              ctx->GetName().c_str(), *reinterpret_cast<signed char*>(reinterpret_cast<uintptr_t>(parms) + 0x20),
+              *reinterpret_cast<int32_t*>(parms));
+    else if (which == g_idxTicketFail)
+        HxLog("[HalcyonA2][DOORTRACE]   -> %s Client_TicketCheckFailure team=%d slot='%s'\n",
+              ctx->GetName().c_str(), *reinterpret_cast<signed char*>(parms),
+              FStringToNarrow(reinterpret_cast<char*>(parms) + 8).c_str());
+    else if (which == g_idxTicketGiveFail)
+        HxLog("[HalcyonA2][DOORTRACE]   -> %s Client_TicketGiveFailure\n", ctx->GetName().c_str());
+}
+static void SafeDoorTrace(SDK::UObject* ctx, int32_t which, void* parms)
+{
+    __try { DoorTrace(ctx, which, parms); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+// [CLEARER] Separate function: GetName() builds a std::string, which cannot live inside
+// ProcessEvent_Hook's __try scope (C2712) -- same split as SafeTraceBallRpc.
+static void TeamRpcWatch(SDK::UObject* Context, bool isClearer, void* Parms)
+{
+    const int pidx = Parms ? *reinterpret_cast<int32_t*>(Parms) : -1;
+    const uintptr_t c = reinterpret_cast<uintptr_t>(Context);
+    HxLog("[HalcyonA2][CLEARER] %s  team-%d changer %s  PlayerIndex=%d  roster=%d\n",
+          isClearer ? "*** CLEARER (removes) ***" : "switcher (adds)",
+          *reinterpret_cast<int*>(c + 0x524), Context->GetName().c_str(),
+          pidx, *reinterpret_cast<int*>(c + 0x4DC));
+}
+static void SafeTeamRpcWatch(SDK::UObject* c, bool isClearer, void* p)
+{
+    __try { TeamRpcWatch(c, isClearer, p); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
 static void SafeTraceBallRpc(SDK::UObject* c, SDK::UFunction* f, void* p)
 {
     __try { TraceBallRpc(c, f, p); } __except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -8760,9 +10455,66 @@ static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, v
     if (Function && (Function->Name.ComparisonIndex == g_idxHitProp ||
                      Function->Name.ComparisonIndex == g_idxSpawnBall ||
                      Function->Name.ComparisonIndex == g_idxEnterArena ||
+                     (g_idxLeaveArena && Function->Name.ComparisonIndex == g_idxLeaveArena) ||
                      Function->Name.ComparisonIndex == g_idxSendPhys ||
                      Function->Name.ComparisonIndex == g_idxHitResponse))
         SafeTraceBallRpc(Context, Function, Parms);
+
+    // [SCRAPGUARD] Swallow any team-clear aimed at a player who is inside ScrapRun with the round
+    // running. This is the actual fix for "one player dies and the gamemode auto-ends": the death path
+    // takes the runner off the team, the roster hits 0, and the Luau's teamSize == 0 rule exits. With
+    // the clear dropped, the roster only falls when someone really leaves the arena (which removes them
+    // from the set above first), so the round ends when the runners are gone -- not when one dies.
+    if (g_teamClearGuard && g_scrapRoundActive && !g_scrapReleasing && Function && Context)
+    {
+        const int32_t ci = Function->Name.ComparisonIndex;
+        const char*   what   = nullptr;
+        SDK::UObject* victim = nullptr;
+        // Pawn-context clears name their own victim; the changer-side ones carry a PlayerIndex.
+        if      (g_idxClearPawnTeam  && ci == g_idxClearPawnTeam ) { what = "Server_ClearPawnTeam";          victim = Context; }
+        else if (g_idxClearTeam      && ci == g_idxClearTeam     ) { what = "ClearTeam";                     victim = Context; }
+        else if (g_idxGetTmClearTeam && ci == g_idxGetTmClearTeam) { what = "GetTicketManagerAndClearTeam";  victim = Context; }
+        else if (g_idxTeamClearSucc  && ci == g_idxTeamClearSucc ) { what = "TeamClearSuccess";              victim = Context; }
+        else if (g_idxTeamClearer    && ci == g_idxTeamClearer    && IsScrapChanger(Context))
+            { what = "HandleFiringClearerOverlapOnServer"; victim = ScrapPawnByIndex(Parms ? *reinterpret_cast<int32_t*>(Parms) : -1); }
+        else if (g_idxActorClearer   && ci == g_idxActorClearer   && IsScrapChangeActor(Context))
+            { what = "TeamClearerOverlappedOnServer";      victim = ScrapPawnByIndex(Parms ? *reinterpret_cast<int32_t*>(Parms) : -1); }
+
+        // Only a runner who is inside ScrapRun is ours to hold back. A scrapper's clear always goes
+        // through (it is how the runners win), and so does anyone who has already left the arena.
+        if (what && victim && ScrapHasPawn(victim) && !ScrapIsScrapper(victim))
+        {
+            const int pidx = *reinterpret_cast<unsigned char*>(reinterpret_cast<uintptr_t>(victim) + 0x1C22);
+            if (ScrapLiveRunnersOtherThan(victim) > 0)
+            {
+                ScrapMarkDead(victim, pidx);
+                ++g_scrapGuardHits;
+                SafeLogScrapGuard(what, victim);
+                return;                   // held back: other runners are still going, the round continues
+            }
+            // Last one standing just went down -> this is the Scrappers' win, not a stray death.
+            ScrapMarkDead(victim, pidx);
+            SafeReleaseHeldClears(victim);
+            // ...and fall through so the game's own clear runs and empties the roster.
+        }
+    }
+
+    // [DOORTRACE] log-only: door RPC + the server's verdict back to the pawn
+    if (Function && Context && Parms)
+    {
+        const int32_t ci = Function->Name.ComparisonIndex;
+        if ((g_idxActorSwitcher && ci == g_idxActorSwitcher) || (g_idxTicketOk && ci == g_idxTicketOk) ||
+            (g_idxTicketFail && ci == g_idxTicketFail))
+            SafeDoorTrace(Context, ci, Parms);
+    }
+    if (Function && Context && g_idxTicketGiveFail && Function->Name.ComparisonIndex == g_idxTicketGiveFail)
+        SafeDoorTrace(Context, g_idxTicketGiveFail, Parms);
+
+    // [CLEARER] Who calls the team switcher/clearer, and for which player?
+    if (Function && Context && (g_idxTeamClearer || g_idxTeamSwitcher) &&
+        (Function->Name.ComparisonIndex == g_idxTeamClearer ||
+         Function->Name.ComparisonIndex == g_idxTeamSwitcher))
+        SafeTeamRpcWatch(Context, Function->Name.ComparisonIndex == g_idxTeamClearer, Parms);
 
     // [SNAPFIX] Correct the incoming pose RPC's Ping the instant it arrives, before the handler stores
     // it into localData -> the fragment->rep sync can never carry a 0 -> no interpolation collapse/snap.
@@ -9001,7 +10753,10 @@ static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, v
         // detect it geometrically and drive the real Luau path. Self-gates (latched + throttled). See
         // DetectRunnerAtFinish.
         PROF(SafeDetectRunnerAtFinish);
+        PROF(SafeNvApplyTick);       // [NETVARS] dashboard overrides -- no-op unless a new version is queued
+        PROF(SafeNvWorldCensus);     // [NVCENSUS] one-shot, log-only, 90s after boot
         PROF(SafeDetectTeamChanger);   // [TEAMVOL] fire the real team-changer overlap (headless never does)
+        PROF(SafePollTeamRosters);   // [ROSTER] catch the exact moment of removal
         // Fallback only: if the tick above somehow doesn't advance a GSM out of GAME_BEGIN within ~11s,
         // force it to RUNNING via the NetVar (skips the Luau onEnter). Disarmed automatically the moment
         // the tick's onCountdownEnd drives updateGameState(5). See WatchdogGameBegin.
@@ -9169,6 +10924,18 @@ static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, v
         // at 10Hz, stealing game-thread time from the rollback step. Re-enable if needed.)
 
         inHook = false;
+    }
+    // [SCRAPGUARD] Precision probe, armed only during a ScrapRun round so it costs nothing otherwise:
+    // sample the runner roster either side of the dispatch. If the count falls, THIS call is what took
+    // the player off the team -- which names any clear path the list above does not cover, without
+    // another round of guessing. Two loads and a compare.
+    if (g_scrapRoundActive && g_scrapRosterCell)
+    {
+        const int before = *g_scrapRosterCell;
+        SafeProcessEventOrig(Context, Function, Parms);
+        const int after = *g_scrapRosterCell;
+        if (after < before) SafeLogRosterDrop(Function, Context, before, after);
+        return;
     }
     SafeProcessEventOrig(Context, Function, Parms);
 }
@@ -10026,6 +11793,163 @@ static void ClientDriveActions()
     }
 }
 
+// [2026-09-11 CLIENTSCRIPT] -HalcyonScript=<file> drives the mock client through a test, one command per
+// line, evaluated once a second while we hold a VR pawn:
+//     enter <SlotID>            Server_NotifyPlayerEnteredArena
+//     goto <x> <y> <z> [secs]   teleport locally (overlaps) AND on the server (Server_SetFrequentData) for secs
+//     wait <secs>
+//     log <text>
+// [TEAMSTATE] then reports, from the CLIENT's own view, the pawn's team index and team colour -- which is
+// exactly what "the left team gets no colour client-side" is about.
+struct ClientCmd { std::string op; double x = 0, y = 0, z = 0, secs = 0; std::string text; };
+static std::vector<ClientCmd> g_clientScript;
+static size_t   g_scriptPc = 0;
+static double   g_scriptHold = 0;
+static bool     g_noBallLog = false;
+
+static void ClientLoadScript(const std::wstring& path)
+{
+    const std::string body = NvReadFileA(path);
+    size_t pos = 0;
+    while (pos < body.size())
+    {
+        size_t end = body.find('\n', pos); if (end == std::string::npos) end = body.size();
+        std::string line = body.substr(pos, end - pos); pos = end + 1;
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+        if (line.empty() || line[0] == '#') continue;
+        ClientCmd c;
+        const size_t sp = line.find(' ');
+        c.op = line.substr(0, sp);
+        const std::string rest = (sp == std::string::npos) ? std::string() : line.substr(sp + 1);
+        c.text = rest;
+        if (c.op == "goto") sscanf_s(rest.c_str(), "%lf %lf %lf %lf", &c.x, &c.y, &c.z, &c.secs);
+        if (c.op == "wait") c.secs = atof(rest.c_str());
+        g_clientScript.push_back(c);
+    }
+    HxLog("[HalcyonA2][CLIENTSCRIPT] loaded %zu command(s) from %ls\n", g_clientScript.size(), path.c_str());
+}
+
+static void ClientScriptTick()
+{
+    if (g_scriptPc >= g_clientScript.size() || !g_clientInArena) return;
+    auto* world = SDK::UWorld::GetWorld();
+    if (!world || !world->OwningGameInstance) return;
+    auto& lps = world->OwningGameInstance->LocalPlayers;
+    if (lps.Num() <= 0 || !lps[0] || !lps[0]->PlayerController || !lps[0]->PlayerController->Pawn) return;
+    SDK::APawn* pawn = lps[0]->PlayerController->Pawn;
+    ClientCmd& c = g_clientScript[g_scriptPc];
+
+    if (c.op == "goto")
+    {
+        const SDK::FVector to{ c.x, c.y, c.z };
+        SDK::FHitResult hit{};
+        pawn->K2_SetActorLocation(to, false, &hit, true);           // local: fires client-side overlaps
+        PushServerPosition(pawn, to, SDK::FVector{ 0.0, 0.0, 0.0 }); // server: what the server's checks read
+        if (g_scriptHold <= 0) { g_scriptHold = (c.secs > 0 ? c.secs : 3); HxLog("[HalcyonA2][CLIENTSCRIPT] %s goto (%.0f, %.0f, %.0f) for %.0fs\n", NowStamp(), c.x, c.y, c.z, g_scriptHold); }
+        if (--g_scriptHold <= 0) { g_scriptHold = 0; ++g_scriptPc; }
+        return;
+    }
+    if (c.op == "wait")
+    {
+        if (g_scriptHold <= 0) g_scriptHold = c.secs;
+        if (--g_scriptHold <= 0) { g_scriptHold = 0; ++g_scriptPc; }
+        return;
+    }
+    if (c.op == "enter")
+    {
+        if (auto* fn = pawn->Class->GetFunction("VRPawn", "Server_NotifyPlayerEnteredArena"))
+        {
+            const std::wstring slot(c.text.begin(), c.text.end());
+            struct { SDK::FString id; } p{ SDK::FString(slot.c_str()) };
+            pawn->ProcessEvent(fn, &p);
+        }
+        HxLog("[HalcyonA2][CLIENTSCRIPT] %s enter %s\n", NowStamp(), c.text.c_str());
+    }
+    else if (c.op == "log") HxLog("[HalcyonA2][CLIENTSCRIPT] %s %s\n", NowStamp(), c.text.c_str());
+    ++g_scriptPc;
+    if (g_scriptPc == g_clientScript.size()) HxLog("[HalcyonA2][CLIENTSCRIPT] %s script finished\n", NowStamp());
+}
+
+static void ClientTeamState()
+{
+    auto* world = SDK::UWorld::GetWorld();
+    if (!world || !world->OwningGameInstance) return;
+    auto& lps = world->OwningGameInstance->LocalPlayers;
+    if (lps.Num() <= 0 || !lps[0] || !lps[0]->PlayerController) return;
+    SDK::APawn* pawn = lps[0]->PlayerController->Pawn;
+    if (!pawn || pawn->GetName().find("VRPawn") == std::string::npos) return;
+    const uintptr_t p = reinterpret_cast<uintptr_t>(pawn);
+    int teamBp = -99;
+    if (auto* fn = pawn->Class->GetFunction("VRPawn", "GetPawnTeamIndexBlueprint")) { struct { int32_t r; } q{}; pawn->ProcessEvent(fn, &q); teamBp = q.r; }
+    struct { uint8_t pb, pg, pr, pa, sb, sg, sr, sa; int32_t logo; SDK::FName name; SDK::FName row; } col{};
+    if (auto* fn = pawn->Class->GetFunction("VRPawn", "GetPawnCurrentTeamColor")) pawn->ProcessEvent(fn, &col);
+    auto* ps = *reinterpret_cast<void**>(p + 0x2B8);
+    const int psTeam = ps ? *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(ps) + 0x380) : -99;
+    const int fallback = static_cast<signed char>(*reinterpret_cast<uint8_t*>(p + 0x1D78));
+    const SDK::FVector l = pawn->K2_GetActorLocation();
+    char line[400];
+    snprintf(line, sizeof(line), "team(bp)=%d playerState.team=%d pawn+0x1D78=%d color primary=%u,%u,%u secondary=%u,%u,%u logo=%d name=%s",
+             teamBp, psTeam, fallback, col.pr, col.pg, col.pb, col.sr, col.sg, col.sb, col.logo, col.name.ToString().c_str());
+    static std::string s_last; static ULONGLONG s_lastAt = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (s_last != line || now - s_lastAt > 10000)
+    {
+        HxLog("[HalcyonA2][TEAMSTATE] %s %s at (%.0f, %.0f, %.0f)\n", NowStamp(), line, l.X, l.Y, l.Z);
+        s_last = line; s_lastAt = now;
+    }
+}
+
+// [2026-09-11 TEAMHOOK -- client only, LOG ONLY] Every way the client's pawn gets a team/colour goes through
+// one of these: AVRPawn team join sub_1454E4470 (pawn, ticket, FTeamColor*, team, TM, silent), colour+team
+// sub_1454E4E10 (pawn, FTeamColor*, team; Client_UpdateTeamColors exec and the paint zones), clear sub_1454E17E0.
+// Logs the value and the caller so a bad team index can be traced to its sender.
+using TeamJoin_t  = __int64(__fastcall*)(__int64, int, unsigned char*, unsigned char, __int64, char);
+using TeamColor_t = __int64(__fastcall*)(__int64, unsigned char*, unsigned char);
+using TeamClear_t = void(__fastcall*)(__int64);
+static TeamJoin_t  TeamJoin_Orig  = nullptr;
+static TeamColor_t TeamColor_Orig = nullptr;
+static TeamClear_t TeamClear_Orig = nullptr;
+static __int64 __fastcall TeamJoin_Hook(__int64 pawn, int ticket, unsigned char* col, unsigned char team, __int64 tm, char silent)
+{
+    HxLog("[HalcyonA2][TEAMHOOK] %s join team=%d ticket=%d primary=%u,%u,%u silent=%d caller=GAME+0x%llX\n", NowStamp(),
+          (int)(signed char)team, ticket, col ? col[2] : 0, col ? col[1] : 0, col ? col[0] : 0, (int)silent,
+          (unsigned long long)(reinterpret_cast<uintptr_t>(_ReturnAddress()) - GetBase()));
+    return TeamJoin_Orig(pawn, ticket, col, team, tm, silent);
+}
+static __int64 __fastcall TeamColor_Hook(__int64 pawn, unsigned char* col, unsigned char team)
+{
+    HxLog("[HalcyonA2][TEAMHOOK] %s colour team=%d primary=%u,%u,%u caller=GAME+0x%llX\n", NowStamp(),
+          (int)(signed char)team, col ? col[2] : 0, col ? col[1] : 0, col ? col[0] : 0,
+          (unsigned long long)(reinterpret_cast<uintptr_t>(_ReturnAddress()) - GetBase()));
+    return TeamColor_Orig(pawn, col, team);
+}
+static void __fastcall TeamClear_Hook(__int64 pawn)
+{
+    HxLog("[HalcyonA2][TEAMHOOK] %s clear caller=GAME+0x%llX\n", NowStamp(),
+          (unsigned long long)(reinterpret_cast<uintptr_t>(_ReturnAddress()) - GetBase()));
+    TeamClear_Orig(pawn);
+}
+// [2026-09-11 NVREAD -- client only] -HalcyonNvRead=<world path> logs this client's own copy of a world netvar
+// every 5s, to prove a server-side world override actually reaches players.
+static std::string g_nvReadPath;
+static void ClientNvRead()
+{
+    int type = -1; NvOrig v{};
+    const int rc = NvWorldAccess(g_nvReadPath, false, std::string(), &type, &v);
+    HxLog("[HalcyonA2][NVREAD] %s %s rc=%d type=%d value=%s\n", NowStamp(), g_nvReadPath.c_str(), rc, type,
+          rc == 1 ? NvOrigToString(type, v).c_str() : "-");
+}
+
+static void ClientInstallTeamHooks(uintptr_t base)
+{
+    MH_Initialize();
+    const int a = (int)MH_CreateHook(reinterpret_cast<void*>(base + 0x54E4470), &TeamJoin_Hook,  reinterpret_cast<void**>(&TeamJoin_Orig));
+    const int b = (int)MH_CreateHook(reinterpret_cast<void*>(base + 0x54E4E10), &TeamColor_Hook, reinterpret_cast<void**>(&TeamColor_Orig));
+    const int c = (int)MH_CreateHook(reinterpret_cast<void*>(base + 0x54E17E0), &TeamClear_Hook, reinterpret_cast<void**>(&TeamClear_Orig));
+    const int e = (int)MH_EnableHook(MH_ALL_HOOKS);
+    HxLog("[HalcyonA2][TEAMHOOK] installed join=%d colour=%d clear=%d enable=%d (0 = ok)\n", a, b, c, e);
+}
+
 static void ClientMain(uintptr_t base)
 {
     HxLog("[HalcyonA2][CLIENT] mock client mode, base=0x%llX\n", (unsigned long long)base);
@@ -10063,7 +11987,9 @@ static void ClientMain(uintptr_t base)
         ClientTryExitSpectator();
         if (g_clientExited && tick > 3) ClientRequestVoipTokens();   // only once we hold a real pawn
         if (g_clientDrive && g_clientInArena && tick > 6) ClientDriveActions();
-        ClientReportState();   // [BALLTEST] every second on BOTH clients, timestamped for correlation
+        if (g_clientInArena && tick > 6) { ClientScriptTick(); ClientTeamState(); }
+        if (!g_nvReadPath.empty() && tick > 8 && (tick % 5) == 0) ClientNvRead();
+        if (!g_noBallLog) ClientReportState();   // [BALLTEST] every second on BOTH clients, timestamped for correlation
     }
 }
 
@@ -10126,6 +12052,19 @@ static void Main(HMODULE)
     if (wcsstr(GetCommandLineW(), L"-HalcyonClient"))
     {
         if (wcsstr(GetCommandLineW(), L"-HalcyonDrive")) g_clientDrive = true;
+        if (wcsstr(GetCommandLineW(), L"-HalcyonNoBalls")) g_noBallLog = true;
+        if (const wchar_t* nr = wcsstr(GetCommandLineW(), L"-HalcyonNvRead="))
+        {
+            nr += wcslen(L"-HalcyonNvRead=");
+            while (*nr && *nr != L' ' && *nr != L'"') { g_nvReadPath += static_cast<char>(*nr); ++nr; }
+        }
+        if (const wchar_t* sc = wcsstr(GetCommandLineW(), L"-HalcyonScript="))
+        {
+            sc += wcslen(L"-HalcyonScript=");
+            std::wstring path;
+            while (*sc && *sc != L' ' && *sc != L'"') { path += *sc; ++sc; }
+            ClientLoadScript(path);
+        }
         if (const wchar_t* ap = wcsstr(GetCommandLineW(), L"-HalcyonArenaPos="))
         {
             ap += wcslen(L"-HalcyonArenaPos=");
@@ -10149,6 +12088,7 @@ static void Main(HMODULE)
             c += wcslen(L"-HalcyonConnect=");
             while (*c && *c != L' ' && *c != L'"') { g_clientConnect += *c; ++c; }
         }
+        if (wcsstr(GetCommandLineW(), L"-HalcyonTeamHooks")) ClientInstallTeamHooks(base);
         ClientMain(base);
         return;   // never falls through to the server path
     }
@@ -10379,6 +12319,8 @@ static void Main(HMODULE)
         if (wcsstr(GetCommandLineW(), L"-ReapOrphans")) { g_reapOrphans = true; HxLog("[HalcyonA2] -ReapOrphans: destroy VRPawns orphaned >30s (leak fix; destroys actors)\n"); }
         if (wcsstr(GetCommandLineW(), L"-HoldAuthority")) { g_holdAuthority = true; HxLog("[HalcyonA2] -HoldAuthority: held/streamed balls pinned to the client stream every frame (anti-teleport)\n"); }
         if (wcsstr(GetCommandLineW(), L"-NoBallOwnArb")) { g_ballOwnArb = false; HxLog("[HalcyonA2] -NoBallOwnArb: ball ownership arbitration OFF (legacy force-accept, last writer wins)\n"); }
+        if (wcsstr(GetCommandLineW(), L"-NoTeamClearGuard")) { g_teamClearGuard = false; HxLog("[HalcyonA2] -NoTeamClearGuard: ScrapRun team-clear suppression OFF (a death will take the runner off the team again)\n"); }
+        if (wcsstr(GetCommandLineW(), L"-SeatRound")) { g_seatRound = true; HxLog("[HalcyonA2] -SeatRound: round-start team seating back ON\n"); }
         if (wcsstr(GetCommandLineW(), L"-TeamOverlap")) { g_teamOverlap = true; HxLog("[HalcyonA2] -TeamOverlap: geometrically fire the runner team-changer overlap so ScrapRun rosters fill\n"); }
         if (const wchar_t* tr = wcsstr(GetCommandLineW(), L"-TeamRadius="))
         {
@@ -10409,7 +12351,12 @@ static void Main(HMODULE)
         char spleefbuf[32] = {};
         grab(L"-SpleefRadius=", spleefbuf, sizeof(spleefbuf));   // deathrun finish->overtime fire radius (default 2000)
         if (spleefbuf[0]) { double r = atof(spleefbuf); if (r > 0.0) g_spleefRadius = r; }
+        char spleefpad[32] = {};
+        grab(L"-SpleefPad=", spleefpad, sizeof(spleefpad));      // slack on the finish gate's thin axis
+        if (spleefpad[0]) { double v = atof(spleefpad); if (v >= 0.0) g_spleefPad = v; }
     }
+    printf("[HalcyonA2] deathrun finish gate = half(%.0f, %.0f, %.0f) + pad %.0f on the thin axis (-SpleefPad=N)\n",
+           g_spleefHalfX, g_spleefHalfY, g_spleefHalfZ, g_spleefPad);
     printf("[HalcyonA2] deathrun finish->spleef fire radius = %.0f (-SpleefRadius=N to tune)\n", g_spleefRadius);
     if (g_quietSims) printf("[HalcyonA2] -QuietSims: ball sim step + results-send + physics-sync DISABLED (player-lag A/B)\n");
     if (g_snapMarker[0]) printf("[HalcyonA2] -SnapToMarker='%s'\n", g_snapMarker);
@@ -10462,6 +12409,15 @@ static void Main(HMODULE)
     // [2026-09-03 ★ SCRAPRUN GATE] Force getBoolConfigVariable("bScraprunOpen")=true so the deathrun2/
     // ScraprunPrime gamemode.luau drops the ScraprunBlocker and enables the start button. See GetBoolCfg_Hook.
     {
+        {
+            void* nAddr = reinterpret_cast<void*>(base + GetNumCfg_RVA);
+            void* sAddr = reinterpret_cast<void*>(base + GetStrCfg_RVA);
+            MH_STATUS a = MH_CreateHook(nAddr, &GetNumCfg_Hook, reinterpret_cast<void**>(&GetNumCfg_Orig));
+            MH_STATUS b = MH_EnableHook(nAddr);
+            MH_STATUS c = MH_CreateHook(sAddr, &GetStrCfg_Hook, reinterpret_cast<void**>(&GetStrCfg_Orig));
+            MH_STATUS d = MH_EnableHook(sAddr);
+            printf("[HalcyonA2] NETVARS config getter hooks: number create=%d enable=%d, string create=%d enable=%d\n", a, b, c, d);
+        }
         void* scrAddr = reinterpret_cast<void*>(base + GetBoolCfg_RVA);   // sub_7FF67673A020
         MH_STATUS sScr  = MH_CreateHook(scrAddr, &GetBoolCfg_Hook, reinterpret_cast<void**>(&GetBoolCfg_Orig));
         MH_STATUS sScrE = MH_EnableHook(scrAddr);
