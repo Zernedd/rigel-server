@@ -6088,6 +6088,16 @@ static void SafeDetectRunnerAtFinish() { __try { DetectRunnerAtFinish(); } __exc
 // Fires ON ENTER ONLY, latched per player, like a real overlap -- never continuously. That latch is
 // the specific guard against the runaway that broke joins last time.
 static bool  g_teamOverlap = false;          // -TeamOverlap to enable
+// [2026-09-11 *** PERF: this is what made driftball laggy again] The geometric detector below walks
+// ALL of GObjects (166k on prod) at 4Hz doing IsA(VRPawn) per object. Measured on the live server:
+//     SafeDetectTeamChanger = 76-125 ms/s, peak 47ms in a SINGLE call
+//  -- a third of the DLL's whole game-thread budget, spent in 20-47ms stalls. The ball sim steps at
+// ~90Hz, so each stall eats 2-4 sim steps and the rollback sim then burst-catches-up: exactly the
+// jitter players see. Worse, its actual action (firing the switcher) has been DISABLED since
+// 2026-09-09 because round-start seating replaced it, so every one of those scans was pure waste.
+// Volume discovery (FindTeamVolumes, self-throttled to 10s) still runs -- seating and [ROSTER] need
+// it. -TeamOverlapFire brings the per-pawn detector back for debugging; cache the pawn list first.
+static bool  g_teamOverlapFire = false;      // -TeamOverlapFire to re-enable the 4Hz geometric scan
 static double g_teamRadius = 450.0;          // -TeamRadius=N
 static ULONGLONG g_lastTeamScan = 0;
 static long   g_teamOverlapFires = 0;
@@ -6243,6 +6253,8 @@ static void DetectPlayerAtTeamChanger()
 
     FindTeamVolumes();
     if (g_teamVolN == 0) return;
+    if (!g_teamOverlapFire) return;   // [2026-09-11 PERF] see g_teamOverlapFire: the scan below cost
+                                      // ~100ms/s of game thread for nothing. Discovery above is enough.
 
     SDK::UClass* pawnCls = SDK::UObject::FindClassFast("VRPawn");
     SDK::UClass* tcCls   = SDK::UObject::FindClassFast("TeamChangeComponent");
@@ -6315,7 +6327,8 @@ static void DetectPlayerAtTeamChanger()
             // and the roster poll showed 0->1, 1->0 oscillating. Round-start seating alone is the
             // deterministic path (it runs once per round, right after BEGIN_PLAY empties the roster),
             // so this one no longer fires. Volume discovery stays, purely for the [TEAMVOL] log.
-            continue;
+            // [2026-09-11] The kill switch moved up to g_teamOverlapFire so the SCAN is skipped too,
+            // not just the fire -- walking every UObject at 4Hz was itself the cost.
             const int32_t pidx = *reinterpret_cast<unsigned char*>(pw + 0x1C22);
             struct { int32_t PlayerIndex; } parms{ pidx };
             const int before = *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(g_teamVols[v].trigger) + 0x4DC);
@@ -12546,6 +12559,7 @@ static void Main(HMODULE)
         if (wcsstr(GetCommandLineW(), L"-NoTeamClearGuard")) { g_teamClearGuard = false; HxLog("[HalcyonA2] -NoTeamClearGuard: ScrapRun team-clear suppression OFF (a death will take the runner off the team again)\n"); }
         if (wcsstr(GetCommandLineW(), L"-SeatRound")) { g_seatRound = true; HxLog("[HalcyonA2] -SeatRound: round-start team seating back ON\n"); }
         if (wcsstr(GetCommandLineW(), L"-TeamOverlap")) { g_teamOverlap = true; HxLog("[HalcyonA2] -TeamOverlap: geometrically fire the runner team-changer overlap so ScrapRun rosters fill\n"); }
+        if (wcsstr(GetCommandLineW(), L"-TeamOverlapFire")) { g_teamOverlapFire = true; HxLog("[HalcyonA2] -TeamOverlapFire: 4Hz geometric team-changer scan ON (costs ~100ms/s of game thread)\n"); }
         if (const wchar_t* tr = wcsstr(GetCommandLineW(), L"-TeamRadius="))
         {
             const double v = _wtof(tr + 12);
