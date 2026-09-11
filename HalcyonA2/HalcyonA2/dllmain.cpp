@@ -9913,6 +9913,26 @@ static void PushRolesToOwningClient(__int64 pc, __int64* roles)
                                                  : "*** CANNOT ROUTE -- this runs locally on the server and the client never gets it ***");
         }
     }
+    // What is actually IN the roles we are about to push? A role with an empty permissions list would
+    // deliver fine and still fail HasPermission -- which looks identical to "the push never arrived".
+    {
+        static void* s_permLogged = nullptr;
+        const uintptr_t r0 = static_cast<uintptr_t>(roles[0]);
+        if (r0 && s_permLogged != obj)
+        {
+            s_permLogged = obj;
+            const int nperm = *reinterpret_cast<int*>(r0 + 0x48);
+            char first[96] = "-";
+            auto* pdata = *reinterpret_cast<wchar_t***>(r0 + 0x40);
+            if (pdata && nperm > 0)
+            {
+                auto* w = *reinterpret_cast<wchar_t**>(pdata);
+                if (w) { size_t k = 0; for (; k < 90 && w[k]; ++k) first[k] = static_cast<char>(w[k]); first[k] = 0; }
+            }
+            HxLog("[HalcyonA2][ROLES] role[0]: permissions=%d first='%s'%s\n", nperm, first,
+                  (nperm <= 0) ? "  *** EMPTY -- HasPermission can never pass no matter how well it replicates ***" : "");
+        }
+    }
     struct { void* Data; int32_t Num; int32_t Max; } parms{};
     parms.Data = reinterpret_cast<void*>(roles[0]);
     parms.Num  = num;
@@ -9974,6 +9994,45 @@ static void RePushRoles()
     }
 }
 static void SafeRePushRoles() { __try { RePushRoles(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+
+// [2026-09-11 -RolesTest] Answer "does Client_SetRoles actually reach the client?" on THIS machine instead
+// of through another headset round-trip. Build one FRoleResponse (stride 0x50) carrying a single permission
+// string "global_voip" (permissions TArray at +0x40/+0x48, exactly what HasPermission walks) and push it to
+// every possessed controller. The client side prints its own PC+0xA48 via -HalcyonVoipState, so the pair of
+// logs says outright whether the RPC crossed the wire.
+static bool g_rolesTest = false;
+static void RolesTestPush()
+{
+    if (!g_rolesTest) return;
+    static ULONGLONG s_last = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (now - s_last < 5000) return;
+    s_last = now;
+    static SDK::UClass* pcCls = nullptr;
+    if (!pcCls) pcCls = SDK::UObject::FindClassFast("VRPlayerController");
+    if (!pcCls) return;
+    static wchar_t s_perm[] = L"global_voip";
+    static struct { wchar_t* Data; int32_t Num; int32_t Max; } s_permStr{ s_perm, 12, 12 };
+    static unsigned char s_role[0x50] = {};
+    *reinterpret_cast<void**>(s_role + 0x40)   = &s_permStr;   // permissions.Data
+    *reinterpret_cast<int32_t*>(s_role + 0x48) = 1;            // permissions.Num
+    *reinterpret_cast<int32_t*>(s_role + 0x4C) = 1;            // permissions.Max
+    for (SDK::UObject* o : ClassObjects(pcCls))
+    {
+        const uintptr_t p = reinterpret_cast<uintptr_t>(o);
+        if (!*reinterpret_cast<void**>(p + 0xA50)) continue;   // server-side possessed controller only
+        static SDK::UFunction* fn = nullptr;
+        if (!fn && o->Class) fn = o->Class->GetFunction("VRPlayerController", "Client_SetRoles");
+        if (!fn) return;
+        struct { void* Data; int32_t Num; int32_t Max; } parms{ s_role, 1, 1 };
+        o->ProcessEvent(fn, &parms);
+        static int s_n = 0;
+        if (++s_n <= 6)
+            HxLog("[HalcyonA2][ROLESTEST] pushed a fabricated global_voip role to %s (server-side +0xA48 now %d)\n",
+                  o->GetName().c_str(), *reinterpret_cast<int*>(p + 0xA48));
+    }
+}
+static void SafeRolesTestPush() { __try { RolesTestPush(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
 
 // [2026-09-11 QUEST RE-PUSH] Why quests never appeared on real clients (traced in IDA):
 // A client switches its quests on in exactly one place, sub_14468C8E0 (sets ClientProgression+0x3D9 and
@@ -11226,6 +11285,7 @@ static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, v
         PROF(SafeDetectTeamChanger);   // [TEAMVOL] fire the real team-changer overlap (headless never does)
         PROF(SafePollTeamRosters);   // [ROSTER] catch the exact moment of removal
         PROF(SafeRePushRoles);       // [ROLES] re-send station roles to owning clients (god voice)
+        PROF(SafeRolesTestPush);     // [ROLESTEST] -RolesTest: local proof that Client_SetRoles crosses the wire
         // Fallback only: if the tick above somehow doesn't advance a GSM out of GAME_BEGIN within ~11s,
         // force it to RUNNING via the NetVar (skips the Luau onEnter). Disarmed automatically the moment
         // the tick's onCountdownEnd drives updateGameState(5). See WatchdogGameBegin.
@@ -12499,13 +12559,32 @@ static void ClientVoipStateImpl()
     // disassembled (that is the code that decides whether the PTT channel session at +0x118 is ever made).
     void* impl = nullptr;
     if (comms) { void** vt = *reinterpret_cast<void***>(comms); if (vt) impl = vt[0x4B8 / 8]; }
-    char line[420];
+    // The client's own StationDashboardRoles -- what HasPermission("global_voip") actually walks.
+    const int myRoles = *reinterpret_cast<int*>(pc + 0xA48);
+    void* myRolesData = *reinterpret_cast<void**>(pc + 0xA40);
+    // Roles arriving is not enough: HasPermission walks each role's permissions TArray (+0x40 data,
+    // +0x48 num, FString stride 0x10). Print what actually landed inside role[0].
+    int   myPerms = -1;
+    char  perm0[80] = "-";
+    if (myRolesData && myRoles > 0)
+    {
+        const uintptr_t r0 = reinterpret_cast<uintptr_t>(myRolesData);
+        myPerms = *reinterpret_cast<int*>(r0 + 0x48);
+        auto* pdata = *reinterpret_cast<wchar_t***>(r0 + 0x40);
+        if (pdata && myPerms > 0)
+        {
+            auto* w = *reinterpret_cast<wchar_t**>(pdata);
+            if (w) { size_t k = 0; for (; k < 70 && w[k]; ++k) perm0[k] = static_cast<char>(w[k]); perm0[k] = 0; }
+        }
+    }
+    char line[520];
     snprintf(line, sizeof(line),
-             "recvTokensImpl=RVA_%llX | comms=%p helper=%p | TXMODE(+0x148)=%d %s | login(+0x160)=%p state=%d | PTT(+0x118)=%p state=%d | spatial(+0x110)=%p state=%d | transmitting(+0x120)=%d",
+             "MYROLES(+0xA48)=%d data=%p perms=%d perm0='%s' | recvTokensImpl=RVA_%llX | comms=%p helper=%p | TXMODE(+0x148)=%d %s | login(+0x160)=%p state=%d | PTT(+0x118)=%p state=%d | spatial(+0x110)=%p state=%d | transmitting(+0x120)=%d",
+             myRoles, myRolesData, myPerms, perm0,
              impl ? static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(impl) - GetBase()) : 0ULL,
              comms, reinterpret_cast<void*>(h), mode, (mode == 1) ? "OK" : "*** BLOCKS GOD VOICE ***",
              loginSess, loginState, pttSess, pttState, spatialSess, spatialState, txFlag);
-    static char s_last[420] = {};
+    static char s_last[520] = {};
     static ULONGLONG s_at = 0;
     if (strcmp(line, s_last) != 0 || GetTickCount64() - s_at > 30000)
     {
@@ -12904,6 +12983,7 @@ static void Main(HMODULE)
         if (wcsstr(GetCommandLineW(), L"-NoTeamClearGuard")) { g_teamClearGuard = false; HxLog("[HalcyonA2] -NoTeamClearGuard: ScrapRun team-clear suppression OFF (a death will take the runner off the team again)\n"); }
         if (wcsstr(GetCommandLineW(), L"-SeatRound")) { g_seatRound = true; HxLog("[HalcyonA2] -SeatRound: round-start team seating back ON\n"); }
         if (wcsstr(GetCommandLineW(), L"-TeamOverlap")) { g_teamOverlap = true; HxLog("[HalcyonA2] -TeamOverlap: geometrically fire the runner team-changer overlap so ScrapRun rosters fill\n"); }
+        if (wcsstr(GetCommandLineW(), L"-RolesTest")) { g_rolesTest = true; HxLog("[HalcyonA2] -RolesTest: push a fabricated global_voip role to every client (delivery test)\n"); }
         if (wcsstr(GetCommandLineW(), L"-TeamOverlapFire")) { g_teamOverlapFire = true; HxLog("[HalcyonA2] -TeamOverlapFire: 4Hz geometric team-changer scan ON (costs ~100ms/s of game thread)\n"); }
         if (const wchar_t* tr = wcsstr(GetCommandLineW(), L"-TeamRadius="))
         {
