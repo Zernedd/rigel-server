@@ -10478,9 +10478,22 @@ static double  g_heartPlaceM   = 1.5;
 // the actual shape rather than a guess.
 static int32_t g_idxSetCosmetic = 0;
 static int32_t g_idxSetColor    = 0;   // A2PlayerEntity::Server_SetCurrentColor   // -HeartPlace=N metres of error before we move it (0 = never)
-struct HeartWatch { void* pawn; ULONGLONG at; double want[3]; bool placed; };
+struct HeartWatch { void* pawn; void* ball; ULONGLONG at; ULONGLONG holdUntil; double want[3]; bool placed; };
+static int g_heartHoldMs = 2000;   // -HeartHold=N ms to defend the placement (0 = don't)
+
 static HeartWatch g_heartWatch[16];
 static int        g_heartWatchN = 0;
+// [2026-09-12] Is this actor a heart ball we have just placed and are still defending? While that is
+// true the owning client's physics stream for it is dropped -- see the call site for why.
+static bool HeartHoldActive(void* actor)
+{
+    if (!actor || g_heartHoldMs <= 0) return false;
+    const ULONGLONG now = GetTickCount64();
+    for (int i = 0; i < g_heartWatchN; ++i)
+        if (g_heartWatch[i].ball == actor && g_heartWatch[i].placed && now < g_heartWatch[i].holdUntil)
+            return true;
+    return false;
+}
 // [2026-09-09] HandleFiringClearerOverlapOnServer is the switcher's counterpart -- it REMOVES a
 // player from a team. Both are reflected UFunctions, so any call the GAME makes passes through
 // ProcessEvent and can simply be observed. This is what tells us whether the clearer is responsible.
@@ -10692,6 +10705,26 @@ static void TraceBallRpc(SDK::UObject* Context, SDK::UFunction* Function, void* 
     }
     else if (idx == g_idxSendPhys)
     {
+        // [2026-09-12 HEARTBALL] Defend a just-placed heart ball. The client owns this prop and keeps
+        // streaming the position its own copy fell to, which the server accepts -- overwriting the spot
+        // we put the ball in. Swallow that stream for the hold window so the server position is the one
+        // that replicates and the client snaps to it. Only ever affects a ball we placed this second.
+        {
+            struct SPHold { SDK::AActor* Actor; };
+            auto* ph = reinterpret_cast<SPHold*>(Parms);
+            if (ph && HeartHoldActive(ph->Actor))
+            {
+                static uint64_t s_lastHold = 0; const uint64_t nowH = GetTickCount64();
+                if (nowH - s_lastHold > 500)
+                {
+                    s_lastHold = nowH;
+                    HxLog("[HalcyonA2][HEARTBALL] holding %s: dropping the owner's physics stream so our placement replicates\n",
+                          ph->Actor ? ph->Actor->GetName().c_str() : "<null>");
+                }
+                return;   // never reaches the game's handler -> the client's position is not applied
+            }
+        }
+
         // Is the server still treating the sender as the ball's owner when the stream arrives? If
         // ownership has been reclaimed (UA2PhysicsSync::ServerReclaimOwnership) the implementation
         // silently drops every streamed update, which looks exactly like "the hit did nothing".
@@ -11072,6 +11105,8 @@ static void HeartSpawnTrace(SDK::UObject* Context, void* Parms)
         g_heartWatch[g_heartWatchN].want[1] = loc[1];
         g_heartWatch[g_heartWatchN].want[2] = loc[2];
         g_heartWatch[g_heartWatchN].placed  = false;
+        g_heartWatch[g_heartWatchN].ball    = nullptr;
+        g_heartWatch[g_heartWatchN].holdUntil = 0;
         ++g_heartWatchN;
     }
 }
@@ -11115,7 +11150,24 @@ static void HeartSpawnFollowUp()
             ba->K2_SetActorLocation(want, false, &hit, true);   // teleport: no sweep, no interpolation
             HxLog("[HalcyonA2][HEARTBALL] moved it onto the requested hand position (%.0f,%.0f,%.0f)\n",
                   want.X, want.Y, want.Z);
-            g_heartWatch[i].placed = true;      // re-sample once so the log shows whether it stuck
+            // Placing it once is not enough: the ball is CLIENT-driven. The owning client keeps
+            // streaming its own copy -- which is still falling out of the world from the bad spawn
+            // (traced at Z=-128000 while ours sits at -28600) -- and the server accepts it, so our
+            // placement is overwritten within a frame. Defend it: hold the position for a moment and
+            // drop that client stream (see HeartHoldActive) so the server copy is what replicates.
+            g_heartWatch[i].placed    = true;
+            g_heartWatch[i].ball      = ball;
+            g_heartWatch[i].holdUntil = now + static_cast<ULONGLONG>(g_heartHoldMs);
+            g_heartWatch[i].at = now;
+            ++i;
+            continue;
+        }
+        if (ball && g_heartWatch[i].placed && now < g_heartWatch[i].holdUntil)
+        {
+            auto* ba = static_cast<SDK::AActor*>(ball);
+            SDK::FVector want{ g_heartWatch[i].want[0], g_heartWatch[i].want[1], g_heartWatch[i].want[2] };
+            SDK::FHitResult hit{};
+            ba->K2_SetActorLocation(want, false, &hit, true);   // re-assert while we hold the client off
             g_heartWatch[i].at = now;
             ++i;
             continue;
@@ -13242,6 +13294,7 @@ static void Main(HMODULE)
         if (const wchar_t* a = wcsstr(GetCommandLineW(), L"-NetCrowd="))    { int v = _wtoi(a + 11); if (v >  0 && v < 200)  g_netCrowd    = v; }
         if (const wchar_t* a = wcsstr(GetCommandLineW(), L"-NetCullM="))    { int v = _wtoi(a + 10); if (v > 10 && v < 5000) g_netCullM    = v; }
         if (const wchar_t* a = wcsstr(GetCommandLineW(), L"-NetBudgetKB=")) { int v = _wtoi(a + 13); if (v > 10 && v < 5000) g_netBudgetKB = v; }
+        if (const wchar_t* hh = wcsstr(GetCommandLineW(), L"-HeartHold=")) { const int v=_wtoi(hh+11); if (v>=0 && v<20000) g_heartHoldMs=v; }
         if (const wchar_t* hp = wcsstr(GetCommandLineW(), L"-HeartPlace=")) { const double v=_wtof(hp+12); if (v>=0.0 && v<1000.0) g_heartPlaceM=v; }
         if (wcsstr(GetCommandLineW(), L"-RolesTest")) { g_rolesTest = true; HxLog("[HalcyonA2] -RolesTest: push a fabricated global_voip role to every client (delivery test)\n"); }
         if (wcsstr(GetCommandLineW(), L"-TeamOverlapFire")) { g_teamOverlapFire = true; HxLog("[HalcyonA2] -TeamOverlapFire: 4Hz geometric team-changer scan ON (costs ~100ms/s of game thread)\n"); }
