@@ -51,6 +51,12 @@ const char* kEosGateway = "https://rigel-eos.wwiggles.org";   // our EOS gateway
 // hand the SDK must outlive the call.
 static const char* const kOurAppId = "1366120006579163";
 
+// Defined in the EOS section below, declared here: the GetProcAddress hook installs the curl redirect
+// the moment EOS_Initialize is resolved (before EOS_Platform_Create fetches the endpoint table).
+void HookEosCurl();
+static bool          g_eosDone  = false;
+static volatile long g_eosGuard = 0;
+
 // A discreet breadcrumb so a first live launch can be confirmed without a console. OFF by default so a
 // shipped build writes nothing at all; set RIGEL_EOS_DIAG=1 before launching to turn it on for one run.
 // Written next to the game exe; harmless if it cannot be created. One line per notable event.
@@ -251,6 +257,14 @@ FARPROC WINAPI my_GetProcAddress(HMODULE mod, LPCSTR name)
             Note("[appid] intercepted GetProcAddress(ovr_PlatformInitializeWindows)");
             return reinterpret_cast<FARPROC>(&my_ovr_init);
         }
+        // The SDK resolves EOS_Initialize before it does anything with EOS. That is our cue to get the
+        // curl redirect in BEFORE EOS_Platform_Create fetches (and caches) the endpoint table -- which is
+        // the request that decides, for the whole session, whether auth goes to our gateway or real EOS.
+        if (!g_eosDone && strcmp(name, "EOS_Initialize") == 0)
+        {
+            Note("[eos] EOS_Initialize resolved -- installing curl redirect now");
+            HookEosCurl();
+        }
     }
     return real;
 }
@@ -269,41 +283,58 @@ bool InstallAppIdHook()
     return true;
 }
 
-void InstallEosRedirect()
+// [2026-09-12] TIMING is everything here. A live run proved the redirect was installing too late: the
+// EOS SDK fetches its endpoint table (/sdk/v1/product) at EOS_Platform_Create, caches whatever hosts it
+// gets, and then does ALL auth against those. If our curl hook is not in place for that FIRST fetch, the
+// SDK talks to the REAL epicgames.dev, caches real endpoints, and the whole session's auth goes there --
+// the client saw HTTP 401 "Unauthorized Oculus user ID and nonce" from real EOS, and our gateway logged
+// nothing at all for that run.
+//
+// So the curl hook MUST be in before EOS_Platform_Create. EOSSDK is loaded dynamically and the game
+// resolves its exports with GetProcAddress, so the app-id GetProcAddress hook already sees EOS_Initialize
+// (the very first EOS call) being looked up -- hook curl right there, before the SDK is used. Idempotent
+// and serialised so the worker's fallback poll and the GetProcAddress path can't collide.
+void HookEosCurl()
 {
-    // The EOS SDK DLL is loaded by the game a little after start-up. Wait for it (up to ~60s), then
-    // hook once.
-    HMODULE eos = nullptr;
-    for (int i = 0; i < 120 && !eos; ++i)
+    if (g_eosDone) return;
+    if (InterlockedCompareExchange(&g_eosGuard, 1, 0) != 0) return;   // someone else is doing it
+    HMODULE eos = GetModuleHandleA("EOSSDK-Win64-Shipping.dll");
+    if (eos)
     {
-        eos = GetModuleHandleA("EOSSDK-Win64-Shipping.dll");
-        if (!eos) Sleep(500);
+        uint8_t* target = FindCurlSetopt(eos);
+        if (!target) Note("[eos] curl_easy_setopt signature not found -- redirect off");
+        else if (MH_Initialize() != MH_OK && MH_Initialize() != MH_ERROR_ALREADY_INITIALIZED)
+            Note("[eos] MH_Initialize failed");
+        else if (MH_CreateHook(target, reinterpret_cast<void*>(&my_curl_setopt),
+                               reinterpret_cast<void**>(&g_setoptOrig)) != MH_OK)
+            Note("[eos] MH_CreateHook failed");
+        else if (MH_EnableHook(target) != MH_OK)
+            Note("[eos] MH_EnableHook failed");
+        else
+        {
+            g_eosDone = true;
+            Note("[eos] curl_easy_setopt hooked at +0x%llx; epicgames.dev -> %s",
+                 (unsigned long long)(target - reinterpret_cast<uint8_t*>(eos)), kEosGateway);
+        }
     }
-    if (!eos) { Note("[eos] EOSSDK never loaded -- redirect off"); return; }
-
-    uint8_t* target = FindCurlSetopt(eos);
-    if (!target) { Note("[eos] curl_easy_setopt signature not found -- redirect off"); return; }
-
-    if (MH_Initialize() != MH_OK && MH_Initialize() != MH_ERROR_ALREADY_INITIALIZED)
-    { Note("[eos] MH_Initialize failed"); return; }
-    if (MH_CreateHook(target, reinterpret_cast<void*>(&my_curl_setopt),
-                      reinterpret_cast<void**>(&g_setoptOrig)) != MH_OK)
-    { Note("[eos] MH_CreateHook failed"); return; }
-    if (MH_EnableHook(target) != MH_OK)
-    { Note("[eos] MH_EnableHook failed"); return; }
-
-    Note("[eos] curl_easy_setopt hooked at +0x%llx; epicgames.dev -> %s",
-         (unsigned long long)(target - reinterpret_cast<uint8_t*>(eos)), kEosGateway);
+    InterlockedExchange(&g_eosGuard, 0);
 }
 
 DWORD WINAPI Worker(LPVOID)
 {
-    // Phase 1 -- app id. Install the GetProcAddress interceptor immediately, well before the plugin
-    // resolves the platform init (~9s in). Race-free: we substitute at resolution, not at the call.
+    // Install the GetProcAddress interceptor immediately. It does two time-critical jobs at resolution
+    // time, both before the game uses the thing being resolved: substitutes our app id when the platform
+    // init is looked up, and installs the EOS curl hook when EOS_Initialize is looked up.
     InstallAppIdHook();
 
-    // Phase 2 -- EOS station-browser redirect. Not time-critical (stations are browsed after login).
-    InstallEosRedirect();
+    // Fallback only: if the GetProcAddress path ever misses EOS_Initialize, still get the curl hook in as
+    // soon as the module is present. Tight poll early (the SDK loads within a few seconds), then relax.
+    for (int i = 0; i < 4000 && !g_eosDone; ++i)
+    {
+        HookEosCurl();
+        Sleep(g_eosDone ? 0 : (i < 400 ? 5 : 250));
+    }
+    if (!g_eosDone) Note("[eos] never hooked curl -- EOS traffic will hit the real backend");
     return 0;
 }
 
