@@ -2552,6 +2552,17 @@ static const std::vector<SDK::UObject*>& ClassObjects(SDK::UClass* cls)
     return b->view;
 }
 
+// [2026-09-11 *** CRASH FIX] Is `o` still the live object at the GObjects slot it was found at?
+// Consumers below cache object pointers for seconds at a time and then call into them. When the GC frees
+// one in between, the cached pointer is a dangling read -- which is the crash we actually recorded on
+// prod: SetGenerateOverlapEvents +0x5B faulting on RCX+0x268 with a freed component in RCX, reached from
+// PumpBallOverlaps. The SEH wrapper usually swallows it, but under 70 players one escaped and killed the
+// server. One chunk lookup per item is far cheaper than an exception, never mind a process.
+static inline bool ObjAliveAt(SDK::UObject* o, int32_t idx)
+{
+    return o && idx >= 0 && SDK::UObject::GObjects->GetByIndex(idx) == o;
+}
+
 // Same list, but with the GObjects index kept — for callers that cache indices and re-resolve later.
 static const std::vector<ObjIdxEntry>& ClassObjectEntries(SDK::UClass* cls)
 {
@@ -2624,6 +2635,8 @@ static void PumpPhysicsSync()
     // (a ball nobody is near is invisible to everyone -> no reason to replicate it -> the 7 unwatched
     // arenas stop flooding). Proximity IS the "occupied arena" gate, no slot bookkeeping needed.
     static SDK::UObject* syncs[512]; static int nSync = 0;
+    static int32_t syncSlot[512];   // [2026-09-11 CRASH FIX] slot of each cached entry, checked before use (see ObjAliveAt)
+
     static SDK::FVector players[64]; static int nPlayers = 0;
     static ULONGLONG lastRebuild = 0;
     const ULONGLONG now = GetTickCount64();
@@ -2664,10 +2677,10 @@ static void PumpPhysicsSync()
         // [2026-09-11 PERF] shared class index instead of a full GObjects walk (see ObjIndexTick).
         // Two lists off one shared pass; the `else if` exclusivity of the old single loop is kept by
         // skipping anything already counted as a sync component.
-        for (SDK::UObject* o : ClassObjects(cls))
+        for (const ObjIdxEntry& e : ClassObjectEntries(cls))
         {
             if (nSync >= 512) break;
-            syncs[nSync++] = o;
+            syncSlot[nSync] = e.idx; syncs[nSync++] = e.obj;
         }
         if (pawnCls)
             for (SDK::UObject* o : ClassObjects(pawnCls))
@@ -2689,6 +2702,7 @@ static void PumpPhysicsSync()
     for (int i = 0; i < nSync; ++i)
     {
         auto* o = syncs[i];
+        if (!ObjAliveAt(o, syncSlot[i])) continue;   // freed since the rebuild
         // SendLatestData derefs PropMovement(@0xA8) + its UpdatedComponent(@0xA8); both null on
         // pooled/inactive components (the null+0x252 crash). Guard, and reuse UpdatedComponent to
         // get the ball's world position for the proximity gate.
@@ -5755,6 +5769,8 @@ static void PumpBallOverlaps()
     static SDK::UObject* discs[128]; static int nDisc = 0;
     static SDK::UObject* phys[512];  static int nPhys = 0;
     static SDK::UObject* goals[64];  static int nGoal = 0;
+    // GObjects slot of each cached entry, so we can prove it is still alive before touching it.
+    static int32_t discSlot[128], physSlot[512], goalSlot[64];
     static ULONGLONG lastRebuild = 0;
     const ULONGLONG now = GetTickCount64();
         // Same per-tick full-scan trap as the other caches: an empty result must not mean
@@ -5788,20 +5804,21 @@ static void PumpBallOverlaps()
         // [2026-09-11 PERF] shared class index instead of a full GObjects walk (see ObjIndexTick).
         // Three lists off one shared pass, keeping the old loop's first-match-wins exclusivity.
         if (discCls)
-            for (SDK::UObject* o : ClassObjects(discCls)) { if (nDisc >= 128) break; discs[nDisc++] = o; }
+            for (const ObjIdxEntry& e : ClassObjectEntries(discCls))
+            { if (nDisc >= 128) break; discSlot[nDisc] = e.idx; discs[nDisc++] = e.obj; }
         if (physCls)
-            for (SDK::UObject* o : ClassObjects(physCls))
+            for (const ObjIdxEntry& e : ClassObjectEntries(physCls))
             {
                 if (nPhys >= 512) break;
-                if (discCls && o->IsA(discCls)) continue;
-                phys[nPhys++] = o;
+                if (discCls && e.obj->IsA(discCls)) continue;
+                physSlot[nPhys] = e.idx; phys[nPhys++] = e.obj;
             }
         if (goalCls)
-            for (SDK::UObject* o : ClassObjects(goalCls))
+            for (const ObjIdxEntry& e : ClassObjectEntries(goalCls))
             {
                 if (nGoal >= 64) break;
-                if ((discCls && o->IsA(discCls)) || (physCls && o->IsA(physCls))) continue;
-                goals[nGoal++] = o;
+                if ((discCls && e.obj->IsA(discCls)) || (physCls && e.obj->IsA(physCls))) continue;
+                goalSlot[nGoal] = e.idx; goals[nGoal++] = e.obj;
             }
     }
 
@@ -5841,6 +5858,7 @@ static void PumpBallOverlaps()
             // Disc side: the ball's root primitive AND its SphereComponent@0x4D0 (the real
             // collision body; the root may be a non-colliding scene component).
             auto* o = discs[idx];
+            if (!ObjAliveAt(o, discSlot[idx])) continue;   // GC'd since the rebuild -> do NOT touch it
             auto* a = static_cast<SDK::AActor*>(o);
             auto* root = a->RootComponent;
             if (root && root->IsA(primCls))
@@ -5856,6 +5874,7 @@ static void PumpBallOverlaps()
         {
             // Trigger side: force each PhysicalComponent's Collider@0x4F0 to generate events and
             // re-check, so both sides of the overlap generate events.
+            if (!ObjAliveAt(phys[idx - nDisc], physSlot[idx - nDisc])) continue;   // freed since the rebuild
             void* collider = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(phys[idx - nDisc]) + 0x4F0);
             if (collider && static_cast<SDK::UObject*>(collider)->IsA(primCls))
             {
@@ -5866,6 +5885,7 @@ static void PumpBallOverlaps()
         else
         {
             // Goal side: UGoalComponent's trigger is a UStaticMeshComponent@0x5A0.
+            if (!ObjAliveAt(goals[idx - nDisc - nPhys], goalSlot[idx - nDisc - nPhys])) continue;   // freed since the rebuild
             void* collider = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(goals[idx - nDisc - nPhys]) + 0x5A0);
             if (collider && static_cast<SDK::UObject*>(collider)->IsA(primCls))
             {
@@ -7000,6 +7020,8 @@ static void DetectGoals()
     // by the SafeDetectGoals SEH wrapper + refreshed on the next rebuild.
     static SDK::UObject* gObj[64]; static SDK::FVector gOrg[64]; static SDK::FVector gExt[64]; static int gN = 0;
     static SDK::UObject* bObj[256]; static int bN = 0;
+    static int32_t gSlot[64], bSlot[256];   // [2026-09-11 CRASH FIX] slot of each cached entry, checked before use (see ObjAliveAt)
+
     static ULONGLONG lastRebuild = 0;
     const ULONGLONG now = GetTickCount64();
         // NOTE: this guard used to read "|| gN == 0", which meant that whenever the scan found
@@ -7029,8 +7051,9 @@ static void DetectGoals()
         lastRebuild = now;
         gN = 0; bN = 0;
         // [2026-09-11 PERF] shared class index instead of a full GObjects walk (see ObjIndexTick).
-        for (SDK::UObject* o : ClassObjects(goalCls))
+        for (const ObjIdxEntry& e : ClassObjectEntries(goalCls))
         {
+            SDK::UObject* o = e.obj; const int32_t eSlot = e.idx;
             if (gN >= 64) break;
             {
                 const uintptr_t p = reinterpret_cast<uintptr_t>(o);
@@ -7047,18 +7070,18 @@ static void DetectGoals()
                     kslCDO->ProcessEvent(fnBounds, &bp);
                     BoundsMemoPut(bp.Component, bp.Origin, bp.BoxExtent);
                 }
-                gObj[gN] = o; gOrg[gN] = bp.Origin; gExt[gN] = bp.BoxExtent; ++gN;
+                gSlot[gN] = eSlot; gObj[gN] = o; gOrg[gN] = bp.Origin; gExt[gN] = bp.BoxExtent; ++gN;
             }
         }
-        for (SDK::UObject* o : ClassObjects(ballCls))
+        for (const ObjIdxEntry& e : ClassObjectEntries(ballCls))
         {
             if (bN >= 256) break;
-            if (o->IsA(goalCls)) continue;   // keep the old loop's first-match-wins exclusivity
-            bObj[bN++] = o;
+            if (e.obj->IsA(goalCls)) continue;   // keep the old loop's first-match-wins exclusivity
+            bSlot[bN] = e.idx; bObj[bN++] = e.obj;
         }
         int gEnabled = 0;
         for (int g = 0; g < gN; ++g)
-            if (*reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(gObj[g]) + 0x5A9)) ++gEnabled;
+            if (ObjAliveAt(gObj[g], gSlot[g]) && *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(gObj[g]) + 0x5A9)) ++gEnabled;
         // Log only on change: HxLog is a file write, on the game thread.
         static int s_lgN = -1, s_lgE = -1, s_lbN = -1;
         if (gN != s_lgN || gEnabled != s_lgE || bN != s_lbN)
@@ -7073,6 +7096,7 @@ static void DetectGoals()
     for (int b = 0; b < bN; ++b)
     {
         auto* o = bObj[b];
+        if (!ObjAliveAt(o, bSlot[b])) continue;   // freed since the rebuild
         auto* a = static_cast<SDK::AActor*>(o);
         if (!a || !a->RootComponent)
             continue;
@@ -7081,6 +7105,7 @@ static void DetectGoals()
         for (int g = 0; g < gN; ++g)
         {
             // goal must be ENABLED right now (checked live, not at cache time)
+            if (!ObjAliveAt(gObj[g], gSlot[g])) continue;   // freed since the rebuild
             if (*reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(gObj[g]) + 0x5A9) == 0) continue;
             // inside the goal's world AABB (+ margin)?
             if (fabs(bp.X - gOrg[g].X) > gExt[g].X + MARGIN) continue;
@@ -7220,6 +7245,7 @@ static void GolfSinkDetect()
     static std::unordered_set<void*> ballInCup;   // edge-trigger: score once per entry, re-arm on exit
     const double MARGIN = 30.0;
 
+    static int32_t cSlot[64], bSlotG[256];   // [2026-09-11 CRASH FIX] slots for the liveness check before use (see ObjAliveAt)
     static SDK::UObject* cObj[64]; static SDK::FVector cOrg[64]; static SDK::FVector cExt[64];
     static SDK::UObject* cComp[64]; static int cN = 0;   // cComp = the cup's GolfCupComponent (networked BallInCup)
     static SDK::UObject* bObj[256]; static int bNg = 0;
@@ -7255,8 +7281,9 @@ static void GolfSinkDetect()
         SDK::UObject* compTmp[128]; int nComp = 0;
         // [2026-09-11 PERF] shared class index instead of a full GObjects walk (see ObjIndexTick).
         // Three lists off one shared pass, keeping the old loop's first-match-wins exclusivity.
-        for (SDK::UObject* o : ClassObjects(cupCls))
+        for (const ObjIdxEntry& e : ClassObjectEntries(cupCls))
         {
+            SDK::UObject* o = e.obj;
             if (cN >= 64) break;
             auto* vol = *reinterpret_cast<SDK::USceneComponent**>(reinterpret_cast<uintptr_t>(o) + 0x2B8); // GoalTriggerVolume
             if (!vol) continue;
@@ -7266,7 +7293,7 @@ static void GolfSinkDetect()
                 kslCDO->ProcessEvent(fnBounds, &bp);
                 BoundsMemoPut(bp.Component, bp.Origin, bp.BoxExtent);
             }
-            cObj[cN] = o; cOrg[cN] = bp.Origin; cExt[cN] = bp.BoxExtent; cComp[cN] = nullptr; ++cN;
+            cSlot[cN] = e.idx; cObj[cN] = o; cOrg[cN] = bp.Origin; cExt[cN] = bp.BoxExtent; cComp[cN] = nullptr; ++cN;
         }
         if (compCls)
             for (SDK::UObject* o : ClassObjects(compCls))
@@ -7275,11 +7302,11 @@ static void GolfSinkDetect()
                 if (o->IsA(cupCls)) continue;
                 compTmp[nComp++] = o;
             }
-        for (SDK::UObject* o : ClassObjects(ballCls))
+        for (const ObjIdxEntry& e : ClassObjectEntries(ballCls))
         {
             if (bNg >= 256) break;
-            if (o->IsA(cupCls) || (compCls && o->IsA(compCls))) continue;
-            bObj[bNg++] = o;
+            if (e.obj->IsA(cupCls) || (compCls && e.obj->IsA(compCls))) continue;
+            bSlotG[bNg] = e.idx; bObj[bNg++] = e.obj;
         }
         // Match each cup to its GolfCupComponent by walking the component's Outer chain up to the cup —
         // that component's BallInCup PUBLISHES over the bridge (networked); the cup actor's doesn't.
@@ -7444,6 +7471,8 @@ static void VolleyfallTick()
 
     static SDK::UObject* pObj[128]; static SDK::FVector pOrg[128]; static SDK::FVector pExt[128]; static int pN = 0;
     static SDK::UObject* bObj[128]; static int bN = 0;
+    static int32_t pSlot[128], bSlotV[128];   // [2026-09-11 CRASH FIX] slots for the liveness check before use (see ObjAliveAt)
+
     static SDK::UObject* sObj[16]; static int sN = 0;   // BallSpawnerComponents
     static SDK::UFunction* fnOverlap = nullptr;
     static SDK::UFunction* fnReset = nullptr;           // BP_FloorPanelB_LE_C::ResetPanel
@@ -7479,8 +7508,9 @@ static void VolleyfallTick()
         double zSum = 0.0;
         // [2026-09-11 PERF] shared class index instead of a full GObjects walk (see ObjIndexTick).
         // Three lists off one shared pass, keeping the old loop's first-match-wins exclusivity.
-        for (SDK::UObject* o : ClassObjects(panelCls))
+        for (const ObjIdxEntry& e : ClassObjectEntries(panelCls))
         {
+            SDK::UObject* o = e.obj;
             if (pN >= 128) break;
             auto* mesh = *reinterpret_cast<SDK::USceneComponent**>(reinterpret_cast<uintptr_t>(o) + Panel_Mesh_Off);
             if (!mesh) continue;
@@ -7490,13 +7520,13 @@ static void VolleyfallTick()
                 kslCDO->ProcessEvent(fnBounds, &bp);
                 BoundsMemoPut(bp.Component, bp.Origin, bp.BoxExtent);
             }
-            pObj[pN] = o; pOrg[pN] = bp.Origin; pExt[pN] = bp.BoxExtent; zSum += bp.Origin.Z; ++pN;
+            pSlot[pN] = e.idx; pObj[pN] = o; pOrg[pN] = bp.Origin; pExt[pN] = bp.BoxExtent; zSum += bp.Origin.Z; ++pN;
         }
-        for (SDK::UObject* o : ClassObjects(ballCls))
+        for (const ObjIdxEntry& e : ClassObjectEntries(ballCls))
         {
             if (bN >= 128) break;
-            if (o->IsA(panelCls)) continue;
-            bObj[bN++] = o;
+            if (e.obj->IsA(panelCls)) continue;
+            bSlotV[bN] = e.idx; bObj[bN++] = e.obj;
         }
         if (spawnCls)
             for (SDK::UObject* o : ClassObjects(spawnCls))
@@ -7525,6 +7555,7 @@ static void VolleyfallTick()
 
     for (int b = 0; b < bN; ++b)
     {
+        if (!ObjAliveAt(bObj[b], bSlotV[b])) continue;   // freed since the rebuild
         auto* a = static_cast<SDK::AActor*>(bObj[b]);
         if (!a || !a->RootComponent) continue;
         SDK::FVector p = a->RootComponent->K2_GetComponentLocation();
@@ -11078,8 +11109,17 @@ static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, v
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
 
+    // [2026-09-11 *** CRASH FIX] This guard used to be thread_local ONLY, which stops one thread
+    // re-entering the tick but does NOT stop TWO threads running it at the same time -- and ProcessEvent
+    // is dispatched from more than the game thread. Every cache, cursor and std:: container below is
+    // unsynchronised, so concurrent entry corrupts them; the 70-player log's fault inside
+    // std::unordered_set<void*>::_Forced_rehash is exactly what that looks like, and a corrupted container
+    // goes on to fault anywhere afterwards. Take a global try-lock: whoever is already inside keeps going,
+    // any other thread skips this pass (everything here is periodic and idempotent, so skipping is free).
+    // The block has no early return -- its single exit below releases both flags.
     static thread_local bool inHook = false;
-    if (!inHook)
+    static volatile long s_tickOwner = 0;
+    if (!inHook && InterlockedCompareExchange(&s_tickOwner, 1, 0) == 0)
     {
         inHook = true;
 
@@ -11453,6 +11493,7 @@ static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, v
         // at 10Hz, stealing game-thread time from the rollback step. Re-enable if needed.)
 
         inHook = false;
+        InterlockedExchange(&s_tickOwner, 0);
     }
     // [SCRAPGUARD] Precision probe, armed only during a ScrapRun round so it costs nothing otherwise:
     // sample the runner roster either side of the dispatch. If the count falls, THIS call is what took
