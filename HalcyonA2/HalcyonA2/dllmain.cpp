@@ -8898,7 +8898,10 @@ static void SafeKickPc(uintptr_t pc) { __try { KickPcViaRpc(pc); } __except (EXC
 // mothership auth handshake (e.g. the -HalcyonClient mock client, or any direct IP join used for
 // testing) is otherwise kicked by AuthGateTick with "KICK no-auth-timeout" ~30s after joining,
 // which is exactly what ended the first end-to-end ball-sim/VOIP test run.
-static bool g_gateEnforce = true;    // PROD: validated — legit players resolve authorized=1 within ~11s; a never-authed IP-join never populates org and is kicked after the grace window
+// [2026-09-12] DISABLED at the user's call: the auth gate was kicking legit Rift players (their org
+// resolved not-authorized) and enforcement is not worth blocking real players. Log-only now -- the
+// [GATE] lines still record what it WOULD do, but nothing is kicked.
+static bool g_gateEnforce = false;   // log-only: no kicks. Was PROD-enforced; turned off to stop kicking Rift clients.
 static const ULONGLONG kGateGraceMs = 30000;   // a joining client gets this long to complete dashboard login + backend authorize before an empty org == kick (real logins land ~11s)
 static ULONGLONG g_lastAuthGate = 0;
 static std::mutex g_authMx;
