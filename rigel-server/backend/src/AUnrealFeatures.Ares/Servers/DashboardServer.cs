@@ -351,6 +351,7 @@ public sealed class AresDashboardServer : AstraHttpServer, IAresDashboardServer
         }
         stations!.Update(station);
         NetvarOverridesFile.OnStationConfigChanged(station_id);   // push to co-located game servers
+        StationAcl.Push(station_id);                              // push the station browser whitelist
         return Task.FromResult<IHttpActionResult>(Results.Ok(station.Config));
     }
 
@@ -363,7 +364,7 @@ public sealed class AresDashboardServer : AstraHttpServer, IAresDashboardServer
         var station = stations?.FindOne(s => s.StationId == station_id);
         if (station == null) return Task.FromResult<IHttpActionResult>(Results.NotFound(new { error = "no such station", station_id }));
         bool removed = station.Config?.Remove(key) ?? false;
-        if (removed) { stations!.Update(station); NetvarOverridesFile.OnStationConfigChanged(station_id); }
+        if (removed) { stations!.Update(station); NetvarOverridesFile.OnStationConfigChanged(station_id); StationAcl.Push(station_id); }
         return Task.FromResult<IHttpActionResult>(Results.Ok(new { success = removed, key }));
     }
 

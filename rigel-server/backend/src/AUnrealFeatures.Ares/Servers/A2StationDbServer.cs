@@ -2603,6 +2603,7 @@ namespace AUnrealFeatures.Ares.Servers
 
             // The game server calls this once at startup; make sure the watched files exist too.
             NetvarOverridesFile.EnsureAllWritten();
+            StationAcl.PushAll();   // and that the EOS gateway has every station's browser whitelist
             return Results.Configurable(HttpStatusCode.OK, "text/plain; charset=utf-8",
                 System.Text.Encoding.UTF8.GetBytes(NetvarOverridesFile.BuildText(station)));
         }

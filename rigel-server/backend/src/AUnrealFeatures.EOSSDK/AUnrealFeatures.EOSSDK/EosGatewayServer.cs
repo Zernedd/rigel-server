@@ -38,6 +38,73 @@ public sealed partial class EosGatewayServer : AstraHttpServer, IEosGatewayServe
     public static readonly List<EosSessionInfo> Sessions = new();
     static readonly object _sessionLock = new();
 
+    // ── Per-station whitelists ───────────────────────────────────────────────
+    // A station with a non-empty whitelist only appears in the station browser for the accounts on it.
+    // This project cannot reference Ares (Ares -> EOSSDK, not the reverse), so the values are PUSHED in
+    // from the Ares side whenever a station's config changes (see StationAcl). Station ids and names are
+    // both matched case-insensitively.
+    static readonly System.Collections.Concurrent.ConcurrentDictionary<string, HashSet<string>> _stationWhitelist =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    public static void SetStationWhitelist(string? stationId, IEnumerable<string>? usernames)
+    {
+        if (string.IsNullOrWhiteSpace(stationId)) return;
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var u in usernames ?? Enumerable.Empty<string>())
+            if (!string.IsNullOrWhiteSpace(u)) set.Add(u.Trim());
+        if (set.Count == 0) _stationWhitelist.TryRemove(stationId!, out _);
+        else _stationWhitelist[stationId!] = set;
+    }
+
+    public static int WhitelistedStationCount => _stationWhitelist.Count;
+
+    // Decode the caller out of the EOS user token. We minted and signed it ourselves (EosJwtFactory), so the
+    // payload is trusted here; it is only ever used to decide what to SHOW, never to grant anything.
+    static byte[] Base64UrlDecode(string s)
+    {
+        string t = s.Replace('-', '+').Replace('_', '/');
+        switch (t.Length % 4) { case 2: t += "=="; break; case 3: t += "="; break; }
+        return Convert.FromBase64String(t);
+    }
+
+    internal static (string Name, string Puid) IdentifyCaller(IHttpRequest request)
+    {
+        try
+        {
+            var header = request.GetHeaderValue("Authorization") ?? "";
+            if (!header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)) return ("", "");
+            var parts = header[7..].Trim().Split('.');
+            if (parts.Length < 2) return ("", "");
+            using var doc = JsonDocument.Parse(Encoding.UTF8.GetString(Base64UrlDecode(parts[1])));
+            var root = doc.RootElement;
+            string puid = root.TryGetProperty("productUserId", out var p) ? p.GetString() ?? "" : "";
+            string name = "";
+            if (root.TryGetProperty("account", out var acc) && acc.ValueKind == JsonValueKind.Object &&
+                acc.TryGetProperty("displayName", out var dn))
+                name = dn.GetString() ?? "";
+            if (string.IsNullOrEmpty(name) && !string.IsNullOrEmpty(puid) && _userNames.TryGetValue(puid, out var known))
+                name = known;
+            return (name, puid);
+        }
+        catch { return ("", ""); }
+    }
+
+    // An allowlist fails CLOSED: a station that has one stays hidden from a caller we cannot identify.
+    // Stations without a whitelist are untouched, so this changes nothing for everyone else.
+    static bool VisibleTo(EosSessionInfo s, string name, string puid)
+    {
+        if (string.IsNullOrWhiteSpace(s.StationId)) return true;
+        if (!_stationWhitelist.TryGetValue(s.StationId!, out var allowed) || allowed.Count == 0) return true;
+        if (!string.IsNullOrEmpty(name) && allowed.Contains(name)) return true;
+        // The Oculus login derives the puid straight from the display name, so a whitelisted name still
+        // matches when the token carries no readable displayName.
+        if (!string.IsNullOrEmpty(puid))
+            foreach (var n in allowed)
+                if (string.Equals(EosJwtFactory.ProductUserIdFor(n), puid, StringComparison.OrdinalIgnoreCase))
+                    return true;
+        return false;
+    }
+
     // Runtime-registered sessions are otherwise lost on restart (only re-seeded from the baked
     // matchmaking.json), so gameservers/deployments disappear every time the backend bounces.
     // Persist them to disk next to the binary and reload on boot — same pattern as lobbies.json.
@@ -624,6 +691,19 @@ public sealed partial class EosGatewayServer : AstraHttpServer, IEosGatewayServe
 
         List<EosSessionInfo> snapshot;
         lock (_sessionLock) { snapshot = Sessions.ToList(); }
+
+        // Whitelisted stations are only advertised to the accounts on their list.
+        var (callerName, callerPuid) = IdentifyCaller(request);
+        int hidden = 0;
+        if (_stationWhitelist.Count > 0)
+        {
+            int before = snapshot.Count;
+            snapshot = snapshot.Where(s => VisibleTo(s, callerName, callerPuid)).ToList();
+            hidden = before - snapshot.Count;
+            if (hidden > 0)
+                Logger.Information($"Whitelist | hid {hidden} session(s) from " +
+                                   $"{(string.IsNullOrEmpty(callerName) ? "an unidentified caller" : callerName)}");
+        }
 
         var matched = snapshot
             .Where(s => MatchesCriteria(s, filterReq?.Criteria))

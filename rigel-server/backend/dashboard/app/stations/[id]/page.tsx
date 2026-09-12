@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import NetvarsTab from "./NetvarsTab";
 
-type Tab = "bans" | "roles" | "members" | "deployments" | "events" | "sessions" | "netvars";
+type Tab = "bans" | "roles" | "members" | "deployments" | "events" | "sessions" | "netvars" | "whitelist";
 
 // ── Shared UI ────────────────────────────────────────────────────────────────
 
@@ -934,6 +934,137 @@ function SessionsTab({ stationId }: { stationId: string }) {
   );
 }
 
+// ── Whitelist tab ─────────────────────────────────────────────────────────────
+// Stored as station config "acl.whitelist" (comma-separated usernames). Empty = visible to everyone,
+// so a station only becomes private once a name is actually added. The EOS gateway hides a whitelisted
+// station's sessions from anyone not on the list.
+
+const WHITELIST_KEY = "acl.whitelist";
+
+function WhitelistTab({ stationId }: { stationId: string }) {
+  const [names, setNames] = useState<string[] | null>(null);
+  const [users, setUsers] = useState<User[]>([]);
+  const [err, setErr]     = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [selUser, setSelUser] = useState("");
+  const [manual, setManual]   = useState("");
+  const [saving, setSaving]   = useState(false);
+
+  const load = useCallback(() => {
+    api.stationConfig(stationId)
+      .then(c => { setNames(parseList(c[WHITELIST_KEY] ?? "")); setErr(null); })
+      .catch(e => setErr(e.message));
+    api.users().then(setUsers).catch(() => {});
+  }, [stationId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  function parseList(v: string): string[] {
+    return v.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
+  }
+
+  async function persist(next: string[]) {
+    setSaving(true);
+    setErr(null);
+    try {
+      if (next.length === 0) await api.deleteStationConfigKey(stationId, WHITELIST_KEY);
+      else await api.patchStationConfig(stationId, { [WHITELIST_KEY]: next.join(", ") });
+      setNames(next);
+      setAdding(false); setSelUser(""); setManual("");
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : "Save failed");
+    } finally { setSaving(false); }
+  }
+
+  function add() {
+    const who = (selUser || manual).trim();
+    if (!who || !names) return;
+    if (names.some(n => n.toLowerCase() === who.toLowerCase())) { setAdding(false); return; }
+    persist([...names, who]);
+  }
+
+  function remove(name: string) {
+    if (!names) return;
+    persist(names.filter(n => n !== name));
+  }
+
+  return (
+    <div>
+      {err && <ErrBox msg={err} />}
+
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-xs" style={{ color: "var(--muted)" }}>
+          {names === null ? "Loading…"
+            : names.length === 0
+              ? "No whitelist — this station is visible to everyone."
+              : `Only these ${names.length} account(s) can see this station in the browser.`}
+        </div>
+        <Btn onClick={() => setAdding(true)}><Plus size={12} className="inline mr-1" />Add Account</Btn>
+      </div>
+
+      {adding && (
+        <Modal title="Add to whitelist" onClose={() => setAdding(false)}>
+          <Field label="Account">
+            <select className={inputCls} style={inputStyle} value={selUser}
+              onChange={e => { setSelUser(e.target.value); if (e.target.value) setManual(""); }}>
+              <option value="">Select account…</option>
+              {users.map(u => <option key={u.user_id} value={u.username}>{u.username}</option>)}
+            </select>
+          </Field>
+          <Field label="…or type a username">
+            <input className={inputCls} style={inputStyle} value={manual}
+              onChange={e => { setManual(e.target.value); if (e.target.value) setSelUser(""); }}
+              placeholder="Exact in-game username" />
+          </Field>
+          <div className="flex gap-2 justify-end mt-2">
+            <Btn variant="ghost" onClick={() => setAdding(false)}>Cancel</Btn>
+            <Btn onClick={add} disabled={saving || !(selUser || manual.trim())}>Add</Btn>
+          </div>
+        </Modal>
+      )}
+
+      <div className="rounded-lg overflow-hidden" style={{ border: "1px solid var(--border)" }}>
+        <table className="w-full text-sm">
+          <thead>
+            <tr style={{ background: "var(--surface)", borderBottom: "1px solid var(--border)" }}>
+              {["Username", "Known Account", ""].map(h => (
+                <th key={h} className="px-4 py-3 text-left text-xs font-medium" style={{ color: "var(--muted)" }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {names === null ? (
+              <tr><td colSpan={3} className="px-4 py-10 text-center text-sm" style={{ color: "var(--muted)" }}>Loading…</td></tr>
+            ) : names.length === 0 ? (
+              <tr><td colSpan={3} className="px-4 py-10 text-center text-sm" style={{ color: "var(--muted)" }}>
+                Whitelist empty — station is public
+              </td></tr>
+            ) : names.map((n, i) => {
+              const known = users.some(u => u.username?.toLowerCase() === n.toLowerCase());
+              return (
+                <tr key={n}
+                  style={{ background: i % 2 === 0 ? "var(--surface)" : "var(--surface2)", borderBottom: "1px solid var(--border)" }}>
+                  <td className="px-4 py-3 font-medium">{n}</td>
+                  <td className="px-4 py-3 text-xs" style={{ color: known ? "var(--green)" : "var(--muted)" }}>
+                    {known ? "yes" : "not seen yet"}
+                  </td>
+                  <td className="px-4 py-3 text-right">
+                    <button onClick={() => remove(n)} disabled={saving}
+                      className="text-xs px-2 py-1 rounded"
+                      style={{ color: "var(--red)", border: "1px solid var(--border)" }}>
+                      Remove
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 // ── Page ─────────────────────────────────────────────────────────────────────
 
 const TABS: { id: Tab; label: string }[] = [
@@ -944,6 +1075,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "events",      label: "Events"      },
   { id: "sessions",    label: "EOS Sessions" },
   { id: "netvars",     label: "Netvars"     },
+  { id: "whitelist",   label: "Whitelist"   },
 ];
 
 export default function StationDetailPage() {
@@ -1026,6 +1158,7 @@ export default function StationDetailPage() {
       {tab === "events"      && <EventsTab      stationId={stationId} />}
       {tab === "sessions"    && <SessionsTab    stationId={stationId} />}
       {tab === "netvars"     && <NetvarsTab     stationId={stationId} />}
+      {tab === "whitelist"   && <WhitelistTab   stationId={stationId} />}
     </div>
   );
 }

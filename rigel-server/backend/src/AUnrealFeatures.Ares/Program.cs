@@ -131,6 +131,11 @@ namespace AUnrealFeatures.Ares
                                   $"{dropped} session(s) dropped, db row {(dep != null ? "marked offline" : "not found")}");
             };
 
+            // Hand the EOS gateway every station's browser whitelist before serving. It cannot read them
+            // itself (Ares -> EOSSDK, never back), and an allowlist with no data fails OPEN -- so without
+            // this a backend restart would silently unhide every private station until the next config edit.
+            StationAcl.PushAll();
+
             await _hostApplication.RunAsync();
         }
     }
