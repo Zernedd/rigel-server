@@ -20,7 +20,7 @@ python make_rift.py --dst A2 --verify              # re-check any time
 | Dashboard / station API | compile-time constant in `A2-Win64-Shipping.exe` | patched **in place**: `https://api.oriondrift.net` → `https://rigel.wwiggles.org` |
 | Mothership (login, user data) | `A2/Config/DefaultEngine.ini` inside `A2-Windows.pak` | **not** patched — set in `A2/Saved/Config/Windows/Engine.ini` instead |
 | EOS gateway | same | same config override |
-| Entitlement check | `A2-Win64-Shipping.exe` | one byte, `jne` → `jmp` |
+| Oculus app identity | same packaged ini | `RiftAppId` → our own Meta app, via the same config override |
 
 **The dashboard URL is length-locked.** It is overwritten in place, so the replacement must be the
 same byte length as `https://api.oriondrift.net` — 26 characters. `https://rigel.wwiggles.org` is
@@ -34,31 +34,27 @@ alternative (inventing a shorter host) would mean a new non-`rigel-*` DNS record
 do. So it goes in the user config, which UE merges *over* the packaged defaults. No length limit,
 and it can be changed later without touching the pak at all.
 
-## The entitlement byte
+## Why no entitlement patch is needed
 
-A client that is not the store build cannot prove the Meta account owns the app, and a Shipping
-build treats that as fatal:
+The build is initialised under **our own Meta app** (`RiftAppId = 2240289680101933`, the "rigel"
+app) instead of the stock one. The signed-in account owns that app, so the Oculus platform grants
+the entitlement for real and the check passes on its own — nothing is bypassed. The Quest build
+works the same way via `MobileAppId`.
+
+With the stock app id the account cannot prove it owns the store title under this build, and a
+Shipping build exits a few seconds after login:
 
 ```
 LogA2MothershipAuthStateMachine: Error: Could not verify entitlement status:
   Missing entitlement for ... A Shipping build would exit at this point
 ```
 
-The guard in this build (22284):
+`make_rift.py --entitlement` still exists — it flips the one-byte guard in the exe, the same change
+as the UE4SS mod in `HalcyonA2/ue4ss-mods/A2EntitlementPatch` — but it is **not needed and not
+recommended** now that the app id is ours. Keep it for diagnosis only.
 
-```
-145429424  test bpl, bpl    40 84 ED
-145429427  jne  ...         75 59      <- entitled path
-145429429  ...                         <- logs the error above, then exits
-```
-
-`make_rift.py --entitlement` makes that jump unconditional (`75` → `EB`) after checking the 5-byte
-signature, and refuses to write if it does not match. This is the same change as the UE4SS mod in
-`HalcyonA2/ue4ss-mods/A2EntitlementPatch`, which targets build 20996 and refuses on anything else —
-baking it into the exe means the spec build needs no UE4SS at all.
-
-Until this is applied the client exits a few seconds after login, so **the build is not testable
-without it**.
+Keep `RIFT_APP_ID` here in step with `MothershipServer.RIFT_APP_ID`: the backend verifies the
+UserProof nonce under that app, so they must be the same app or logins fail.
 
 ## Server side is already done
 
