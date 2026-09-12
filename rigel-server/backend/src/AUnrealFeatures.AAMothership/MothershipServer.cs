@@ -1639,6 +1639,38 @@ public sealed class MothershipServer : AstraHttpServer, IMothershipServer
     // player_quests blob: base64 of the UTF-8 JSON with every byte stored minus 1.
     private static (DateTime Stamp, List<(string Id, int Ver)> Quests) s_autoQuests = (DateTime.MinValue, new());
 
+    /// <summary>Distinct, non-empty item ids out of a stored player_inventory blob (same base64/byte-1
+    /// wrapper as player_quests). "None" fills the unused slots and is not an item.</summary>
+    private static List<string> DecodeEquippedItems(string? storedValue)
+    {
+        var ids = new List<string>();
+        if (string.IsNullOrEmpty(storedValue)) return ids;
+        try
+        {
+            var raw = Convert.FromBase64String(storedValue);
+            for (int i = 0; i < raw.Length; i++) raw[i] = (byte)(raw[i] + 1);
+            using var doc = JsonDocument.Parse(Encoding.UTF8.GetString(raw));
+            if (!doc.RootElement.TryGetProperty("equippedItems", out var arr) || arr.ValueKind != JsonValueKind.Array)
+                return ids;
+            foreach (var e in arr.EnumerateArray())
+            {
+                var v = e.GetString() ?? "";
+                if (v.Length == 0 || v == "None" || ids.Contains(v)) continue;
+                ids.Add(v);
+            }
+        }
+        catch { /* a blob we cannot read is the same as no items */ }
+        return ids;
+    }
+
+    /// <summary>Deterministic id so the same item keeps the same entitlement id across requests.</summary>
+    private static string StableId(string seed)
+    {
+        using var sha = System.Security.Cryptography.SHA1.Create();
+        var h = sha.ComputeHash(Encoding.UTF8.GetBytes(seed));
+        return new Guid(h.Take(16).ToArray()).ToString();
+    }
+
     private static List<(string Id, int Ver)> AutoCompleteQuests()
     {
         try
@@ -2228,11 +2260,39 @@ public sealed class MothershipServer : AstraHttpServer, IMothershipServer
         if (string.IsNullOrEmpty(userId))
             return JsonError(HttpStatusCode.BadRequest, "BadRequest", "Missing token subject");
 
-        var entitlements = new List<JsonElement>();
+        var entitlements = new List<object>();
         foreach (var item in Database.GetCollection<MothershipInventoryItemDbObject>(true)!.Find(i => i.PlayerId == userId))
         {
             try { entitlements.Add(JsonSerializer.Deserialize<JsonElement>(item.ItemDataJson)); }
             catch { /* skip a malformed stored item rather than fail the whole load */ }
+        }
+
+        // [2026-09-12 *** WHY THE OFFLINE SHUTTLE SHOWS DEFAULTS] A player can only equip what they OWN,
+        // and this list was empty for everyone (inventory rows: 0), so the shuttle had nothing to put on
+        // and fell back to defaults -- even though the server-side restore made the player look right
+        // once they joined a station. The request log says the same thing from the other side: real
+        // headsets call this route constantly but never fetch player_inventory, so the look cannot be
+        // coming from user data.
+        //
+        // Grant an entitlement for every item the player actually wears. Their equipped list is stored
+        // by the game server in player_inventory (20 slots, EA2ItemSlot order), so it names exactly the
+        // items they need to own. Item shape is the client's own: entitlement_id / in_game_id / name,
+        // read straight out of its parser.
+        if (entitlements.Count == 0)
+        {
+            var udCol = Database.GetCollection<MothershipUserDataDbObject>(true)!;
+            var inv = udCol.FindOne(d => d.UserId == userId && d.KeyName == "player_inventory");
+            foreach (var id in DecodeEquippedItems(inv?.Value))
+            {
+                entitlements.Add(new
+                {
+                    entitlement_id = StableId(userId + ":" + id),
+                    in_game_id     = id,
+                    name           = id
+                });
+            }
+            if (entitlements.Count > 0)
+                AuthLog($"[INVENTORY] {userId}: granted {entitlements.Count} entitlement(s) from their equipped list");
         }
         return JsonAnon(new { Results = new[] { new { platform = "QUEST", isPrimary = true, entitlements } } });
     }
