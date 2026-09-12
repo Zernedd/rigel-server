@@ -477,6 +477,26 @@ public sealed class MothershipServer : AstraHttpServer, IMothershipServer
     private static IHttpActionResult JsonAnon(object obj, HttpStatusCode code = HttpStatusCode.OK) =>
         Results.Configurable(code, "application/json", JsonSerializer.SerializeToUtf8Bytes(obj));
 
+    /// <summary>
+    /// [2026-09-12] Error envelope in the shape the CLIENT parses. Every failure we returned looked like
+    /// {"error":"..."}, which the client cannot read, so it logged its fallback -- "Name: Error, Message:
+    /// The response was malformed" -- for every 401/404. That is why the headset logs never named a real
+    /// cause, and why a failed user-data load reported an empty key name: it reads the key out of the
+    /// body. The client formats Name / Message / Details and the response strings sit beside "statusCode"
+    /// in its .rdata, so give it all four (plus "error" for anything of ours still reading the old shape).
+    /// </summary>
+    private static IHttpActionResult JsonError(HttpStatusCode code, string name, string message,
+                                               string details = "", string? keyName = null) =>
+        JsonAnon(new
+        {
+            statusCode = (int)code,
+            name,
+            message,
+            details,
+            key_name = keyName ?? "",
+            error = message
+        }, code);
+
     private static string GenerateSessionJwt(string playerId, string? externalService = null, string? externalServiceId = null)
     {
         var now    = DateTimeOffset.UtcNow;
@@ -1575,18 +1595,39 @@ public sealed class MothershipServer : AstraHttpServer, IMothershipServer
     [HttpGet("/v1/userdata/client")]
     public async Task<IHttpActionResult> GetUserDataClient(IHttpRequest request, IHttpResponse response)
     {
-        if (!IsClient(request)) return JsonAnon(new { error = "Unauthorized", code = 401 }, HttpStatusCode.Unauthorized);   // JWT-keyed
+        if (!IsClient(request))
+        {
+            AuthLog($"[USERDATA] GET {request.GetQueryParameter("key_name") ?? "?"} -> 401 (no valid x-mothership-token)");
+            return JsonError(HttpStatusCode.Unauthorized, "Unauthorized", "Missing or invalid session token");
+        }
 
         var userId = GetUserIdFromToken(request);
         var keyName = request.GetQueryParameter("key_name") ?? "";
         if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(keyName))
-            return JsonAnon(new { error = "Missing key_name or token subject" }, HttpStatusCode.BadRequest);
+            return JsonError(HttpStatusCode.BadRequest, "BadRequest", "Missing key_name or token subject", "", keyName);
 
         var col = Database.GetCollection<MothershipUserDataDbObject>(true)!;
         var item = col.FindOne(d => d.UserId == userId && d.KeyName == keyName);
         if (keyName == "player_quests")
             item = ApplyAutoCompletedQuests(col, userId, item);
-        if (item == null) return JsonAnon(new { error = "User data not found" }, HttpStatusCode.NotFound);
+
+        // [2026-09-12 *** WHY INVENTORY NEVER SAVED] A missing key used to answer 404. The client only
+        // writes a key after it has LOADED it, so a key that does not exist yet can never be created:
+        // 404 -> "load failed" -> no write -> still missing. A deadlock, and the production data proves
+        // it -- across 36 players the whole database held 36x player_quests (written by the GAME SERVER
+        // on its trusted path, so it never had to load first) and 6x safety_and_settings, and ZERO
+        // player_inventory. Not "inventory saves badly": inventory could never be created at all.
+        // A first-time key is not an error, it is an empty value, so answer 200 with an empty record and
+        // let the client bootstrap. generation 0 marks "nothing stored yet"; the first POST writes
+        // generation 1.
+        if (item == null)
+        {
+            AuthLog($"[USERDATA] {userId} GET {keyName} -> not stored yet, returning empty (bootstrap)");
+            return Json(new MothershipUserDataDbObject
+            {
+                DataId = "", UserId = userId, KeyName = keyName, Value = "", Generation = 0
+            });
+        }
         return Json(item);
     }
 
@@ -1706,13 +1747,17 @@ public sealed class MothershipServer : AstraHttpServer, IMothershipServer
     [HttpPost("/v1/userdata/client")]
     public async Task<IHttpActionResult> PostUserDataClient(IHttpRequest request, IHttpResponse response)
     {
-        if (!IsClient(request)) return JsonAnon(new { error = "Unauthorized", code = 401 }, HttpStatusCode.Unauthorized);   // JWT-keyed
+        if (!IsClient(request))
+        {
+            AuthLog("[USERDATA] POST -> 401 (no valid x-mothership-token); this is a SAVE being dropped");
+            return JsonError(HttpStatusCode.Unauthorized, "Unauthorized", "Missing or invalid session token");
+        }
 
         var body = ParseBody(request);
         var userId = GetUserIdFromToken(request);
         var keyName = Str(body, "key_name");
         if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(keyName))
-            return JsonAnon(new { error = "Missing key_name or token subject" }, HttpStatusCode.BadRequest);
+            return JsonError(HttpStatusCode.BadRequest, "BadRequest", "Missing key_name or token subject", "", keyName);
 
         var col = Database.GetCollection<MothershipUserDataDbObject>(true)!;
         var existing = col.FindOne(d => d.UserId == userId && d.KeyName == keyName);
@@ -1721,6 +1766,7 @@ public sealed class MothershipServer : AstraHttpServer, IMothershipServer
             existing.Value = Str(body, "value");
             existing.Generation = existing.Generation + 1;
             col.Update(existing);
+            AuthLog($"[USERDATA] {userId} SAVED {keyName} gen={existing.Generation} bytes={existing.Value.Length}");
             return Json(existing);
         }
 
@@ -1733,6 +1779,7 @@ public sealed class MothershipServer : AstraHttpServer, IMothershipServer
             Generation = 1
         };
         col.Insert(data);
+        AuthLog($"[USERDATA] {userId} CREATED {keyName} bytes={data.Value.Length} (first ever save of this key)");
         return Json(data);
     }
 
@@ -2171,11 +2218,15 @@ public sealed class MothershipServer : AstraHttpServer, IMothershipServer
     [HttpGet("/v1/inventory/client")]
     public async Task<IHttpActionResult> GetInventoryClient(IHttpRequest request, IHttpResponse response)
     {
-        if (!IsClient(request)) return JsonAnon(new { error = "Unauthorized", code = 401 }, HttpStatusCode.Unauthorized);   // JWT-keyed
+        if (!IsClient(request))
+        {
+            AuthLog("[INVENTORY] GET /v1/inventory/client -> 401 (no valid x-mothership-token)");
+            return JsonError(HttpStatusCode.Unauthorized, "Unauthorized", "Missing or invalid session token");
+        }
 
         var userId = GetUserIdFromToken(request);
         if (string.IsNullOrEmpty(userId))
-            return JsonAnon(new { error = "Missing token subject" }, HttpStatusCode.BadRequest);
+            return JsonError(HttpStatusCode.BadRequest, "BadRequest", "Missing token subject");
 
         var entitlements = new List<JsonElement>();
         foreach (var item in Database.GetCollection<MothershipInventoryItemDbObject>(true)!.Find(i => i.PlayerId == userId))
