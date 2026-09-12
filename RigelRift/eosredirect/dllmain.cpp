@@ -151,16 +151,23 @@ thread_local char t_urlbuf[1024];
 
 int my_curl_setopt_impl(void* handle, int option, void* arg)
 {
+    // [2026-09-12 DIAGNOSTIC] The redirect never fired on Windows though the hook installed, so log
+    // enough to tell "hook never hit" from "hit but the host isn't what we match". Counts every call and
+    // logs the first handful of CURLOPT_URLs regardless of host.
+    static volatile long s_calls = 0, s_urls = 0;
+    long n = InterlockedIncrement(&s_calls);
+    if (n == 1) Note("[eosdiag] curl_easy_setopt hook IS being called");
     if (option == CURLOPT_URL && arg)
     {
         const char* url = reinterpret_cast<const char*>(arg);
-        if (url && strstr(url, "epicgames.dev"))
+        long u = InterlockedIncrement(&s_urls);
+        if (u <= 20) Note("[eosdiag] CURLOPT_URL: %s", url ? url : "(null)");
+        if (url && (strstr(url, "epicgames.dev") || strstr(url, "epicgames.com") || strstr(url, "epicgames.net")))
         {
             const char* p = strstr(url, "://");
             const char* path = p ? strchr(p + 3, '/') : nullptr;   // keep the path/query
             _snprintf_s(t_urlbuf, sizeof(t_urlbuf), _TRUNCATE, "%s%s", kEosGateway, path ? path : "");
-            static bool once = false;
-            if (!once) { once = true; Note("[eos] %s -> %s", url, t_urlbuf); }
+            Note("[eos] %s -> %s", url, t_urlbuf);
             return g_setoptOrig(handle, option, t_urlbuf);
         }
     }
@@ -265,6 +272,10 @@ FARPROC WINAPI my_GetProcAddress(HMODULE mod, LPCSTR name)
             Note("[eos] EOS_Initialize resolved -- installing curl redirect now");
             HookEosCurl();
         }
+        // [eosdiag] If EOS resolves a WinHTTP transport dynamically, it is NOT using curl on Windows and
+        // that is why the curl hook sees nothing -- surface it.
+        if (strncmp(name, "WinHttp", 7) == 0)
+            Note("[eosdiag] GetProcAddress(%s)  (WinHTTP transport in use?)", name);
     }
     return real;
 }
