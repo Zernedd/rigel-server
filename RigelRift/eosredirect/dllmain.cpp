@@ -155,48 +155,39 @@ void ResolveRealDsound()
 }
 
 // ── the EOS redirect ────────────────────────────────────────────────────────────────────────
-using curl_setopt_t = int (__cdecl*)(void* handle, int option, ...);
+// [2026-09-12] The real curl_easy_setopt in EOSSDK-Win64 is NOT the generic varargs shim my first
+// signature matched (that was a formatter -- the hook never fired). Found the true one by the CURLOPT_URL
+// constant (0x2712): a 3-argument setter (handle=rcx, option=edx, value=r8) called 70 times with the full
+// range of option constants, whose prologue carries curl's null-handle check (test rcx,rcx; lea eax,[rcx+0x2b]
+// = return CURLE_BAD_FUNCTION_ARGUMENT). So the value is a plain register arg -- no va_list -- and for
+// CURLOPT_URL r8 is the URL string. Hook it and swap that pointer for an Epic host.
+using curl_setopt_t = int (__fastcall*)(void* handle, int option, void* value, void* a4);
 curl_setopt_t g_setoptOrig = nullptr;
 const int CURLOPT_URL = 10002;
 
-// The URL is the first vararg. Capture it with va_list, rewrite if it is an Epic host, then call the
-// original with the (possibly replaced) pointer. The replacement buffer is thread-local and lives long
-// enough for the original call to copy it (curl dups the string into the handle).
+// Replacement URL buffer; thread-local so concurrent handles don't clobber each other, and it lives long
+// enough for the original call to copy the string into the handle.
 thread_local char t_urlbuf[1024];
 
-int my_curl_setopt_impl(void* handle, int option, void* arg)
+int __fastcall my_curl_setopt(void* handle, int option, void* value, void* a4)
 {
-    // [2026-09-12 DIAGNOSTIC] The redirect never fired on Windows though the hook installed, so log
-    // enough to tell "hook never hit" from "hit but the host isn't what we match". Counts every call and
-    // logs the first handful of CURLOPT_URLs regardless of host.
     static volatile long s_calls = 0, s_urls = 0;
-    long n = InterlockedIncrement(&s_calls);
-    if (n == 1) Note("[eosdiag] curl_easy_setopt hook IS being called");
-    if (option == CURLOPT_URL && arg)
+    if (InterlockedIncrement(&s_calls) == 1) Note("[eosdiag] setopt hook IS being called");
+    if (option == CURLOPT_URL && value)
     {
-        const char* url = reinterpret_cast<const char*>(arg);
+        const char* url = reinterpret_cast<const char*>(value);
         long u = InterlockedIncrement(&s_urls);
-        if (u <= 20) Note("[eosdiag] CURLOPT_URL: %s", url ? url : "(null)");
-        if (url && (strstr(url, "epicgames.dev") || strstr(url, "epicgames.com") || strstr(url, "epicgames.net")))
+        if (u <= 20) Note("[eosdiag] CURLOPT_URL: %s", url);
+        if (strstr(url, "epicgames.dev") || strstr(url, "epicgames.com") || strstr(url, "epicgames.net"))
         {
             const char* p = strstr(url, "://");
             const char* path = p ? strchr(p + 3, '/') : nullptr;   // keep the path/query
             _snprintf_s(t_urlbuf, sizeof(t_urlbuf), _TRUNCATE, "%s%s", kEosGateway, path ? path : "");
             Note("[eos] %s -> %s", url, t_urlbuf);
-            return g_setoptOrig(handle, option, t_urlbuf);
+            return g_setoptOrig(handle, option, reinterpret_cast<void*>(t_urlbuf), a4);
         }
     }
-    return g_setoptOrig(handle, option, arg);
-}
-
-// curl_easy_setopt is cdecl varargs; forward the single relevant vararg. (Every CURLOPT we care about
-// takes one argument; curl reads exactly one per call.)
-int __cdecl my_curl_setopt(void* handle, int option, ...)
-{
-    va_list ap; va_start(ap, option);
-    void* arg = va_arg(ap, void*);
-    va_end(ap);
-    return my_curl_setopt_impl(handle, option, arg);
+    return g_setoptOrig(handle, option, value, a4);
 }
 
 // Scan a module's .text for the 24-byte curl_easy_setopt prologue.
@@ -206,8 +197,10 @@ uint8_t* FindCurlSetopt(HMODULE mod)
     auto dos  = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
     auto nt   = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
     auto sec  = IMAGE_FIRST_SECTION(nt);
-    const uint8_t sig[] = { 0x48,0x89,0x54,0x24,0x10, 0x4C,0x89,0x44,0x24,0x18, 0x4C,0x89,0x4C,0x24,0x20,
-                            0x53,0x55,0x56,0x57, 0x48,0x83,0xEC,0x28, 0x48 };
+    // curl_easy_setopt @ 0xcf7b00: spill edx/r8/r9 to home, sub rsp,0x28, then curl's null-handle guard
+    // (test rcx,rcx; jne +8; lea eax,[rcx+0x2b] = return CURLE_BAD_FUNCTION_ARGUMENT). Distinctive.
+    const uint8_t sig[] = { 0x89,0x54,0x24,0x10, 0x4C,0x89,0x44,0x24,0x18, 0x4C,0x89,0x4C,0x24,0x20,
+                            0x48,0x83,0xEC,0x28, 0x48,0x85,0xC9, 0x75,0x08, 0x8D };
     for (int i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++sec)
     {
         if (memcmp(sec->Name, ".text", 5) != 0) continue;
