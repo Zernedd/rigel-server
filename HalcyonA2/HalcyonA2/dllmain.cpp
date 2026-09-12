@@ -14166,9 +14166,20 @@ static void Main(HMODULE)
     }
     else printf("[HalcyonA2] register IP = %s\n", registerIp.c_str());
 
+    // [2026-09-13] The ip field must be the BARE host: the backend stores ip and port separately and the
+    // EOS session advertises them as Address + PublicPort, so a -RegisterIp that carries ":port" produces
+    // an address like "13.140.41.197:7777:7777" and clients cannot reach the server. Strip anything from
+    // the first ':' so a mis-set argument can no longer break the station browser.
+    if (const size_t colon = registerIp.find(':'); colon != std::string::npos)
+    {
+        HxLog("[HalcyonA2][REGISTER] -RegisterIp had a port on it (%s) -- registering the host only (%s)\n",
+              registerIp.c_str(), registerIp.substr(0, colon).c_str());
+        registerIp = registerIp.substr(0, colon);
+    }
+
     std::string reqBody =
         std::string("{\"ip\":\"") + registerIp + "\",\"port\":\"" + portStr +
-        "\",\"server_name\":\"" + nameStr + "\",\"max_players\":10";
+        "\",\"server_name\":\"" + nameStr + "\",\"max_players\":75";
     reqBody += std::string(",\"version\":\"") + kBuildVersion + "\"";
     if (!deploymentId.empty()) reqBody += ",\"deployment_id\":\"" + deploymentId + "\"";
     reqBody += "}";

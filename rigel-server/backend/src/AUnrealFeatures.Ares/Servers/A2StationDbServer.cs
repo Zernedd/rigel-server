@@ -2100,7 +2100,14 @@ namespace AUnrealFeatures.Ares.Servers
                 FleetId   = s.StationId,
                 FleetName = s.StationName,
                 Created   = s.CreatedAt,
-                Online    = depsList?.Any(d => d.Online) ?? s.Online,
+                // [2026-09-13 *** "nobody can see the servers"] This was `depsList?.Any(...) ?? s.Online`,
+                // and the ?? fallback was unreachable: v2/fleets passes Enumerable.Empty<>() -- EMPTY but
+                // NOT NULL -- whenever include_stations is false, which is the default and is exactly what
+                // the browse list uses. Any() on an empty sequence is false, so every fleet advertised
+                // online:false while its station row said online with players on it. Proof: the same fleet
+                // returned online:false by default and online:true with include_stations=true.
+                // Only DERIVE from deployments when we actually loaded some; otherwise trust the station row.
+                Online    = depsList is { Count: > 0 } ? depsList.Any(d => d.Online) : s.Online,
                 Stations  = includeStations ? depsList?.Select(DeploymentToFleetStation).ToList() : null,
                 Config    = includeConfig && s.Config?.Count > 0 ? ToTypedConfig(s.Config) : null
             };
