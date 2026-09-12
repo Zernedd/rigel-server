@@ -2205,7 +2205,10 @@ static int       g_vrPawnCount         = 0;   // live VRPawn count (set by WireV
 static bool g_netScale    = true;    // -NoNetScale: never scale player relevancy/rate with population
 static int  g_netCrowd    = 12;      // -NetCrowd=N: above this many players, hand culling back to the engine
 static int  g_netCullM    = 150;     // -NetCullM=N: distance cull for player pawns when crowded (metres)
-static int  g_netBudgetKB = 120;     // -NetBudgetKB=N: per-client pose budget used to pick the update rate
+static int  g_netBudgetKB = 120;     // -NetBudgetKB=N: per-client pose budget used to size the relevancy radius
+static int  g_netPoseHz   = 45;      // -NetPoseHz=N: MEASURED pose arrival rate (client-bound ~30-46Hz, see [POSERATE]).
+                                     // Used to size the cull radius: a pawn costs this rate, not NetUpdateFrequency.
+static bool g_netRateThrottle = false; // -NetRateThrottle: restore the OLD population-throttled rate (A/B fallback)
 // [PERF/SAFETY] Bumped whenever the live VRPawn count changes - i.e. a match is forming or breaking.
 // The cache-rebuild backoff re-arms to its fast interval on any change, so newly-spawned goals/cups
 // are picked up within ~500ms at exactly the moments that matter, instead of waiting out an 8s backoff.
@@ -2839,8 +2842,10 @@ static void WireVRPawnBallSimManagers()
                 *reinterpret_cast<float*>(p + 0x17C) = 100.0f;    // MinNetUpdateFrequency (pinned)
                 *reinterpret_cast<float*>(p + 0x180) = 10.0f;     // NetPriority
             }
-            else
+            else if (g_netRateThrottle)
             {
+                // OLD behaviour, kept only as an A/B fallback (-NetRateThrottle). See the block below for
+                // why throttling the rate is the wrong dimension.
                 const float cull = static_cast<float>(g_netCullM) * 100.0f;   // metres -> uu
                 float hz = (static_cast<float>(g_netBudgetKB) * 1024.0f) / (static_cast<float>(pop - 1) * 300.0f);
                 if (hz > 60.0f) hz = 60.0f;
@@ -2850,13 +2855,48 @@ static void WireVRPawnBallSimManagers()
                 *reinterpret_cast<float*>(p + 0x178) = hz;            // NetUpdateFrequency
                 *reinterpret_cast<float*>(p + 0x17C) = 2.0f;          // MinNetUpdateFrequency — allow adaptive down-throttle
                 *reinterpret_cast<float*>(p + 0x180) = 10.0f;         // still outrank static scenery
+            }
+            else
+            {
+                // [2026-09-12 *** FULL SPEED ON RELEVANCE — the spectator / "players far away" lag fix]
+                // The old crowded branch throttled the RATE by TOTAL population (hz = budget/(pop-1),
+                // floored at 10) and left MinNetUpdateFrequency=2, so UE's adaptive throttle could take a
+                // pawn all the way down to 2Hz. Anyone viewing from a distance then received players at
+                // 2-10Hz -- and a SPECTATOR always views from outside the play space, so it got the worst
+                // of it on every player at once. That is the reported lag.
+                //
+                // Throttling the rate is also the wrong dimension. An actor is only replicated when its
+                // state actually changes, and the pose arrival rate is CLIENT-bound at ~30-46Hz (measured,
+                // see [POSERATE]) -- the server never had 100 updates/s to send. So NetUpdateFrequency=100
+                // does not cost 100 updates/s; it only stops us capping BELOW the rate the data arrives.
+                // The old cap was therefore pure loss: it threw away poses we already had.
+                //
+                // So let RELEVANCE be the only limiter and send whatever survives it at full speed. Cost
+                // then scales with how many players are actually NEAR you, not how many are on the server.
+                // To keep the 70-player protection, scale the CULL RADIUS instead of the rate: the number
+                // of players inside a radius grows with r^2, so r ~ sqrt(afford / need).
+                const float posePerSec  = static_cast<float>(g_netPoseHz);        // real arrival rate, not the cap
+                const float perPlayerKB = 300.0f * posePerSec / 1024.0f;          // KB/s for one remote player
+                float afford = static_cast<float>(g_netBudgetKB) / perPlayerKB;   // players affordable at full speed
+                if (afford < 4.0f) afford = 4.0f;                                 // always afford your immediate neighbours
+                const float need = static_cast<float>(pop - 1);
+                float cullM = static_cast<float>(g_netCullM);
+                if (need > afford) cullM *= sqrtf(afford / need);                 // shrink the radius, keep the rate
+                if (cullM < 40.0f) cullM = 40.0f;                                 // never cull someone right next to you
+                const float cull = cullM * 100.0f;                                // metres -> uu
+
+                *reinterpret_cast<uint8_t*>(p + 0x60) &= static_cast<uint8_t>(~0x08);  // relevancy does the limiting
+                *reinterpret_cast<float*>(p + 0x170) = cull * cull;   // NetCullDistanceSquared
+                *reinterpret_cast<float*>(p + 0x178) = 100.0f;        // NetUpdateFrequency — full speed (a cap, not a floor)
+                *reinterpret_cast<float*>(p + 0x17C) = 100.0f;        // MinNetUpdateFrequency — pinned: no adaptive drop to 2Hz
+                *reinterpret_cast<float*>(p + 0x180) = 10.0f;         // still outrank static scenery
                 static int s_lastPop = -1;
                 if (s_lastPop != pop)
                 {
                     s_lastPop = pop;
-                    HxLog("[HalcyonA2][NETSCALE] %d players -> per-pawn %.0fHz, cull %dm, relevancy ON "
-                          "(budget %d KB/s per client; the old profile asked for ~%.0f KB/s)\n",
-                          pop, hz, g_netCullM, g_netBudgetKB, (pop - 1) * 300.0 * 30.0 / 1024.0);
+                    HxLog("[HalcyonA2][NETSCALE] %d players -> FULL SPEED on relevance: cull %.0fm, "
+                          "rate uncapped (afford %.1f players @~%.0f poses/s, budget %d KB/s per client)\n",
+                          pop, cullM, afford, posePerSec, g_netBudgetKB);
                 }
             }
         }
@@ -13668,6 +13708,8 @@ static void Main(HMODULE)
         if (const wchar_t* a = wcsstr(GetCommandLineW(), L"-NetCrowd="))    { int v = _wtoi(a + 11); if (v >  0 && v < 200)  g_netCrowd    = v; }
         if (const wchar_t* a = wcsstr(GetCommandLineW(), L"-NetCullM="))    { int v = _wtoi(a + 10); if (v > 10 && v < 5000) g_netCullM    = v; }
         if (const wchar_t* a = wcsstr(GetCommandLineW(), L"-NetBudgetKB=")) { int v = _wtoi(a + 13); if (v > 10 && v < 5000) g_netBudgetKB = v; }
+        if (const wchar_t* a = wcsstr(GetCommandLineW(), L"-NetPoseHz="))   { int v = _wtoi(a + 11); if (v >  5 && v <  200) g_netPoseHz   = v; }
+        if (wcsstr(GetCommandLineW(), L"-NetRateThrottle")) { g_netRateThrottle = true; HxLog("[HalcyonA2] -NetRateThrottle: OLD population-throttled update rate (pre full-speed-on-relevance)\n"); }
         if (wcsstr(GetCommandLineW(), L"-HeartNoClip=0")) { g_heartNoClip = false; HxLog("[HalcyonA2] -HeartNoClip=0: heart ball keeps collision while being placed\n"); }
         if (const wchar_t* hh = wcsstr(GetCommandLineW(), L"-HeartHold=")) { const int v=_wtoi(hh+11); if (v>=0 && v<20000) g_heartHoldMs=v; }
         if (const wchar_t* hp = wcsstr(GetCommandLineW(), L"-HeartPlace=")) { const double v=_wtof(hp+12); if (v>=0.0 && v<1000.0) g_heartPlaceM=v; }
