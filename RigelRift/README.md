@@ -55,7 +55,7 @@ stations.
   ordinal to the real `C:\Windows\System32\dsound.dll`, so audio is unchanged. It is just a DLL the game
   already loads, used as a place to run at start-up — no console, no log window, no extra folder. By
   default it writes nothing at all; set `RIGEL_EOS_DIAG=1` before launching to get a one-line-per-event
-  `dsound.diag` next to the exe for a single validation run.
+  `rigel_eos.diag` in `%TEMP%` for a single validation run.
 - **Redirect.** At start-up it waits for the EOS SDK, finds `curl_easy_setopt` by a 24-byte signature
   (the varargs shim that spills rdx/r8/r9 and tail-calls the internal option setter; confirmed at RVA
   `0xcfaf90` in the shipped SDK, re-found by scan if a rebuild moves it), and hooks it. For

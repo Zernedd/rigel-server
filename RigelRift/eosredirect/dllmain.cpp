@@ -62,11 +62,11 @@ bool DiagOn()
 void Note(const char* fmt, ...)
 {
     if (!DiagOn()) return;
+    // %TEMP%\rigel_eos.diag -- always writable, unlike the install dir under Program Files.
     char path[MAX_PATH];
-    GetModuleFileNameA(nullptr, path, MAX_PATH);      // the game exe dir
-    char* slash = strrchr(path, '\\');
-    if (slash) strcpy_s(slash + 1, MAX_PATH - (slash + 1 - path), "dsound.diag");
-    else       strcpy_s(path, MAX_PATH, "dsound.diag");
+    DWORD n = GetTempPathA(MAX_PATH, path);
+    if (n == 0 || n > MAX_PATH) strcpy_s(path, MAX_PATH, ".\\");
+    strcat_s(path, MAX_PATH, "rigel_eos.diag");
     FILE* f = nullptr;
     if (fopen_s(&f, path, "a") || !f) return;
     va_list ap; va_start(ap, fmt);
