@@ -10469,7 +10469,8 @@ static int32_t g_idxSetFreqData = 0;   // A2PlayerEntity::Server_SetFrequentData
 // actor transform, so those two disagreeing is the thing to look for. Then sample the spawned ball
 // (AVRPawn::HeartBall @0x1E60) a second later to see where it ended up.
 static int32_t g_idxSpawnHeart = 0;
-struct HeartWatch { void* pawn; ULONGLONG at; double want[3]; };
+static double  g_heartPlaceM   = 1.5;   // -HeartPlace=N metres of error before we move it (0 = never)
+struct HeartWatch { void* pawn; ULONGLONG at; double want[3]; bool placed; };
 static HeartWatch g_heartWatch[16];
 static int        g_heartWatchN = 0;
 // [2026-09-09] HandleFiringClearerOverlapOnServer is the switcher's counterpart -- it REMOVES a
@@ -11042,6 +11043,7 @@ static void HeartSpawnTrace(SDK::UObject* Context, void* Parms)
         g_heartWatch[g_heartWatchN].want[0] = loc[0];
         g_heartWatch[g_heartWatchN].want[1] = loc[1];
         g_heartWatch[g_heartWatchN].want[2] = loc[2];
+        g_heartWatch[g_heartWatchN].placed  = false;
         ++g_heartWatchN;
     }
 }
@@ -11053,7 +11055,7 @@ static void HeartSpawnFollowUp()
     const ULONGLONG now = GetTickCount64();
     for (int i = 0; i < g_heartWatchN; )
     {
-        if (now - g_heartWatch[i].at < 1000) { ++i; continue; }
+        if (now - g_heartWatch[i].at < 250) { ++i; continue; }
         auto* pawn = static_cast<SDK::UObject*>(g_heartWatch[i].pawn);
         void* ball = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(pawn) + 0x1E60);
         double bx = 0, by = 0, bz = 0;
@@ -11067,8 +11069,29 @@ static void HeartSpawnFollowUp()
             }
         }
         const double dx = bx - g_heartWatch[i].want[0], dy = by - g_heartWatch[i].want[1], dz = bz - g_heartWatch[i].want[2];
-        HxLog("[HalcyonA2][HEARTBALL] 1s later: ball=%p at (%.0f,%.0f,%.0f) -- %.1fm from where it was asked for\n",
-              ball, bx, by, bz, sqrt(dx*dx + dy*dy + dz*dz) / 100.0);
+        const double off = sqrt(dx*dx + dy*dy + dz*dz) / 100.0;
+        HxLog("[HalcyonA2][HEARTBALL] %s: ball=%p at (%.0f,%.0f,%.0f) -- %.1fm from where it was asked for\n",
+              g_heartWatch[i].placed ? "after placing" : "shortly after", ball, bx, by, bz, off);
+
+        // [2026-09-12 *** THE FIX] The trace says it outright: the client asks for a spot 0.4m from its
+        // LIVE pose (the Mass entity) and the ball lands on the pawn ACTOR transform instead, which on
+        // this server sits ~70m away and never follows the player, because pose rides the entity. The
+        // same HeartBall object is reused every time, so a second pull "spawns" the old ball wherever
+        // that actor is parked. We cannot make the game read the entity, but we can put the ball where
+        // it was asked for.
+        if (ball && off > g_heartPlaceM && !g_heartWatch[i].placed)
+        {
+            auto* ba = static_cast<SDK::AActor*>(ball);
+            SDK::FVector want{ g_heartWatch[i].want[0], g_heartWatch[i].want[1], g_heartWatch[i].want[2] };
+            SDK::FHitResult hit{};
+            ba->K2_SetActorLocation(want, false, &hit, true);   // teleport: no sweep, no interpolation
+            HxLog("[HalcyonA2][HEARTBALL] moved it onto the requested hand position (%.0f,%.0f,%.0f)\n",
+                  want.X, want.Y, want.Z);
+            g_heartWatch[i].placed = true;      // re-sample once so the log shows whether it stuck
+            g_heartWatch[i].at = now;
+            ++i;
+            continue;
+        }
         g_heartWatch[i] = g_heartWatch[--g_heartWatchN];
     }
 }
@@ -13163,6 +13186,7 @@ static void Main(HMODULE)
         if (const wchar_t* a = wcsstr(GetCommandLineW(), L"-NetCrowd="))    { int v = _wtoi(a + 11); if (v >  0 && v < 200)  g_netCrowd    = v; }
         if (const wchar_t* a = wcsstr(GetCommandLineW(), L"-NetCullM="))    { int v = _wtoi(a + 10); if (v > 10 && v < 5000) g_netCullM    = v; }
         if (const wchar_t* a = wcsstr(GetCommandLineW(), L"-NetBudgetKB=")) { int v = _wtoi(a + 13); if (v > 10 && v < 5000) g_netBudgetKB = v; }
+        if (const wchar_t* hp = wcsstr(GetCommandLineW(), L"-HeartPlace=")) { const double v=_wtof(hp+12); if (v>=0.0 && v<1000.0) g_heartPlaceM=v; }
         if (wcsstr(GetCommandLineW(), L"-RolesTest")) { g_rolesTest = true; HxLog("[HalcyonA2] -RolesTest: push a fabricated global_voip role to every client (delivery test)\n"); }
         if (wcsstr(GetCommandLineW(), L"-TeamOverlapFire")) { g_teamOverlapFire = true; HxLog("[HalcyonA2] -TeamOverlapFire: 4Hz geometric team-changer scan ON (costs ~100ms/s of game thread)\n"); }
         if (const wchar_t* tr = wcsstr(GetCommandLineW(), L"-TeamRadius="))

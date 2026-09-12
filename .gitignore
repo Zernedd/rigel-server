@@ -69,3 +69,6 @@ production-log.db
 # python bytecode
 __pycache__/
 *.pyc
+
+# Rift spec build: the game copy is ~2.8 GB, only the tooling is tracked
+RigelRift/A2/
