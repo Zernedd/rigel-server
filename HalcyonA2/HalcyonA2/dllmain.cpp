@@ -389,6 +389,8 @@ static unsigned char __fastcall CosmeticCmp_Hook(void* a1, void* a2)
 // UModuleStateLuaAPI config getters (bool here, number/string below). Defined with the rest of the
 // override code further down; returns false instantly when no override exists.
 static bool NvLookupOverride(void* api, void* nameFStr, std::string* out);
+static void HxLog(const char* fmt, ...);   // fwd-decl (defined much later); the hook below must log through
+                                           // it, not printf -- see the note in GetBoolCfg_Hook.
 static constexpr uintptr_t GetBoolCfg_RVA = 0x46DA020;   // sub_7FF67673A020 (UModuleStateLuaAPI::GetBoolConfigVariable impl)
 using GetBoolCfg_t = unsigned char (__fastcall*)(void* ctx, void* nameFStr, __int64 a3, __int64 a4);
 static GetBoolCfg_t GetBoolCfg_Orig = nullptr;
@@ -400,9 +402,15 @@ static unsigned char __fastcall GetBoolCfg_Hook(void* ctx, void* nameFStr, __int
         int num = *reinterpret_cast<int*>(reinterpret_cast<char*>(nameFStr) + 8);     // FString.Num (incl. null)
         if (data && num >= 13 && wcsncmp(data, L"bScraprunOpen", 13) == 0)
         {
+            // [2026-09-13] HxLog, NOT printf. This line is the only evidence that the gamemode script
+            // actually ASKS for bScraprunOpen -- i.e. that ScraprunNetvarsChanged ran and the door logic
+            // executed. As printf it was invisible in practice: it goes to stdout, the launcher truncates
+            // the console log on every start, and printf to a redirected file is block-buffered, so a
+            // perfectly healthy server showed nothing. Diagnosing the door cost a whole restart because
+            // of that. HxLog lands in HalcyonA2.log, which is the file that actually survives.
             static volatile LONG s_scr = 0;
-            if (InterlockedIncrement(&s_scr) <= 4)
-                printf("[HalcyonA2][SCRAPRUN] getBoolConfigVariable(\"bScraprunOpen\") -> forced TRUE (scraprun open)\n");
+            if (InterlockedIncrement(&s_scr) <= 8)
+                HxLog("[HalcyonA2][SCRAPRUN] getBoolConfigVariable(\"bScraprunOpen\") -> forced TRUE (scraprun open)\n");
             // A dashboard override for bScraprunOpen wins over the forced default. The impl
             // (sub_1446DA020) frees the name FString it is handed, so it must still run either way.
             std::string ovScr;
@@ -7563,11 +7571,27 @@ static bool g_volleyfall = true;
 static void VolleyfallTick()
 {
     if (!g_volleyfall) return;
+    // [2026-09-13 PERF] NEGATIVE-cache the class lookup. `panelCls` is only assigned on success, so on any
+    // level without a spleef floor -- i.e. every station that does not host volleyfall, which is all of
+    // them right now -- this ran a full FindClassFast EVERY TICK for ever. [PROF] showed
+    // SafeVolleyfallTick=46-65ms/s (~5% of a VPS core) hunting a class that will never exist, and it never
+    // logged a thing because the [VOLLEY] cache line is gated on pN > 0. Same always-empty-cache trap the
+    // goal detector hit on Station_Prime. Absent level geometry stays absent: retry occasionally, not 90x/s.
     static SDK::UClass* panelCls = nullptr;   // [PERF] cached class lookup
-    if (!panelCls) panelCls = SDK::UObject::FindClassFast("BP_FloorPanelB_LE_C");
-    if (!panelCls) return;   // not a volleyfall level -> nothing to do
-    auto* ballCls  = SDK::UObject::FindClassFast("BP_JakeBall_C");
-    if (!ballCls) return;
+    static ULONGLONG s_nextClassTry = 0;
+    if (!panelCls)
+    {
+        const ULONGLONG tNow = GetTickCount64();
+        if (tNow < s_nextClassTry) return;
+        panelCls = SDK::UObject::FindClassFast("BP_FloorPanelB_LE_C");
+        if (!panelCls) { s_nextClassTry = tNow + 30000; return; }   // not a volleyfall level -> look again in 30s
+    }
+    // Volleyfall balls are BP_VolleyJakeball_C, NOT BP_JakeBall_C -- scanning only the latter left the ball
+    // list empty even where panels existed. (The payload already distinguishes both in kBallClasses[].)
+    static SDK::UClass* ballCls = nullptr, *volleyBallCls = nullptr;
+    if (!ballCls)       ballCls       = SDK::UObject::FindClassFast("BP_JakeBall_C");
+    if (!volleyBallCls) volleyBallCls = SDK::UObject::FindClassFast("BP_VolleyJakeball_C");
+    if (!ballCls && !volleyBallCls) return;
 
     static SDK::UObject* kslCDO = nullptr; static SDK::UFunction* fnBounds = nullptr;
     if (!kslCDO) kslCDO = static_cast<SDK::UObject*>(SDK::UKismetSystemLibrary::GetDefaultObj());
@@ -7636,17 +7660,29 @@ static void VolleyfallTick()
             }
             pSlot[pN] = e.idx; pObj[pN] = o; pOrg[pN] = bp.Origin; pExt[pN] = bp.BoxExtent; zSum += bp.Origin.Z; ++pN;
         }
-        for (const ObjIdxEntry& e : ClassObjectEntries(ballCls))
+        for (SDK::UClass* bc : { ballCls, volleyBallCls })
         {
-            if (bN >= 128) break;
-            if (e.obj->IsA(panelCls)) continue;
-            bSlotV[bN] = e.idx; bObj[bN++] = e.obj;
+            if (!bc) continue;
+            for (const ObjIdxEntry& e : ClassObjectEntries(bc))
+            {
+                if (bN >= 128) break;
+                if (e.obj->IsA(panelCls)) continue;
+                // BP_VolleyJakeball_C may derive from BP_JakeBall_C, so the two passes can hand back the
+                // same object -- it would then be tracked (and fired) twice.
+                bool dup = false;
+                for (int q = 0; q < bN; ++q) if (bObj[q] == e.obj) { dup = true; break; }
+                if (dup) continue;
+                bSlotV[bN] = e.idx; bObj[bN++] = e.obj;
+            }
         }
         if (spawnCls)
             for (SDK::UObject* o : ClassObjects(spawnCls))
             {
                 if (sN >= 16) break;
-                if (o->IsA(panelCls) || o->IsA(ballCls)) continue;
+                // Either ball class may be null now (only one has to resolve), so guard before IsA.
+                if (o->IsA(panelCls)) continue;
+                if (ballCls && o->IsA(ballCls)) continue;
+                if (volleyBallCls && o->IsA(volleyBallCls)) continue;
                 sObj[sN++] = o;
             }
         if (pN > 0) floorZ = zSum / pN;
@@ -9463,11 +9499,33 @@ static bool NvLookupOverride(void* api, void* nameFStr, std::string* out)
     return found;
 }
 
-static void NvBroadcastConfigChanged(SDK::UObject* api)
+static void NvBroadcastConfigChanged(SDK::UObject* api, const char* slotId)
 {
     const auto* list = reinterpret_cast<RawDelegateList*>(reinterpret_cast<uintptr_t>(api) + 0x30);   // OnConfigChanged
     int n = list->Num;
-    if (n <= 0 || !list->Data) return;
+
+    // [2026-09-13] Say what we actually found. ScrapRun's gamemode.luau binds ScraprunNetvarsChanged to
+    // Gamemode.onConfigChanged, yet its getBoolConfigVariable hook never fired ONCE -- so either this
+    // delegate is empty (the script bound elsewhere) or we never reached here. This line settles which,
+    // without costing another game-server restart to find out.
+    static int s_logged = 0;
+    if (s_logged < 60)
+    {
+        ++s_logged;
+        HxLog("[HalcyonA2][NETVARS] notify %s: api=%p listeners=%d\n", slotId ? slotId : "?", (void*)api, n);
+    }
+
+    if (n <= 0 || !list->Data)
+    {
+        // Nothing bound to the multicast delegate: fall back to the UFunction of the same name, which is
+        // what ProcessEvent would route a Blueprint/script-side OnConfigChanged through.
+        if (auto* fn = api->Class ? api->Class->GetFunction("ModuleStateLuaAPI", "OnConfigChanged") : nullptr)
+        {
+            uint8_t parms[32] = {};
+            api->ProcessEvent(fn, parms);
+        }
+        return;
+    }
     if (n > 16) n = 16;
     struct Entry { int32_t objIndex; SDK::FName fn; };
     Entry copy[16];
@@ -9502,8 +9560,12 @@ static void NvSlotMap()
             const SDK::FVector l = static_cast<SDK::AActor*>(o)->K2_GetActorLocation();
             auto* ms = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(o) + 0x300);
             auto* tm = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(o) + 0x438);
-            HxLog("[HalcyonA2][SLOTMAP] slot %s at (%.0f, %.0f, %.0f) moduleState=%p ticketManager=%p actor=%s\n",
-                  id.c_str(), l.X, l.Y, l.Z, ms, tm, o->GetName().c_str());
+            // [2026-09-13] luaApi = UModuleState::LuaAPI @0x90 -- the object whose OnConfigChanged
+            // delegate we broadcast on to tell a gamemode script its config changed. A null here is the
+            // first thing to check when a script ignores a netvar (see the ScrapRun door).
+            void* api = ms ? *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(ms) + 0x90) : nullptr;
+            HxLog("[HalcyonA2][SLOTMAP] slot %s at (%.0f, %.0f, %.0f) moduleState=%p luaApi=%p ticketManager=%p actor=%s\n",
+                  id.c_str(), l.X, l.Y, l.Z, ms, api, tm, o->GetName().c_str());
             ++slots;
         }
         else if (doorCls && o->IsA(doorCls))
@@ -9838,15 +9900,35 @@ static void NvApplyTick()
     }
 
     // Re-run the consumers that cache config: the ticket manager (whitelist) and the gamemode script.
+    // [2026-09-13 *** THE SCRAPRUN DOOR FIX] Notify every slot we hold an override FOR, not only the ones
+    // written on this pass. A gamemode script whose value was ALREADY correct produced `same` and no
+    // write, so touchedSlots was empty and nothing ever told it to re-read -- and its Luau only reacts to
+    // that callback. That is why the ScrapRun door stayed shut with bScraprunOpen=true correct in the
+    // database, the override file, and the live ModuleState: the script was never asked to look.
+    // Re-notifying costs one ProcessEvent per override slot per pass, which is nothing.
+    std::unordered_set<std::string> notify;
+    for (const auto& t : touchedSlots) notify.insert(t.first);
+    for (const auto& kv : want)        notify.insert(kv.second.slot);
+
     SDK::UFunction* tmCfg = tmCls ? tmCls->GetFunction("TicketManager", "OnConfigChanged") : nullptr;
-    for (const auto& t : touchedSlots)
+    for (const auto& sid : notify)
         for (const auto& st : states)
         {
-            if (st.id != t.first) continue;
+            if (st.id != sid) continue;
             if (st.slot && tmCfg)
                 if (auto* tm = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(st.slot) + 0x438))
                     tm->ProcessEvent(tmCfg, nullptr);
-            if (st.api) NvBroadcastConfigChanged(st.api);
+            if (st.api) NvBroadcastConfigChanged(st.api, st.id.c_str());
+            else
+            {
+                static int s_noApi = 0;
+                if (s_noApi < 20)
+                {
+                    ++s_noApi;
+                    HxLog("[HalcyonA2][NETVARS] %s has NO LuaAPI (ModuleState+0x90 is null) -- its script cannot be notified\n",
+                          st.id.c_str());
+                }
+            }
         }
 
     AcquireSRWLockExclusive(&g_nvLock);
@@ -11029,10 +11111,18 @@ static bool IsScrapChangeActor(void* actor)
 }
 static void LogScrapGuard(const char* what, SDK::UObject* Context)
 {
-    HxLog("[HalcyonA2][SCRAPGUARD] held back %s for %s -- %d runner(s) still alive, round continues "
+    HxLog("[HalcyonA2][SCRAPGUARD] held back %s for %s -- %d runner(s) still alive, roster=%d, round continues "
           "(%ld held this round)\n",
           what, Context ? Context->GetName().c_str() : "<null>",
-          ScrapLiveRunnersOtherThan(Context), g_scrapGuardHits);
+          ScrapLiveRunnersOtherThan(Context), g_scrapRosterCell ? *g_scrapRosterCell : -1, g_scrapGuardHits);
+}
+// [2026-09-13] The other outcome: the roster can absorb this death, so the game's own clear runs and the
+// player really does lose their team. Logged so the two paths are distinguishable in one grep.
+static void LogScrapPass(const char* what, SDK::UObject* Context, int roster)
+{
+    HxLog("[HalcyonA2][SCRAPGUARD] let %s through for %s -- roster=%d can absorb it, %d other runner(s) alive "
+          "(team actually cleared; no walk to the team changer needed)\n",
+          what, Context ? Context->GetName().c_str() : "<null>", roster, ScrapLiveRunnersOtherThan(Context));
 }
 static void SafeReleaseHeldClears(void* except)
 {
@@ -11041,6 +11131,10 @@ static void SafeReleaseHeldClears(void* except)
 static void SafeLogScrapGuard(const char* what, SDK::UObject* c)
 {
     __try { LogScrapGuard(what, c); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+static void SafeLogScrapPass(const char* what, SDK::UObject* c, int roster)
+{
+    __try { LogScrapPass(what, c, roster); } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
 static std::string IntArrayStr(uintptr_t arr)   // TArray<int32>: Data@0, Num@8
@@ -11747,17 +11841,37 @@ static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, v
         if (what && victim && ScrapHasPawn(victim) && !ScrapIsScrapper(victim))
         {
             const int pidx = *reinterpret_cast<unsigned char*>(reinterpret_cast<uintptr_t>(victim) + 0x1C22);
+            const int roster = g_scrapRosterCell ? *g_scrapRosterCell : 0;
             if (ScrapLiveRunnersOtherThan(victim) > 0)
             {
-                ScrapMarkDead(victim, pidx);
-                ++g_scrapGuardHits;
-                SafeLogScrapGuard(what, victim);
-                return;                   // held back: other runners are still going, the round continues
+                // [2026-09-13 *** DEAD RUNNERS KEEP THEIR TEAM -- the fix]
+                // The original guard swallowed EVERY death while another runner lived. That is why a dead
+                // runner stayed on the team and had to walk into the team changer to shed it. Holding is
+                // only actually necessary when letting the clear through would drop the roster to 0 and
+                // trip the Luau's "teamSize == 0 -> GAME_EXIT" rule while runners are still playing.
+                // When the roster holds more than one runner -- it now reaches 2+, where in 2026-09-09 it
+                // never exceeded 1 -- the clear can simply run: the roster decrements, teamSize != 0, the
+                // round continues, and the dead player genuinely loses their team.
+                if (roster <= 1)
+                {
+                    ScrapMarkDead(victim, pidx);
+                    ++g_scrapGuardHits;
+                    SafeLogScrapGuard(what, victim);
+                    return;               // the roster cannot absorb this death yet -- hold it back
+                }
+                ScrapMarkDead(victim, pidx);          // remember they are down...
+                SafeLogScrapPass(what, victim, roster);
+                // ...and fall through so the game's own clear runs. Deliberately NOT releasing the held
+                // clears here: other runners are still going, and releasing early would empty the roster
+                // and hand the Scrappers a win mid-round.
             }
-            // Last one standing just went down -> this is the Scrappers' win, not a stray death.
-            ScrapMarkDead(victim, pidx);
-            SafeReleaseHeldClears(victim);
-            // ...and fall through so the game's own clear runs and empties the roster.
+            else
+            {
+                // Last one standing just went down -> this is the Scrappers' win, not a stray death.
+                ScrapMarkDead(victim, pidx);
+                SafeReleaseHeldClears(victim);
+                // ...and fall through so the game's own clear runs and empties the roster.
+            }
         }
     }
 
