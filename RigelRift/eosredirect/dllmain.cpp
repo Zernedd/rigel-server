@@ -29,6 +29,7 @@
 // it if a rebuild shifts it).
 
 #include <windows.h>
+#include <psapi.h>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -43,6 +44,11 @@ extern "C" void* g_real10; extern "C" void* g_real11; extern "C" void* g_real12;
 namespace {
 
 const char* kEosGateway = "https://rigel-eos.wwiggles.org";   // our EOS gateway (VPS TLS)
+// Our own "spec"/publish Meta app. Making the Oculus platform initialise under THIS id is the whole
+// point of the app-id hook: the entitlement check then asks about our app, which the signed-in account
+// (and anyone on the app's release channel) owns, so it passes honestly. Static storage: the pointer we
+// hand the SDK must outlive the call.
+static const char* const kOurAppId = "1366120006579163";
 
 // A discreet breadcrumb so a first live launch can be confirmed without a console. OFF by default so a
 // shipped build writes nothing at all; set RIGEL_EOS_DIAG=1 before launching to turn it on for one run.
@@ -153,6 +159,66 @@ uint8_t* FindCurlSetopt(HMODULE mod)
     return nullptr;
 }
 
+// ── the app-id hook (entitlement, done honestly under our own app) ────────────────────────────
+// The PC build initialises the Oculus platform with the STOCK app id (cooked into the pak, not
+// overridable by config on an installed build), so the entitlement check is for the wrong app and a
+// Shipping build exits. We intercept the platform init and substitute our app id, so the check is for
+// OUR app -- which the account owns. Not a bypass: the entitlement is granted for real.
+//
+// Two entry points exist depending on SDK version; both take the app id as the first argument.
+using ovrInit_t   = int (*)(const char* appId);
+using ovrInitEx_t = int (*)(const char* appId, int productVersion);
+ovrInit_t   g_initOrig   = nullptr;
+ovrInitEx_t g_initExOrig = nullptr;
+
+int my_ovr_init(const char* /*appId*/)
+{
+    Note("[appid] ovr_PlatformInitializeWindows -> %s", kOurAppId);
+    return g_initOrig ? g_initOrig(kOurAppId) : 0;
+}
+int my_ovr_initEx(const char* /*appId*/, int productVersion)
+{
+    Note("[appid] ovr_PlatformInitializeWindowsEx -> %s (ver %d)", kOurAppId, productVersion);
+    return g_initExOrig ? g_initExOrig(kOurAppId, productVersion) : 0;
+}
+
+// Resolve and hook whichever init export a module carries. Returns true once something is hooked.
+bool TryHookOculusInit(HMODULE mod)
+{
+    static bool done = false;
+    if (done || !mod) return done;
+
+    auto ex = reinterpret_cast<ovrInitEx_t>(GetProcAddress(mod, "ovr_PlatformInitializeWindowsEx"));
+    auto w  = reinterpret_cast<ovrInit_t>  (GetProcAddress(mod, "ovr_PlatformInitializeWindows"));
+    if (!ex && !w) return false;                 // not the platform loader
+
+    MH_Initialize();                             // idempotent; ALREADY_INITIALIZED is fine
+    if (ex && MH_CreateHook(reinterpret_cast<void*>(ex), reinterpret_cast<void*>(&my_ovr_initEx),
+                            reinterpret_cast<void**>(&g_initExOrig)) == MH_OK)
+        MH_EnableHook(reinterpret_cast<void*>(ex));
+    if (w && MH_CreateHook(reinterpret_cast<void*>(w), reinterpret_cast<void*>(&my_ovr_init),
+                           reinterpret_cast<void**>(&g_initOrig)) == MH_OK)
+        MH_EnableHook(reinterpret_cast<void*>(w));
+
+    done = (g_initExOrig != nullptr) || (g_initOrig != nullptr);
+    if (done) Note("[appid] hooked platform init (Ex=%d W=%d)", ex != nullptr, w != nullptr);
+    return done;
+}
+
+// Scan every loaded module for the platform-init export and hook it. Called on a tight poll so it lands
+// before the game calls init (~7s in), regardless of what the loader DLL is named.
+bool SweepForOculusInit()
+{
+    HMODULE mods[512];
+    DWORD needed = 0;
+    if (!EnumProcessModules(GetCurrentProcess(), mods, sizeof(mods), &needed)) return false;
+    int n = (int)(needed / sizeof(HMODULE));
+    if (n > 512) n = 512;
+    for (int i = 0; i < n; ++i)
+        if (TryHookOculusInit(mods[i])) return true;
+    return false;
+}
+
 void InstallEosRedirect()
 {
     // The EOS SDK DLL is loaded by the game a little after start-up. Wait for it (up to ~60s), then
@@ -182,6 +248,19 @@ void InstallEosRedirect()
 
 DWORD WINAPI Worker(LPVOID)
 {
+    // Phase 1 -- app id. This is time-critical: the platform init call happens only a few seconds into
+    // start-up, and if we miss it the entitlement check runs under the stock app and the build exits.
+    // Poll fast until hooked (or give up after ~30s). One startup sweep first, in case the loader is
+    // already mapped.
+    bool appIdHooked = SweepForOculusInit();
+    for (int i = 0; i < 1500 && !appIdHooked; ++i)   // 1500 * 20ms = 30s
+    {
+        Sleep(20);
+        appIdHooked = SweepForOculusInit();
+    }
+    if (!appIdHooked) Note("[appid] platform init never appeared -- entitlement will use the stock app");
+
+    // Phase 2 -- EOS station-browser redirect. Not time-critical (stations are browsed after login).
     InstallEosRedirect();
     return 0;
 }

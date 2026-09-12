@@ -30,7 +30,7 @@ $cmds = @(
   "if errorlevel 1 exit /b 1",
   "cl /nologo /c /O2 /MT /EHsc /GS- /I`"$mh\include`" `"$here\dllmain.cpp`" `"$mh\src\buffer.c`" `"$mh\src\hook.c`" `"$mh\src\trampoline.c`" `"$mh\src\hde\hde64.c`"",
   "if errorlevel 1 exit /b 1",
-  "cl /nologo /LD /Fe:dsound.dll dllmain.obj buffer.obj hook.obj trampoline.obj hde64.obj thunks.obj /link /DEF:`"$here\exports.def`" kernel32.lib user32.lib",
+  "cl /nologo /LD /Fe:dsound.dll dllmain.obj buffer.obj hook.obj trampoline.obj hde64.obj thunks.obj /link /DEF:`"$here\exports.def`" kernel32.lib user32.lib psapi.lib",
   "if errorlevel 1 exit /b 1"
 ) -join ' && '
 
