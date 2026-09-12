@@ -10477,7 +10477,8 @@ static double  g_heartPlaceM   = 1.5;
 // rejoin. Capture the real payload (size, mesh name, colour bytes) so persistence can be built against
 // the actual shape rather than a guess.
 static int32_t g_idxSetCosmetic = 0;
-static int32_t g_idxSetColor    = 0;   // A2PlayerEntity::Server_SetCurrentColor   // -HeartPlace=N metres of error before we move it (0 = never)
+static int32_t g_idxSetColor    = 0;   // A2PlayerEntity::Server_SetCurrentColor
+static int32_t g_idxSetEquipped = 0;   // A2PlayerEntity::Server_SetEquippedItems   // -HeartPlace=N metres of error before we move it (0 = never)
 struct HeartWatch { void* pawn; void* ball; ULONGLONG at; ULONGLONG holdUntil; double want[3]; bool placed; };
 static int  g_heartHoldMs = 2000;
 static bool g_heartNoClip = true;   // -HeartNoClip=0: do not drop collision while moving the ball   // -HeartHold=N ms to defend the placement (0 = don't)
@@ -10569,6 +10570,13 @@ static void ResolveRpcIndices()
                         g_idxSetCosmetic = fc->Name.ComparisonIndex;
                         HxLog("[HalcyonA2][COSMETIC] tracing Server_SetCosmeticData (FName idx=%d, parms=%d bytes)\n",
                               g_idxSetCosmetic, fc->Size);
+                    }
+                if (!g_idxSetEquipped)
+                    if (auto* fe = peCls2->GetFunction("A2PlayerEntity", "Server_SetEquippedItems"))
+                    {
+                        g_idxSetEquipped = fe->Name.ComparisonIndex;
+                        HxLog("[HalcyonA2][COSMETIC] tracing Server_SetEquippedItems (FName idx=%d, parms=%d bytes)\n",
+                              g_idxSetEquipped, fe->Size);
                     }
                 if (!g_idxSetColor)
                     if (auto* fk = peCls2->GetFunction("A2PlayerEntity", "Server_SetCurrentColor"))
@@ -11186,6 +11194,204 @@ static void HeartSpawnFollowUp()
 }
 static void SafeHeartSpawnFollowUp() { __try { HeartSpawnFollowUp(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
 
+// ======================= COSMETIC PERSISTENCE (player colour) =======================
+// [2026-09-12] A colour change sends A2PlayerEntity::Server_SetCosmeticData(FName MeshName,
+// FA2CosmeticMaterialMetadata, FTeamColor Preferred, FTeamColor Custom). The server applies it to the
+// live entity and NOTHING stores it, so it is right for the session and gone on rejoin. The backend log
+// proves where it is not: across a whole session the client never GETs or POSTs player_inventory, there
+// is no colour route at all, and the only key ever written is player_quests (by the game server, on its
+// trusted path). So the server has to do the storing, which is what this does.
+//
+// The payload, from five real captures:
+//     mesh='robotd' parms=176
+//     FB961400 00000000 | B806932FF77F0000 | 0800243F 0000803F ...   <- bytes 8..15 are a POINTER
+//     FB961400 00000000 | 0000000000000000 | 0000023F 0000803F ...   <- same mesh, that field null
+// Two consequences. That pointer is a live address: it must never be stored or replayed, and since it
+// is legitimately null in other calls, zeroing it is safe. And the leading FName's index differed
+// between captures (0x1496FB vs 0x1496CA), so a stored index cannot be trusted either -- we keep the
+// NAME as text and, on restore, only apply the blob if its FName still decodes to that same name.
+// Anything else is skipped and logged rather than applied wrong.
+//
+// Stored under our own key (rigel_cosmetics), never player_inventory, so there is no chance of
+// corrupting the format the game itself owns.
+static std::mutex g_cosMu;
+struct CosApply { void* entity; std::string mesh; std::string hex; };
+static std::vector<CosApply>                  g_cosApplyQ;   // worker -> game thread
+static std::unordered_map<void*, std::string> g_cosHex;      // entity -> latest blob (hex)
+static std::unordered_map<void*, std::string> g_cosMesh;     // entity -> mesh name
+static std::unordered_map<void*, ULONGLONG>   g_cosDirtyAt;  // entity -> last change
+static std::unordered_set<void*>              g_cosAsked;    // entities already restored (or tried)
+// [2026-09-12] Storing under our own key was wrong: only we could read it. Cosmetics belong in the key
+// the GAME reads (player_inventory) so the player's own client applies them at login, with no
+// server-side replay at all. But that key holds EQUIPPED ITEMS (EquippedItems / ItemIdsPerSlot /
+// Server_SetEquippedItems), not the 176-byte material blob captured here, so writing this blob into it
+// would corrupt the format the client parses. Capture only until the real payload is known.
+static bool g_cosSave = false;                               // -CosmeticSave opts the writer back in
+
+// The player's Mothership id: entity -> owning AVRPawn (+0xE8) -> Controller (+0x2D0) ->
+// AVRPlayerController::mothershipId (FString @0xA10). Empty when any link is not up yet.
+static std::string CosUserId(SDK::UObject* entity)
+{
+    if (!entity) return "";
+    void* pawn = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(entity) + 0xE8);
+    if (!pawn) return "";
+    void* ctrl = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(pawn) + 0x2D0);
+    if (!ctrl) return "";
+    return FStringToNarrow(reinterpret_cast<SDK::FString*>(reinterpret_cast<uintptr_t>(ctrl) + 0xA10));
+}
+
+static std::string CosHexOf(const unsigned char* raw, int size)
+{
+    static const char* d = "0123456789ABCDEF";
+    std::string hex;
+    hex.reserve(static_cast<size_t>(size) * 2);
+    for (int i = 0; i < size; ++i)
+    {
+        const unsigned char b = (i >= 8 && i < 16) ? 0u : raw[i];   // never store the pointer field
+        hex.push_back(d[b >> 4]);
+        hex.push_back(d[b & 0xF]);
+    }
+    return hex;
+}
+
+static std::vector<unsigned char> CosBytesOf(const std::string& hex)
+{
+    auto nib = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        return -1;
+    };
+    std::vector<unsigned char> out;
+    out.reserve(hex.size() / 2);
+    for (size_t i = 0; i + 1 < hex.size(); i += 2)
+    {
+        const int a = nib(hex[i]), b = nib(hex[i + 1]);
+        if (a < 0 || b < 0) return {};
+        out.push_back(static_cast<unsigned char>((a << 4) | b));
+    }
+    return out;
+}
+
+// Both of these block on HTTP, so they only ever run on a detached worker -- same as the quest fetch.
+// Nothing here touches a UObject; the apply is handed back to the game thread through g_cosApplyQ.
+static void CosSaveWorker(std::string userId, std::string mesh, std::string hex)
+{
+    const std::string token = MothershipLogin(userId);
+    if (token.empty()) { HxLog("[HalcyonA2][COSMETIC] save %s: no token\n", userId.c_str()); return; }
+    const std::wstring wtok(token.begin(), token.end());
+    const std::wstring hdr = L"Content-Type: application/json\r\nx-server-api-key: "
+                             + std::wstring(kServerApiKey) + L"\r\nx-mothership-token: " + wtok + L"\r\n";
+    const std::string body = "{\"key_name\":\"rigel_cosmetics\",\"value\":\"" + mesh + "|" + hex + "\"}";
+    DWORD code = 0;
+    HttpReq(kMotherHost, kMotherPort, L"POST", L"/v1/userdata/client", body, hdr, &code);
+    HxLog("[HalcyonA2][COSMETIC] saved %s mesh='%s' %zu bytes -> http=%lu\n",
+          userId.c_str(), mesh.c_str(), hex.size() / 2, static_cast<unsigned long>(code));
+}
+
+static void CosLoadWorker(void* entity, std::string userId)
+{
+    const std::string token = MothershipLogin(userId);
+    if (token.empty()) return;
+    const std::wstring wtok(token.begin(), token.end());
+    const std::wstring hdr = L"x-server-api-key: " + std::wstring(kServerApiKey)
+                             + L"\r\nx-mothership-token: " + wtok + L"\r\n";
+    DWORD code = 0;
+    const std::string resp = HttpReq(kMotherHost, kMotherPort, L"GET",
+                                     L"/v1/userdata/client?key_name=rigel_cosmetics", "", hdr, &code);
+    const std::string val = ExtractJsonString(resp, "value");
+    if (code != 200 || val.empty()) return;      // nothing stored yet; the first change creates it
+    const size_t bar = val.find('|');
+    if (bar == std::string::npos) return;
+    CosApply a{ entity, val.substr(0, bar), val.substr(bar + 1) };
+    std::lock_guard<std::mutex> lk(g_cosMu);
+    g_cosApplyQ.push_back(std::move(a));
+}
+
+// Game thread: flush pending saves, ask for anyone not restored yet, apply what came back.
+static void CosmeticTick()
+{
+    if (!g_cosSave || !g_idxSetCosmetic) return;
+    static ULONGLONG s_last = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (now - s_last < 1000) return;
+    s_last = now;
+
+    static SDK::UClass* peCls = nullptr;
+    if (!peCls) peCls = SDK::UObject::FindClassFast("A2PlayerEntity");
+    if (!peCls) return;
+    const std::vector<SDK::UObject*>& live = ClassObjects(peCls);
+
+    // 1. save anything that stopped changing ~2s ago (a colour slider fires this RPC repeatedly)
+    std::vector<std::string> uid3, mesh3, hex3;
+    {
+        std::lock_guard<std::mutex> lk(g_cosMu);
+        for (auto it = g_cosDirtyAt.begin(); it != g_cosDirtyAt.end(); )
+        {
+            if (now - it->second < 2000) { ++it; continue; }
+            const std::string uid = CosUserId(static_cast<SDK::UObject*>(it->first));
+            auto hIt = g_cosHex.find(it->first);
+            if (!uid.empty() && hIt != g_cosHex.end())
+            {
+                uid3.push_back(uid);
+                mesh3.push_back(g_cosMesh[it->first]);
+                hex3.push_back(hIt->second);
+            }
+            it = g_cosDirtyAt.erase(it);
+        }
+    }
+    for (size_t i = 0; i < uid3.size(); ++i)
+        std::thread(CosSaveWorker, uid3[i], mesh3[i], hex3[i]).detach();
+
+    // 2. restore: one fetch per entity, the first time we see it with a user id
+    for (SDK::UObject* o : live)
+    {
+        if (g_cosAsked.count(o)) continue;
+        const std::string uid = CosUserId(o);
+        if (uid.empty()) continue;                  // not logged in yet -- try again next tick
+        g_cosAsked.insert(o);
+        std::thread(CosLoadWorker, static_cast<void*>(o), uid).detach();
+    }
+
+    // 3. apply whatever the workers fetched
+    std::vector<CosApply> todo;
+    {
+        std::lock_guard<std::mutex> lk(g_cosMu);
+        todo.swap(g_cosApplyQ);
+    }
+    if (todo.empty()) return;
+    static SDK::UFunction* fn = nullptr;
+    if (!fn) fn = peCls->GetFunction("A2PlayerEntity", "Server_SetCosmeticData");
+    if (!fn) return;
+    for (size_t k = 0; k < todo.size(); ++k)
+    {
+        CosApply& a = todo[k];
+        bool alive = false;                          // the player may have left while we fetched
+        for (SDK::UObject* o : live) if (o == a.entity) { alive = true; break; }
+        if (!alive) continue;
+        std::vector<unsigned char> blob = CosBytesOf(a.hex);
+        if (static_cast<int>(blob.size()) != fn->Size)
+        {
+            HxLog("[HalcyonA2][COSMETIC] restore skipped: stored %zu bytes, this build wants %d\n",
+                  blob.size(), fn->Size);
+            continue;
+        }
+        // The stored FName index only means anything if it still decodes to the same name in THIS
+        // process. If it does not, applying the blob would set some unrelated mesh -- skip instead.
+        const std::string nameNow = reinterpret_cast<const SDK::FName*>(blob.data())->ToString();
+        if (nameNow != a.mesh)
+        {
+            HxLog("[HalcyonA2][COSMETIC] restore skipped: stored mesh '%s' but that FName reads '%s' here\n",
+                  a.mesh.c_str(), nameNow.c_str());
+            continue;
+        }
+        static_cast<SDK::UObject*>(a.entity)->ProcessEvent(fn, blob.data());
+        HxLog("[HalcyonA2][COSMETIC] restored mesh='%s' onto %s\n",
+              a.mesh.c_str(), static_cast<SDK::UObject*>(a.entity)->GetName().c_str());
+    }
+}
+static void SafeCosmeticTick() { __try { CosmeticTick(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+
 // [2026-09-12 COSMETIC] Dump the incoming cosmetic payload. FA2CosmeticMaterialMetadata's layout is not
 // in the SDK dump, so print the raw parameter block as hex alongside the decoded MeshName -- that is
 // enough to store and replay it verbatim later.
@@ -11197,6 +11403,24 @@ static void CosmeticTrace(SDK::UObject* Context, SDK::UFunction* Function, void*
     for (int i = 0; i < size && i < 96 && n < static_cast<int>(sizeof(hex)) - 3; ++i)
         n += _snprintf_s(hex + n, sizeof(hex) - n, _TRUNCATE, "%02X", raw[i]);
     hex[n] = 0;
+    // Server_SetEquippedItems(TArray<FName>): Data@0, Num@8 -- this is what player_inventory is made of,
+    // so log the item ids as text. Names are what the client would rebuild from; the indices are not
+    // portable between processes.
+    if (Function->Name.ComparisonIndex == g_idxSetEquipped)
+    {
+        auto* arr = reinterpret_cast<const SDK::FName**>(Parms);
+        const int num = *reinterpret_cast<const int32_t*>(reinterpret_cast<uintptr_t>(Parms) + 8);
+        std::string list;
+        const SDK::FName* items = *arr;
+        for (int i = 0; items && i < num && i < 24; ++i)
+        {
+            if (!list.empty()) list += ", ";
+            list += items[i].ToString();
+        }
+        HxLog("[HalcyonA2][COSMETIC] %s SetEquippedItems: %d item(s) [%s]\n",
+              Context->GetName().c_str(), num, list.c_str());
+        return;
+    }
     const bool isCosmetic = (Function->Name.ComparisonIndex == g_idxSetCosmetic);
     std::string mesh = isCosmetic ? reinterpret_cast<const SDK::FName*>(Parms)->ToString() : std::string("-");
     static int s_shown = 0;
@@ -11204,7 +11428,15 @@ static void CosmeticTrace(SDK::UObject* Context, SDK::UFunction* Function, void*
         HxLog("[HalcyonA2][COSMETIC] %s %s: mesh='%s' parms=%d bytes raw=%s\n",
               Context->GetName().c_str(), isCosmetic ? "SetCosmeticData" : "SetCurrentColor",
               mesh.c_str(), size, hex);
+    if (isCosmetic && g_cosSave && size > 16)
+    {
+        std::lock_guard<std::mutex> lk(g_cosMu);
+        g_cosHex[Context]     = CosHexOf(raw, size);
+        g_cosMesh[Context]    = mesh;
+        g_cosDirtyAt[Context] = GetTickCount64();     // debounced + saved in CosmeticTick
+    }
 }
+
 
 static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, void* Parms)
 {
@@ -11273,7 +11505,8 @@ static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, v
     // [2026-09-12 COSMETIC] what a colour change actually carries
     if (Function && Context && Parms &&
         ((g_idxSetCosmetic && Function->Name.ComparisonIndex == g_idxSetCosmetic) ||
-         (g_idxSetColor    && Function->Name.ComparisonIndex == g_idxSetColor)))
+         (g_idxSetColor    && Function->Name.ComparisonIndex == g_idxSetColor)    ||
+         (g_idxSetEquipped && Function->Name.ComparisonIndex == g_idxSetEquipped)))
     {
         __try { CosmeticTrace(Context, Function, Parms); } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
@@ -11600,6 +11833,7 @@ static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, v
         PROF(SafePollTeamRosters);   // [ROSTER] catch the exact moment of removal
         PROF(SafeRePushRoles);       // [ROLES] re-send station roles to owning clients (god voice)
         PROF(SafeHeartSpawnFollowUp);// [HEARTBALL] where the spawned ball ended up
+        PROF(SafeCosmeticTick);      // [COSMETIC] persist + restore player colour
         PROF(SafeRolesTestPush);     // [ROLESTEST] -RolesTest: local proof that Client_SetRoles crosses the wire
         // Fallback only: if the tick above somehow doesn't advance a GSM out of GAME_BEGIN within ~11s,
         // force it to RUNNING via the NetVar (skips the Luau onEnter). Disarmed automatically the moment
@@ -13306,6 +13540,7 @@ static void Main(HMODULE)
         if (wcsstr(GetCommandLineW(), L"-HeartNoClip=0")) { g_heartNoClip = false; HxLog("[HalcyonA2] -HeartNoClip=0: heart ball keeps collision while being placed\n"); }
         if (const wchar_t* hh = wcsstr(GetCommandLineW(), L"-HeartHold=")) { const int v=_wtoi(hh+11); if (v>=0 && v<20000) g_heartHoldMs=v; }
         if (const wchar_t* hp = wcsstr(GetCommandLineW(), L"-HeartPlace=")) { const double v=_wtof(hp+12); if (v>=0.0 && v<1000.0) g_heartPlaceM=v; }
+        if (wcsstr(GetCommandLineW(), L"-CosmeticSave")) { g_cosSave = true; HxLog("[HalcyonA2] -CosmeticSave: cosmetic writer ON (private key -- not the format the client reads)\n"); }
         if (wcsstr(GetCommandLineW(), L"-RolesTest")) { g_rolesTest = true; HxLog("[HalcyonA2] -RolesTest: push a fabricated global_voip role to every client (delivery test)\n"); }
         if (wcsstr(GetCommandLineW(), L"-TeamOverlapFire")) { g_teamOverlapFire = true; HxLog("[HalcyonA2] -TeamOverlapFire: 4Hz geometric team-changer scan ON (costs ~100ms/s of game thread)\n"); }
         if (const wchar_t* tr = wcsstr(GetCommandLineW(), L"-TeamRadius="))
