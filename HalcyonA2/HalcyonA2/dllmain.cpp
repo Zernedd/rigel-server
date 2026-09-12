@@ -10479,7 +10479,8 @@ static double  g_heartPlaceM   = 1.5;
 static int32_t g_idxSetCosmetic = 0;
 static int32_t g_idxSetColor    = 0;   // A2PlayerEntity::Server_SetCurrentColor   // -HeartPlace=N metres of error before we move it (0 = never)
 struct HeartWatch { void* pawn; void* ball; ULONGLONG at; ULONGLONG holdUntil; double want[3]; bool placed; };
-static int g_heartHoldMs = 2000;   // -HeartHold=N ms to defend the placement (0 = don't)
+static int  g_heartHoldMs = 2000;
+static bool g_heartNoClip = true;   // -HeartNoClip=0: do not drop collision while moving the ball   // -HeartHold=N ms to defend the placement (0 = don't)
 
 static HeartWatch g_heartWatch[16];
 static int        g_heartWatchN = 0;
@@ -11155,6 +11156,12 @@ static void HeartSpawnFollowUp()
             // (traced at Z=-128000 while ours sits at -28600) -- and the server accepts it, so our
             // placement is overwritten within a frame. Defend it: hold the position for a moment and
             // drop that client stream (see HeartHoldActive) so the server copy is what replicates.
+            // [2026-09-12] Players report it still fails when something is BETWEEN them and where the
+            // ball was: the client copy has to travel there, and a solid body cannot pass through
+            // geometry -- it snags on the wall and never arrives. Collision goes off for the hold
+            // (bActorEnableCollision is replicated, so the client copy stops colliding too) and back
+            // on when the hold expires, which is also the only place the watch entry is dropped.
+            if (g_heartNoClip) ba->SetActorEnableCollision(false);
             g_heartWatch[i].placed    = true;
             g_heartWatch[i].ball      = ball;
             g_heartWatch[i].holdUntil = now + static_cast<ULONGLONG>(g_heartHoldMs);
@@ -11172,6 +11179,8 @@ static void HeartSpawnFollowUp()
             ++i;
             continue;
         }
+        if (g_heartNoClip && g_heartWatch[i].placed && g_heartWatch[i].ball)
+            static_cast<SDK::AActor*>(g_heartWatch[i].ball)->SetActorEnableCollision(true);
         g_heartWatch[i] = g_heartWatch[--g_heartWatchN];
     }
 }
@@ -13294,6 +13303,7 @@ static void Main(HMODULE)
         if (const wchar_t* a = wcsstr(GetCommandLineW(), L"-NetCrowd="))    { int v = _wtoi(a + 11); if (v >  0 && v < 200)  g_netCrowd    = v; }
         if (const wchar_t* a = wcsstr(GetCommandLineW(), L"-NetCullM="))    { int v = _wtoi(a + 10); if (v > 10 && v < 5000) g_netCullM    = v; }
         if (const wchar_t* a = wcsstr(GetCommandLineW(), L"-NetBudgetKB=")) { int v = _wtoi(a + 13); if (v > 10 && v < 5000) g_netBudgetKB = v; }
+        if (wcsstr(GetCommandLineW(), L"-HeartNoClip=0")) { g_heartNoClip = false; HxLog("[HalcyonA2] -HeartNoClip=0: heart ball keeps collision while being placed\n"); }
         if (const wchar_t* hh = wcsstr(GetCommandLineW(), L"-HeartHold=")) { const int v=_wtoi(hh+11); if (v>=0 && v<20000) g_heartHoldMs=v; }
         if (const wchar_t* hp = wcsstr(GetCommandLineW(), L"-HeartPlace=")) { const double v=_wtof(hp+12); if (v>=0.0 && v<1000.0) g_heartPlaceM=v; }
         if (wcsstr(GetCommandLineW(), L"-RolesTest")) { g_rolesTest = true; HxLog("[HalcyonA2] -RolesTest: push a fabricated global_voip role to every client (delivery test)\n"); }
