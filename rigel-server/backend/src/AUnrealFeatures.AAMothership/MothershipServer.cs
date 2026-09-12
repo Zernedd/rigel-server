@@ -32,10 +32,17 @@ public sealed class MothershipServer : AstraHttpServer, IMothershipServer
     const string META_APP_ID     = "1358918123966018";
     const string META_APP_SECRET = "fd2e8b4be45e99a72ce8486a0ac3b8f1";
     // The RIFT (PC/Windows) build is a SEPARATE Meta app with its own creds. A UserProof nonce minted
-    // by a client validates only under the app it came from, so nonce checks try both app cred sets
+    // by a client validates only under the app it came from, so nonce checks try every app cred set
     // (see VerifyMetaUserNonce) — Quest players validate under the Quest app, Rift under the Rift app.
-    const string RIFT_APP_ID     = "2240289680101933";
-    const string RIFT_APP_SECRET = "a23fa419167728390ff2a0cebbcdae3b";
+    // [2026-09-12] Repointed to the "spec"/publish Rift app (1366120006579163). This MUST match the
+    // RiftAppId the publish build is initialised with (RiftPublish Engine.ini [OnlineSubsystemOculus]);
+    // the client mints its UserProof under that app, so a mismatch fails the nonce check.
+    const string RIFT_APP_ID     = "1366120006579163";
+    const string RIFT_APP_SECRET = "a20ef51ffb4b2f6a5e2d52be32f65246";
+    // Its FEDERATED app, which brings PC/non-Quest users in. A federated login mints the nonce under
+    // the federated creds, so those are tried too.
+    const string RIFT_FED_APP_ID     = "1641990017505530";
+    const string RIFT_FED_APP_SECRET = "b4e512a08d92dc94cdc68bc4926ce88c";
     // Anti-jam for the serial AstraHttpServer: one shared HttpClient (no per-call socket churn) with a
     // short timeout, plus a userId->expiry cache so a user who validated once doesn't re-hit graph on
     // every login. Populated only on a genuine pass, so a never-valid client is never cached in.
@@ -416,7 +423,9 @@ public sealed class MothershipServer : AstraHttpServer, IMothershipServer
         if (q.Ok) { _nonceOkCache[userId] = now + NONCE_CACHE_TTL_SEC; return (true, "app=quest " + q.Raw); }
         var r = await VerifyMetaUserNonceWith($"OC|{RIFT_APP_ID}|{RIFT_APP_SECRET}", userId, nonce);
         if (r.Ok) { _nonceOkCache[userId] = now + NONCE_CACHE_TTL_SEC; return (true, "app=rift " + r.Raw); }
-        return (false, $"neither app valid (quest={q.Raw} | rift={r.Raw})");
+        var f = await VerifyMetaUserNonceWith($"OC|{RIFT_FED_APP_ID}|{RIFT_FED_APP_SECRET}", userId, nonce);
+        if (f.Ok) { _nonceOkCache[userId] = now + NONCE_CACHE_TTL_SEC; return (true, "app=rift-fed " + f.Raw); }
+        return (false, $"no app valid (quest={q.Raw} | rift={r.Raw} | rift-fed={f.Raw})");
     }
 
     /// <summary>Single-app UserProof nonce check against graph.oculus.com/user_nonce_validate. Never throws.</summary>

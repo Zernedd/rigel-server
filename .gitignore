@@ -72,3 +72,6 @@ __pycache__/
 
 # Rift spec build: the game copy is ~2.8 GB, only the tooling is tracked
 RigelRift/A2/
+RiftPublish/
+RigelRift/eosredirect/build/
+robocopy_rift.log

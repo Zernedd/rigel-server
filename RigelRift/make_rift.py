@@ -1,79 +1,63 @@
 #!/usr/bin/env python3
 r"""
-make_rift.py - build the Rigel RIFT (PC) spec client from a stock A2 PC build.
+make_rift.py - build the Rigel RIFT (PC) PUBLISH client from a stock A2 PC build.
 
-This is the PC twin of the Quest pipeline (Rigel/make_rigel.py). It produces a folder that can be
-zipped and handed to a Rift player, or used as the payload of a published Rift app.
+Produces a folder that looks exactly like a normal shipping build (launcher + Engine + A2), pointed at
+our backend, initialised under our own Meta app, and carrying the EOS station-browser redirect as an
+ordinary-looking game binary. No UE4SS, no mods, no console.
 
-WHAT IT CHANGES (and why each one is done the way it is)
+WHAT IT CHANGES (and why each is done this way)
 
-  1. Dashboard / station API   -- compile-time constant in A2-Win64-Shipping.exe.
-         https://api.oriondrift.net  ->  https://rigel.wwiggles.org
-     Patched IN PLACE, so both strings must be the same length. They are: 26 chars each. Nothing
-     longer will ever fit here, which is why the station host is named "rigel" and not "rigel-db".
+  1. Strip the mod tooling. The reference build (specnovbuild) shipped with UE4SS
+     (A2\Binaries\Win64\dwmapi.dll proxy + ue4ss\ + Mods) and the IGCS camera tool
+     (IGCS_ImGuiSettings.ini). A publish build must not carry any of it, so the copy drops those and
+     any *.log.
 
-  2. Mothership (login/auth, user data) -- packaged in A2/Config/DefaultEngine.ini inside
-     A2-Windows.pak as BaseUrl = "https://aa-mothership.com".
-     NOT patched. The packaged string is 25 chars and ours is 29, and an in-place pak patch cannot
-     change a string's length (the entry's uncompressed size has to stay fixed). Instead we write
-     A2/Saved/Config/Windows/Engine.ini, which UE merges OVER the packaged DefaultEngine.ini - a key
-     set there wins. No length limit, and it stays editable later without touching the pak.
+  2. Dashboard / station API -- compile-time constant in A2-Win64-Shipping.exe.
+        https://api.oriondrift.net  ->  https://rigel.wwiggles.org
+     Patched IN PLACE, so both strings must be the same length. They are: 26 chars each.
 
-  3. Oculus app identity -- RiftAppId in the same packaged ini, set through the same config override.
-         23916854551246326 (stock)  ->  2240289680101933 (ours, the "rigel" Meta app)
-     THIS is what makes the entitlement check pass: the signed-in account owns our app, so the Oculus
-     platform grants the entitlement for real. Nothing is bypassed. The Quest build does the same
-     thing with MobileAppId. Without it the stock app id is checked, the account does not own the
-     store title under this build, and a Shipping build exits a few seconds after login:
-         LogA2MothershipAuthStateMachine: Error: Could not verify entitlement status ...
-         A Shipping build would exit at this point
-     --entitlement still exists (it flips the one-byte guard in the exe, like the UE4SS mod in
-     HalcyonA2/ue4ss-mods/A2EntitlementPatch) but is NOT needed and NOT recommended now that the app
-     id is ours; it is kept only as a last-resort diagnostic.
+  3. Mothership (login, user data) -- packaged BaseUrl. NOT patched (length-locked in the pak).
+     Written to A2\Saved\Config\Windows\Engine.ini, which UE merges OVER the packaged DefaultEngine.ini.
 
-AUTH ON THE SERVER SIDE IS ALREADY DONE
-  The Mothership already knows about Rift: it carries RIFT_APP_ID and verifies a UserProof nonce
-  against the Quest creds first and then the Rift creds, so a Rift login validates under the Rift
-  app. RIFT_ENFORCE is currently false (capture-first: verify, log, still issue the session), so a
-  Rift client can log in today. Flip it on once real Rift logins are seen in the backend log.
+  4. Oculus app identity -- RiftAppId in the same config override, set to OUR "spec"/publish Meta app
+        1366120006579163
+     THIS is what makes the entitlement check pass on its own: the signed-in account owns our app, so
+     the Oculus platform grants the entitlement for real. Nothing is patched out. Keep it in step with
+     MothershipServer.RIFT_APP_ID, which verifies the client's UserProof nonce under this app.
+
+  5. EOS station browser -- the PC EOS SDK builds its backend host at runtime and talks to it through a
+     statically-linked libcurl, so there is no config key to repoint (the [OnlineSubsystemEOS] BaseUrl
+     below is written for completeness but the SDK ignores it). Instead we drop in eosredirect\dsound.dll
+     -- a game binary that proxies the real dsound (which the exe imports by ordinal) and, at start-up,
+     hooks curl_easy_setopt inside EOSSDK-Win64-Shipping.dll to rewrite epicgames.dev -> our gateway.
+     See eosredirect\dllmain.cpp. Build it with eosredirect\build.ps1; this script only places it.
 
 USAGE
-    python make_rift.py --src ..\Nov15\A2 --dst A2            # copy + patch URLs + write config
-    python make_rift.py --dst A2 --verify                     # re-check an existing folder
-    python make_rift.py --dst A2 --entitlement                # last resort only, see note 3
+    python make_rift.py --src ..\specnovbuild --dst ..\RiftPublish     # copy + strip + patch + config + dsound
+    python make_rift.py --dst ..\RiftPublish --verify                  # re-check an existing folder
 """
 
 import argparse
 import os
 import shutil
-import struct
 import sys
 
-DASHBOARD_OLD = b"https://api.oriondrift.net"
-DASHBOARD_NEW = b"https://rigel.wwiggles.org"
+DASHBOARD_OLD  = b"https://api.oriondrift.net"
+DASHBOARD_NEW  = b"https://rigel.wwiggles.org"
 MOTHERSHIP_URL = "https://rigel-ms.wwiggles.org"
-# Your own Meta app for the PC/Rift build ("rigel"). Initialising under it is what makes the
-# entitlement check PASS legitimately -- the account owns this app - so nothing has to be patched.
-# Must stay in step with MothershipServer.RIFT_APP_ID, which verifies the UserProof nonce under it.
-RIFT_APP_ID = "2240289680101933"
-STOCK_RIFT_APP_ID = "23916854551246326"
-EOS_URL = "https://rigel-eos.wwiggles.org"
+EOS_URL        = "https://rigel-eos.wwiggles.org"
+# Our own "spec"/publish Meta app for the PC/Rift build. Initialising under it is what makes the
+# entitlement check PASS legitimately. Must stay in step with MothershipServer.RIFT_APP_ID.
+RIFT_APP_ID    = "1366120006579163"
 
-# test bpl,bpl ; jne rel8  -- the entitlement-result guard in build 22284
-ENTITLEMENT_VA = 0x145429427
-ENTITLEMENT_SIG_UNPATCHED = bytes.fromhex("4084ed7559")
-ENTITLEMENT_SIG_PATCHED = bytes.fromhex("4084edeb59")
+# Mod tooling that must never be in a publish build.
+STRIP_FILES = {"dwmapi.dll", "igcs_imguisettings.ini"}
+STRIP_DIRS  = {"ue4ss"}
+STRIP_EXT   = {".log"}
 
-ENGINE_INI = f"""; Rigel (Rift / PC) spec build - backend + app identity. Generated by make_rift.py.
-;
-; UE merges this USER config over the packaged A2/Config/DefaultEngine.ini inside A2-Windows.pak, and a
-; key set here wins. Two things ride on that:
-;
-;   1. the Mothership URL, which cannot be patched into the pak (ours is 29 chars, the packaged one is
-;      25, and an in-place pak patch cannot change a string's length), and
-;   2. RiftAppId, which points the build at OUR Meta app instead of the stock one. That is what makes
-;      the Oculus entitlement check pass on its own: the signed-in account owns this app. The Quest
-;      build does the same thing with MobileAppId. Nothing needs patching out.
+ENGINE_INI = f"""; Rigel Rift (PC) publish build - backend + app identity. Generated by make_rift.py.
+; UE merges this USER config OVER the packaged A2/Config/DefaultEngine.ini, and a key set here wins.
 
 [OnlineSubsystemOculus]
 RiftAppId={RIFT_APP_ID}
@@ -85,59 +69,58 @@ BaseUrl="{MOTHERSHIP_URL}"
 BaseUrl="{EOS_URL}"
 """
 
+
 def exe_path(dst):
-    return os.path.join(dst, "Binaries", "Win64", "A2-Win64-Shipping.exe")
+    return os.path.join(dst, "A2", "Binaries", "Win64", "A2-Win64-Shipping.exe")
 
 
-def file_offset_of(path, va):
-    """Map a virtual address to a file offset using the PE section table (no pefile dependency)."""
-    with open(path, "rb") as f:
-        data = f.read(0x1000)
-    e_lfanew = struct.unpack_from("<I", data, 0x3C)[0]
-    n_sections = struct.unpack_from("<H", data, e_lfanew + 6)[0]
-    opt_size = struct.unpack_from("<H", data, e_lfanew + 20)[0]
-    image_base = struct.unpack_from("<Q", data, e_lfanew + 24 + 24)[0]
-    sec = e_lfanew + 24 + opt_size
-    for i in range(n_sections):
-        off = sec + i * 40
-        vsize, vaddr, rawsize, rawptr = struct.unpack_from("<IIII", data, off + 8)
-        span = max(vsize, rawsize)
-        if vaddr <= va - image_base < vaddr + span:
-            return rawptr + (va - image_base - vaddr)
-    return None
+def dsound_src():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "eosredirect", "dsound.dll")
 
 
-def copy_build(src, dst):
+def copy_stripped(src, dst):
     if not os.path.isdir(src):
         sys.exit(f"source build not found: {src}")
-    print(f"copying {src} -> {dst} (this is a few GB)")
-    shutil.copytree(src, dst, dirs_exist_ok=True)
-    print("  copy complete")
+    print(f"copying {src} -> {dst}, dropping mod tooling (this is a few GB)")
+    stripped = []
+
+    def ignore(dirpath, names):
+        drop = set()
+        for n in names:
+            low = n.lower()
+            full = os.path.join(dirpath, n)
+            if low in STRIP_FILES or os.path.splitext(low)[1] in STRIP_EXT:
+                drop.add(n); stripped.append(full)
+            elif os.path.isdir(full) and low in STRIP_DIRS:
+                drop.add(n); stripped.append(full + "\\")
+        return drop
+
+    shutil.copytree(src, dst, dirs_exist_ok=True, ignore=ignore)
+    print("  copy complete; stripped:")
+    for s in stripped:
+        print("    -", os.path.relpath(s, dst))
 
 
-def patch_dashboard(dst, write=True):
+def patch_dashboard(dst):
     exe = exe_path(dst)
-    with open(exe, "rb") as f:
-        blob = f.read()
+    blob = open(exe, "rb").read()
     if blob.count(DASHBOARD_NEW):
         print(f"  dashboard URL: already {DASHBOARD_NEW.decode()}")
         return True
     n = blob.count(DASHBOARD_OLD)
     if n != 1:
-        print(f"  dashboard URL: expected exactly 1 occurrence of {DASHBOARD_OLD.decode()}, found {n}")
+        print(f"  dashboard URL: expected 1 occurrence of {DASHBOARD_OLD.decode()}, found {n}")
         return False
-    assert len(DASHBOARD_OLD) == len(DASHBOARD_NEW), "in-place patch requires equal lengths"
-    if write:
-        at = blob.find(DASHBOARD_OLD)
-        with open(exe, "r+b") as f:
-            f.seek(at)
-            f.write(DASHBOARD_NEW)
-        print(f"  dashboard URL: patched at 0x{at:X} -> {DASHBOARD_NEW.decode()}")
+    assert len(DASHBOARD_OLD) == len(DASHBOARD_NEW)
+    at = blob.find(DASHBOARD_OLD)
+    with open(exe, "r+b") as f:
+        f.seek(at); f.write(DASHBOARD_NEW)
+    print(f"  dashboard URL: patched at 0x{at:X} -> {DASHBOARD_NEW.decode()}")
     return True
 
 
 def write_config(dst):
-    cfg_dir = os.path.join(dst, "Saved", "Config", "Windows")
+    cfg_dir = os.path.join(dst, "A2", "Saved", "Config", "Windows")
     os.makedirs(cfg_dir, exist_ok=True)
     path = os.path.join(cfg_dir, "Engine.ini")
     with open(path, "w", encoding="utf-8") as f:
@@ -145,69 +128,55 @@ def write_config(dst):
     print(f"  config override: {path}")
 
 
-def patch_entitlement(dst):
-    """One byte: jne -> jmp, so a failed entitlement check no longer exits the game."""
-    exe = exe_path(dst)
-    off = file_offset_of(exe, ENTITLEMENT_VA)
-    if off is None:
-        print("  entitlement: could not map the address in this binary -- refusing")
+def place_dsound(dst):
+    src = dsound_src()
+    if not os.path.exists(src):
+        print(f"  dsound.dll: NOT FOUND at {src} -- build it with eosredirect\\build.ps1 first")
         return False
-    with open(exe, "r+b") as f:
-        f.seek(off - 3)
-        sig = f.read(5)
-        if sig == ENTITLEMENT_SIG_PATCHED:
-            print("  entitlement: already patched")
-            return True
-        if sig != ENTITLEMENT_SIG_UNPATCHED:
-            print(f"  entitlement: SIGNATURE MISMATCH at 0x{off:X} ({sig.hex()}) -- refusing to write")
-            return False
-        f.seek(off)
-        f.write(b"\xEB")
-    print(f"  entitlement: patched jne -> jmp at VA 0x{ENTITLEMENT_VA:X} (file offset 0x{off:X})")
+    dstf = os.path.join(dst, "A2", "Binaries", "Win64", "dsound.dll")
+    shutil.copyfile(src, dstf)
+    print(f"  EOS redirect: placed dsound.dll ({os.path.getsize(dstf)} bytes)")
     return True
 
 
 def verify(dst):
-    exe = exe_path(dst)
     ok = True
-    with open(exe, "rb") as f:
-        blob = f.read()
+    exe = exe_path(dst)
+    blob = open(exe, "rb").read()
     if blob.count(DASHBOARD_NEW) == 1 and blob.count(DASHBOARD_OLD) == 0:
         print(f"  OK  dashboard -> {DASHBOARD_NEW.decode()}")
     else:
-        ok = False
-        print(f"  BAD dashboard: new={blob.count(DASHBOARD_NEW)} old={blob.count(DASHBOARD_OLD)}")
+        ok = False; print(f"  BAD dashboard: new={blob.count(DASHBOARD_NEW)} old={blob.count(DASHBOARD_OLD)}")
 
-    cfg = os.path.join(dst, "Saved", "Config", "Windows", "Engine.ini")
-    if os.path.exists(cfg) and MOTHERSHIP_URL in open(cfg, encoding="utf-8").read():
-        print(f"  OK  mothership -> {MOTHERSHIP_URL} (user config override)")
-    else:
-        ok = False
-        print("  BAD mothership override missing")
+    cfg = os.path.join(dst, "A2", "Saved", "Config", "Windows", "Engine.ini")
+    ctext = open(cfg, encoding="utf-8").read() if os.path.exists(cfg) else ""
+    print(f"  {'OK ' if MOTHERSHIP_URL in ctext else 'BAD'} mothership override")
+    print(f"  {'OK ' if f'RiftAppId={RIFT_APP_ID}' in ctext else 'BAD'} RiftAppId={RIFT_APP_ID}")
+    if MOTHERSHIP_URL not in ctext or f"RiftAppId={RIFT_APP_ID}" not in ctext: ok = False
 
-    if os.path.exists(cfg) and f"RiftAppId={RIFT_APP_ID}" in open(cfg, encoding="utf-8").read():
-        print(f"  OK  rift app id -> {RIFT_APP_ID} (entitlement passes under our own app)")
-    else:
-        ok = False
-        print("  BAD RiftAppId override missing -- the stock app id means a failed entitlement check")
+    dstf = os.path.join(dst, "A2", "Binaries", "Win64", "dsound.dll")
+    print(f"  {'OK ' if os.path.exists(dstf) else 'BAD'} EOS redirect dsound.dll present")
+    if not os.path.exists(dstf): ok = False
 
-    off = file_offset_of(exe, ENTITLEMENT_VA)
-    sig = blob[off - 3:off + 2] if off else b""
-    if sig == ENTITLEMENT_SIG_PATCHED:
-        print("  note entitlement byte is patched (not needed when RiftAppId is ours; harmless)")
-    elif sig == ENTITLEMENT_SIG_UNPATCHED:
-        print("  OK  entitlement byte untouched (stock) -- correct: our app id satisfies the check")
+    # No mod tooling left behind.
+    leftover = []
+    for root, dirs, files in os.walk(dst):
+        for d in list(dirs):
+            if d.lower() in STRIP_DIRS: leftover.append(os.path.join(root, d))
+        for fn in files:
+            if fn.lower() in STRIP_FILES: leftover.append(os.path.join(root, fn))
+    if leftover:
+        ok = False; print("  BAD mod tooling still present:")
+        for l in leftover: print("      ", os.path.relpath(l, dst))
     else:
-        ok = False
-        print(f"  BAD entitlement site unrecognised ({sig.hex()})")
+        print("  OK  no UE4SS / IGCS / dwmapi tooling in the build")
     return ok
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Build the Rigel Rift (PC) spec client")
-    ap.add_argument("--src", help="stock PC build to copy from (e.g. ..\\Nov15\\A2)")
-    ap.add_argument("--dst", default="A2", help="output build folder (default: A2)")
-    ap.add_argument("--entitlement", action="store_true", help="apply the one-byte entitlement patch")
+    ap = argparse.ArgumentParser(description="Build the Rigel Rift (PC) publish client")
+    ap.add_argument("--src", help="stock PC build to copy from (e.g. ..\\specnovbuild)")
+    ap.add_argument("--dst", default="..\\RiftPublish", help="output build folder")
     ap.add_argument("--verify", action="store_true", help="only re-check an existing folder")
     args = ap.parse_args()
 
@@ -215,17 +184,14 @@ def main():
         sys.exit(0 if verify(args.dst) else 1)
 
     if args.src:
-        copy_build(args.src, args.dst)
+        copy_stripped(args.src, args.dst)
     if not os.path.exists(exe_path(args.dst)):
         sys.exit(f"no build at {args.dst} -- pass --src to copy one first")
 
-    if args.entitlement:
-        patch_entitlement(args.dst)
-    else:
-        print("redirecting backend URLs")
-        patch_dashboard(args.dst)
-        write_config(args.dst)
-
+    print("redirecting backend + identity")
+    patch_dashboard(args.dst)
+    write_config(args.dst)
+    place_dsound(args.dst)
     print("\nstate:")
     verify(args.dst)
 

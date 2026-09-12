@@ -1,0 +1,17 @@
+; dsound.dll proxy exports. The game imports dsound by ORDINAL, so we export by ordinal and match the
+; numbers. NONAME keeps the export table ordinal-only, exactly like the real dsound entries the game
+; binds. Each maps to a tail-jump thunk that forwards to the same ordinal in the real system dsound.
+LIBRARY dsound
+EXPORTS
+    Thunk1  @1  NONAME
+    Thunk2  @2  NONAME
+    Thunk3  @3  NONAME
+    Thunk4  @4  NONAME
+    Thunk5  @5  NONAME
+    Thunk6  @6  NONAME
+    Thunk7  @7  NONAME
+    Thunk8  @8  NONAME
+    Thunk9  @9  NONAME
+    Thunk10 @10 NONAME
+    Thunk11 @11 NONAME
+    Thunk12 @12 NONAME

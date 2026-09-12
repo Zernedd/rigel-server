@@ -1,69 +1,79 @@
-# Rigel Rift (PC) spec build
+# Rigel Rift (PC) publish build
 
-The PC twin of the Quest client. A stock A2 PC build, copied into its own folder and pointed at our
-backend, so a Rift player can log in and join our stations. Zip `A2\` and hand it over, or use it as
-the payload of the published Rift app.
+The PC twin of the Quest client, packaged to look and behave like an ordinary shipping build: a stock
+A2 PC build (launcher + `Engine\` + `A2\`, same layout as `specnovbuild`), pointed at our backend,
+initialised under our own Meta app, with **no UE4SS and no mods**. Zip the output folder and hand it
+over, or use it as the payload of the published Rift app.
 
 Build it (or rebuild after a new stock drop):
 
 ```
-cd RigelRift
-python make_rift.py --src ..\Nov15\A2 --dst A2     # copy + redirect
-python make_rift.py --dst A2 --entitlement         # the one byte, see below
-python make_rift.py --dst A2 --verify              # re-check any time
+cd RigelRift\eosredirect
+.\build.ps1                                       # builds the EOS redirect dsound.dll (once)
+cd ..
+python make_rift.py --src ..\specnovbuild --dst ..\RiftPublish     # copy + strip + patch + config + dsound
+python make_rift.py --dst ..\RiftPublish --verify                 # re-check any time
 ```
 
 ## What is changed, and why each one is done that way
 
 | what | where | how |
 |---|---|---|
-| Dashboard / station API | compile-time constant in `A2-Win64-Shipping.exe` | patched **in place**: `https://api.oriondrift.net` → `https://rigel.wwiggles.org` |
-| Mothership (login, user data) | `A2/Config/DefaultEngine.ini` inside `A2-Windows.pak` | **not** patched — set in `A2/Saved/Config/Windows/Engine.ini` instead |
-| EOS gateway | same | same config override |
-| Oculus app identity | same packaged ini | `RiftAppId` → our own Meta app, via the same config override |
+| Mod tooling | `A2\Binaries\Win64` | **removed** — UE4SS (`dwmapi.dll` proxy, `ue4ss\`, `Mods`), IGCS (`IGCS_ImGuiSettings.ini`), and any `*.log`. A publish build carries none of it. |
+| Dashboard / station API | constant in `A2-Win64-Shipping.exe` | patched **in place**: `https://api.oriondrift.net` → `https://rigel.wwiggles.org` (both 26 chars) |
+| Mothership (login, user data) | `A2\Saved\Config\Windows\Engine.ini` | config override merged over the packaged `DefaultEngine.ini` |
+| Oculus app identity | same config override | `RiftAppId` → `1366120006579163` (our "spec"/publish Meta app) |
+| EOS station browser | `A2\Binaries\Win64\dsound.dll` | a game binary that redirects EOS at runtime — see below |
 
-**The dashboard URL is length-locked.** It is overwritten in place, so the replacement must be the
-same byte length as `https://api.oriondrift.net` — 26 characters. `https://rigel.wwiggles.org` is
-exactly 26. Nothing longer can ever go here; that is why the station host is `rigel` and not
-something more descriptive.
+**The dashboard URL is length-locked** (patched in place), which is why the station host is `rigel`
+(26 chars, same as `https://api.oriondrift.net`).
 
-**The Mothership URL cannot use the same trick.** The packaged string is
-`https://aa-mothership.com` (25) and ours is `https://rigel-ms.wwiggles.org` (29). An in-place pak
-patch cannot change a string's length — the entry's uncompressed size has to stay fixed — and the
-alternative (inventing a shorter host) would mean a new non-`rigel-*` DNS record, which we do not
-do. So it goes in the user config, which UE merges *over* the packaged defaults. No length limit,
-and it can be changed later without touching the pak at all.
+**The Mothership URL** can't use that trick (ours is longer), so it rides the user config, which UE
+merges over the packaged defaults.
 
-## Why no entitlement patch is needed
+## Why the entitlement check passes without a patch
 
-The build is initialised under **our own Meta app** (`RiftAppId = 2240289680101933`, the "rigel"
-app) instead of the stock one. The signed-in account owns that app, so the Oculus platform grants
-the entitlement for real and the check passes on its own — nothing is bypassed. The Quest build
-works the same way via `MobileAppId`.
+The build is initialised under **our own Meta app** (`RiftAppId = 1366120006579163`). The signed-in
+account owns that app, so the Oculus platform grants the entitlement for real and the check passes on
+its own — nothing is bypassed. Keep `RIFT_APP_ID` in step with `MothershipServer.RIFT_APP_ID`: the
+backend verifies the client's UserProof nonce under that app (and its federated app
+`1641990017505530`), so they must match or logins fail. `RIFT_ENFORCE` is `false` (capture-first:
+verify + log, still issue the session) until real Rift logins show up in the backend log.
 
-With the stock app id the account cannot prove it owns the store title under this build, and a
-Shipping build exits a few seconds after login:
+## The EOS redirect (`eosredirect\`)
 
-```
-LogA2MothershipAuthStateMachine: Error: Could not verify entitlement status:
-  Missing entitlement for ... A Shipping build would exit at this point
-```
+The PC EOS SDK (`EOSSDK-Win64-Shipping.dll`) builds its backend host at runtime
+(`EpicGamesPlatform::GetBaseURL`) and talks to it through a **statically-linked libcurl** — so, exactly
+like the Quest `.so`, there is no config key and no import to repoint. The station browser is reached by
+`/matchmaking/v1/.../filter` on that backend, so without a redirect a Rift player logs in but sees no
+stations.
 
-`make_rift.py --entitlement` still exists — it flips the one-byte guard in the exe, the same change
-as the UE4SS mod in `HalcyonA2/ue4ss-mods/A2EntitlementPatch` — but it is **not needed and not
-recommended** now that the app id is ours. Keep it for diagnosis only.
+`eosredirect\dsound.dll` fixes that while looking like a game binary:
 
-Keep `RIFT_APP_ID` here in step with `MothershipServer.RIFT_APP_ID`: the backend verifies the
-UserProof nonce under that app, so they must be the same app or logins fail.
+- **Disguise.** `A2-Win64-Shipping.exe` statically imports `dsound.dll` by ordinal (1, 3, 6, 8, 11, 12),
+  and `dsound` is not a KnownDLL, so our copy next to the exe loads first. `thunks.asm` forwards every
+  ordinal to the real `C:\Windows\System32\dsound.dll`, so audio is unchanged. It is just a DLL the game
+  already loads, used as a place to run at start-up — no console, no log window, no extra folder. By
+  default it writes nothing at all; set `RIGEL_EOS_DIAG=1` before launching to get a one-line-per-event
+  `dsound.diag` next to the exe for a single validation run.
+- **Redirect.** At start-up it waits for the EOS SDK, finds `curl_easy_setopt` by a 24-byte signature
+  (the varargs shim that spills rdx/r8/r9 and tail-calls the internal option setter; confirmed at RVA
+  `0xcfaf90` in the shipped SDK, re-found by scan if a rebuild moves it), and hooks it. For
+  `CURLOPT_URL`, any `epicgames.dev` URL is rewritten to `https://rigel-eos.wwiggles.org`, scheme
+  included, path preserved. Every other option and every non-Epic URL passes through untouched. This is
+  the PC twin of `Rigel\hook\rigel_hook.cpp`.
 
-## Server side is already done
+Source: `eosredirect\dllmain.cpp`, `thunks.asm`, `exports.def`, `build.ps1`. The built `dsound.dll` is
+checked in so `make_rift.py` can place it without the C++ toolchain; rebuild it if you change the
+source or the EOS SDK version changes.
 
-The Mothership already knows about Rift: it carries `RIFT_APP_ID` and verifies a UserProof nonce
-against the Quest credentials first and then the Rift ones, so a Rift login validates under the Rift
-app. `RIFT_ENFORCE` is currently `false` — capture-first, meaning it verifies and logs but still
-issues the session. Once real Rift logins show up in the backend log, turn it on.
+## Server side
+
+The Mothership carries `RIFT_APP_ID = 1366120006579163` and its federated app, and verifies a Rift
+login's UserProof nonce against those (plus the Quest app). `RIFT_ENFORCE` is `false` for now.
 
 ## What is not in git
 
-`A2\` is the game build (~2.8 GB) and is ignored. Only the tooling is tracked, so a fresh checkout
+`RiftPublish\` is the ~3 GB build and is ignored, along with `eosredirect\build\` intermediates. Only
+the tooling, the redirect source, and the small built `dsound.dll` are tracked, so a fresh checkout
 rebuilds the folder from a stock build with one command.
