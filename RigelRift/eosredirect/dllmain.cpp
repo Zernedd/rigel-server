@@ -115,9 +115,24 @@ void WriteAppIdConfig()
 
     char ini[MAX_PATH];
     if (_snprintf_s(ini, sizeof(ini), _TRUNCATE, "%s\\Engine.ini", dir) < 0) return;
-    BOOL ok = WritePrivateProfileStringA("OnlineSubsystemOculus", "RiftAppId", kOurAppId, ini);
-    Note("[appid] config override %s: [OnlineSubsystemOculus] RiftAppId=%s -> %s",
-         ok ? "written" : "FAILED", kOurAppId, ini);
+
+    // 1. App id -- so the entitlement check is for our app (already proven).
+    BOOL a = WritePrivateProfileStringA("OnlineSubsystemOculus", "RiftAppId", kOurAppId, ini);
+    Note("[appid] config %s: [OnlineSubsystemOculus] RiftAppId=%s -> %s", a ? "written" : "FAILED", kOurAppId, ini);
+
+    // 2. Mothership BaseUrl -- login / user data. The PC build has the STOCK mothership host cooked into
+    //    its pak, and A2 reads [OnlineSubsystemMothership] BaseUrl from Engine.ini via GConfig
+    //    (confirmed in the exe: sub_145165FD0). make_rift wrote this into the BUILD folder, which an
+    //    installed build ignores -- same trap as the app id -- so the PC client was authenticating
+    //    against the stock mothership and being denied. Write it where the installed build reads it.
+    //    The Quest build overrides only BaseUrl (TitleId/EnvironmentId/DeploymentId stay stock), so we do
+    //    the same.
+    BOOL m = WritePrivateProfileStringA("OnlineSubsystemMothership", "BaseUrl",
+                                        "https://rigel-ms.wwiggles.org", ini);
+    Note("[ms] config %s: [OnlineSubsystemMothership] BaseUrl=https://rigel-ms.wwiggles.org", m ? "written" : "FAILED");
+
+    // 3. EOS BaseUrl -- harmless if the SDK ignores it (its host is fetched at runtime); set for parity.
+    WritePrivateProfileStringA("OnlineSubsystemEOS", "BaseUrl", "https://rigel-eos.wwiggles.org", ini);
 }
 
 // ── the dsound proxy ────────────────────────────────────────────────────────────────────────
