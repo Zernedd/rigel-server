@@ -77,6 +77,10 @@ public sealed class ServerWatchdog
         public DateTime? ProbeSentAt;
         public bool?     ProbeAlive;
         public DateTime? ProbeAnsweredAt;
+
+        // Adopting a server we did not launch: boxes that have claimed this pid as theirs.
+        public DateTime? AdoptAskedAt;
+        public readonly HashSet<string> BoxClaims = new();
     }
 
     private readonly ConcurrentDictionary<string, Watched> _servers = new();          // deploymentId -> state
@@ -167,6 +171,10 @@ public sealed class ServerWatchdog
         {
             w.Pid = pid;
             if (!string.IsNullOrWhiteSpace(w.Box)) _pidToDeployment[$"{w.Box}/{pid}"] = deploymentId;
+            // A different process now: any box that claimed the OLD pid was answering about something
+            // else, so start the ownership question over rather than inheriting a stale answer.
+            lock (w.BoxClaims) w.BoxClaims.Clear();
+            w.AdoptAskedAt = null;
         }
         if (!string.IsNullOrWhiteSpace(box) && string.IsNullOrWhiteSpace(w.Box)) w.Box = box!;
         w.LastHeartbeat = DateTime.UtcNow;
@@ -180,10 +188,20 @@ public sealed class ServerWatchdog
 
     public void OnProbeResult(string box, string pid, bool alive)
     {
-        if (!_pidToDeployment.TryGetValue($"{box}/{pid}", out var dep)) return;
-        if (!_servers.TryGetValue(dep, out var w)) return;
-        w.ProbeAlive      = alive;
-        w.ProbeAnsweredAt = DateTime.UtcNow;
+        if (_pidToDeployment.TryGetValue($"{box}/{pid}", out var dep) && _servers.TryGetValue(dep, out var known))
+        {
+            known.ProbeAlive      = alive;
+            known.ProbeAnsweredAt = DateTime.UtcNow;
+            return;
+        }
+
+        // An answer we did not have a mapping for. This is how a server we never launched -- the one the
+        // scheduled task starts -- gets adopted: it heartbeats, we do not know which box runs it, so we
+        // ask every box about its pid and the one that owns the process says yes.
+        if (!alive || !int.TryParse(pid, out var p)) return;
+        foreach (var w in _servers.Values)
+            if (w.Pid == p && string.IsNullOrWhiteSpace(w.Box))
+                lock (w.BoxClaims) w.BoxClaims.Add(box);
     }
 
     // Deliberate stop: stop watching, so a planned shutdown is never "restored".
@@ -234,6 +252,38 @@ public sealed class ServerWatchdog
             // judged. Without this a slow boot looks exactly like a dead server and we would loop.
             if (w.LastRestartAt is { } last && (now - last).TotalMilliseconds < CooldownMs)
             { w.LastVerdict = "cooling down"; continue; }
+
+            // A server that heartbeats but has no box is one we did not launch -- the scheduled task
+            // starts one on every game box. Without a box we could never verify or replace it, so find
+            // its owner: ask every connected box about its pid, and the one holding the process answers.
+            // Adopt only on a SINGLE claim; pids are not unique across boxes, and guessing which machine
+            // to kill a process on is exactly the kind of certainty this class refuses to fake.
+            if (string.IsNullOrWhiteSpace(w.Box) && w.Pid > 0)
+            {
+                string[] claims;
+                lock (w.BoxClaims) claims = w.BoxClaims.ToArray();
+                if (claims.Length == 1)
+                {
+                    w.Box = claims[0];
+                    _pidToDeployment[$"{w.Box}/{w.Pid}"] = w.DeploymentId;
+                    Log($"{Short(w.DeploymentId)} adopted: pid {w.Pid} belongs to box '{w.Box}'");
+                }
+                else
+                {
+                    if (claims.Length > 1)
+                    {
+                        w.LastVerdict = $"holding: pid {w.Pid} was claimed by {claims.Length} boxes -- will not guess";
+                        continue;
+                    }
+                    if (w.AdoptAskedAt == null || (now - w.AdoptAskedAt.Value).TotalMilliseconds > EvaluateEveryMs * 3)
+                    {
+                        w.AdoptAskedAt = now;
+                        var asked = _hub.ProbeAll(w.Pid.ToString());
+                        w.LastVerdict = $"asking {asked} box(es) which one runs pid {w.Pid}";
+                    }
+                    continue;
+                }
+            }
 
             // We can only act on a box we are still talking to. If the agent is gone we cannot tell a
             // dead SERVER from a dead BOX -- and spinning a replacement elsewhere while the original is

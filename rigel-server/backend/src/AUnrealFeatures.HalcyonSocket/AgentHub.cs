@@ -180,6 +180,17 @@ public sealed class AgentHub
         return a != null && a.SendLine(JsonSerializer.Serialize(new { type = "probe", pid }));
     }
 
+    // Ask EVERY connected box about a pid. Used to find the owner of a server that heartbeats but was
+    // not spun up through here (the scheduled-task one), so it can be watched properly instead of being
+    // held forever for want of a box. Returns how many boxes were asked.
+    public int ProbeAll(string pid)
+    {
+        var line = JsonSerializer.Serialize(new { type = "probe", pid });
+        int n = 0;
+        foreach (var a in _agents.Values) if (a.SendLine(line)) n++;
+        return n;
+    }
+
     // Force-stop a pid on a box. Used before every replacement launch: a FROZEN server is still alive
     // and still owns its game port, so launching next to it would leave two servers for one station.
     public bool Kill(string box, string pid, string reason)
