@@ -22,20 +22,22 @@ if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
 $out = Join-Path $here 'build'
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 
-# One cmd session: set up the x64 toolchain, then assemble + compile + link inside it.
+# One cmd session: set up the x64 toolchain, then assemble + compile + link inside it. Chain with && only
+# (which already stops on the first failure) and finish with a BUILD_OK marker. Do NOT insert
+# `if errorlevel` steps here: joined with &&, cmd folds the next command into the if's body and silently
+# skips the compile/link -- which once produced a stale DLL that looked like a success.
 $cmds = @(
   "call `"$vcvars`"",
   "cd /d `"$out`"",
   "ml64 /nologo /c /Fo thunks.obj `"$here\thunks.asm`"",
-  "if errorlevel 1 exit /b 1",
   "cl /nologo /c /O2 /MT /EHsc /GS- /I`"$mh\include`" `"$here\dllmain.cpp`" `"$mh\src\buffer.c`" `"$mh\src\hook.c`" `"$mh\src\trampoline.c`" `"$mh\src\hde\hde64.c`"",
-  "if errorlevel 1 exit /b 1",
   "cl /nologo /LD /Fe:dsound.dll dllmain.obj buffer.obj hook.obj trampoline.obj hde64.obj thunks.obj /link /DEF:`"$here\exports.def`" kernel32.lib user32.lib psapi.lib",
-  "if errorlevel 1 exit /b 1"
+  "echo BUILD_OK"
 ) -join ' && '
 
-cmd.exe /c $cmds
-if ($LASTEXITCODE) { throw "build failed (exit $LASTEXITCODE)" }
+$log = & cmd.exe /c $cmds 2>&1
+$log | ForEach-Object { Write-Host $_ }
+if ($LASTEXITCODE -or -not ($log -match 'BUILD_OK')) { throw "build failed (exit $LASTEXITCODE)" }
 
 Copy-Item (Join-Path $out 'dsound.dll') (Join-Path $here 'dsound.dll') -Force
 $sz = (Get-Item (Join-Path $here 'dsound.dll')).Length
