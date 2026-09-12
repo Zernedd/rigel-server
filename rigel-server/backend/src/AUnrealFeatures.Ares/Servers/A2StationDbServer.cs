@@ -535,6 +535,36 @@ namespace AUnrealFeatures.Ares.Servers
             return Task.FromResult<IHttpActionResult>(Results.Ok(new SuccessBoolean { Success = true }));
         }
 
+        // POST /v1/server/admin/prune_sessions — drop GHOST EOS sessions (and mark their DB rows
+        // offline) while keeping the live ones. "Live" = a deployment that heartbeated within the
+        // window (server_heartbeat / update_player_count stamp LastEvent). Non-destructive to running
+        // servers: the live station keeps its session, so no game server has to restart. Gated by the
+        // server master key. Optional ?window_min=N (default 5).
+        [HttpPost("/v1/server/admin/prune_sessions")]
+        public Task<IHttpActionResult> PruneSessions(IHttpRequest request, IHttpResponse response)
+        {
+            if (request.GetHeaderValue("x-api-key") != ServerMasterKey)
+                return Task.FromResult<IHttpActionResult>(Results.Ok(new SuccessBoolean { Success = false }));
+
+            var windowMin = int.TryParse(request.GetQueryParameter("window_min", "5"), out var w) && w > 0 ? w : 5;
+            var cutoff = DateTime.Now.AddMinutes(-windowMin);
+
+            var depCol = Program.Database.GetCollection<DeploymentDbObject>(true);
+            var deps   = depCol?.FindAll().ToList() ?? new List<DeploymentDbObject>();
+            var keep   = new HashSet<string>(deps.Where(d => d.LastEvent.HasValue && d.LastEvent.Value >= cutoff)
+                                                 .Select(d => d.DeploymentId));
+
+            int dropped = EosGatewayServer.PruneSessionsExcept(keep);
+
+            // Mark the now-sessionless (stale) deployment rows offline too, so they leave the browser.
+            int offlined = 0;
+            foreach (var d in deps.Where(d => !keep.Contains(d.DeploymentId) && d.Online))
+            { d.Online = false; d.PlayerCount = 0; depCol!.Update(d); offlined++; }
+
+            Logger.Warning($"PRUNE sessions: kept {keep.Count} live deployment(s), dropped {dropped} ghost session(s), offlined {offlined} row(s)");
+            return Task.FromResult<IHttpActionResult>(Results.Ok(new SuccessBoolean { Success = true }));
+        }
+
         // ─── USERS ───────────────────────────────────────────────────────────────
 
         // GET /users (deprecated v0) — returns raw array of users filtered by last_login
@@ -862,6 +892,12 @@ namespace AUnrealFeatures.Ares.Servers
                     IsJoinable     = true
                 });
             }
+
+            // Join-gate: this org-scoped id is what the game server reads off the connecting player and
+            // checks via /v1/server/authorized. Mark it active so RIFT players (whose real id is never
+            // marked by the Mothership's fixed RIFT identity) aren't kicked. Only reached on a real
+            // dashboard login, so IP-bypass clients still can't get here.
+            AUnrealFeatures.AAMothership.MothershipServer.MarkDashboardSession(userId);
 
             return Results.Ok(new ClientLoginResponse
             {
@@ -2200,6 +2236,7 @@ namespace AUnrealFeatures.Ares.Servers
             var keyCollection = Program.Database.GetCollection<UserApiKeyDbObject>(true);
             keyCollection?.Insert(new UserApiKeyDbObject { UserId = userId, ApiKey = apiKey });
 
+            AUnrealFeatures.AAMothership.MothershipServer.MarkDashboardSession(userId);   // join-gate: see /users/log_in
             return Results.Ok(new ClientLoginV2Response { Success = true, ApiKey = apiKey, OrgScopedId = userId });
         }
 

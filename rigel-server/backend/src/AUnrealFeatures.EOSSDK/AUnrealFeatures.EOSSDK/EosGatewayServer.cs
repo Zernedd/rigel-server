@@ -185,6 +185,19 @@ public sealed partial class EosGatewayServer : AstraHttpServer, IEosGatewayServe
         return n;
     }
 
+    // Prune matchmaking sessions down to a set of deployment ids worth keeping (the live ones). Crash
+    // loops before the watchdog left dozens of ghost sessions whose game server is long gone; they clog
+    // the station browser and inflate player counts. Keep only sessions whose deployment is in
+    // keepDeploymentIds; drop the rest. Returns the number removed.
+    public static int PruneSessionsExcept(HashSet<string> keepDeploymentIds)
+    {
+        int n;
+        lock (_sessionLock)
+            n = Sessions.RemoveAll(s => string.IsNullOrEmpty(s.DeploymentId) || !keepDeploymentIds.Contains(s.DeploymentId!));
+        if (n > 0) PersistSessions();
+        return n;
+    }
+
     // Wipe every matchmaking session (used by the admin station purge — the DB purge alone leaves these
     // in-memory sessions, which is what the game's station listing actually reads, so stations linger).
     // Returns the number removed.

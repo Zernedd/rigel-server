@@ -177,6 +177,15 @@ public sealed class MothershipServer : AstraHttpServer, IMothershipServer
             if (!string.IsNullOrEmpty(id)) _activeSessions[id!] = exp;
     }
 
+    /// <summary>Public entry so the dashboard login (A2StationDbServer) can mark the org-scoped id it
+    /// hands the client active. That id is exactly what the game server's join gate reads off the
+    /// connecting player's controller (org@0xA30) and checks via /v1/server/authorized. Quest players
+    /// were authorized because a persisted V2 record already carried their id; a RIFT player's real id
+    /// was never marked (only the fixed RIFT identity was), so the gate kicked them. Marking the
+    /// dashboard id here fixes RIFT without weakening the gate: an IP-bypass client never completes the
+    /// dashboard login, so it still never lands here.</summary>
+    public static void MarkDashboardSession(string? id) => MarkActiveSession(12, id);
+
     /// <summary>True if `id` has a non-expired active session (lazily evicts expired entries).</summary>
     private static bool IsActiveSession(string id)
     {
