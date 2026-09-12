@@ -487,6 +487,33 @@ namespace AUnrealFeatures.Ares.Servers
             return Results.Ok(new { success = true, deployment_id = body.DeploymentId, player_count = count, session_matched = matched });
         }
 
+        // POST /server_heartbeat — the watchdog's liveness feed from a dedicated server, every 5s.
+        // Unauthenticated on purpose, exactly like /register_server and /update_player_count: it is the
+        // game server talking to its own backend, and the worst a forged post can do is make the
+        // watchdog think a dead server is healthy (it can never cause a restart, which needs the agent
+        // to confirm the process state on the box). See ServerWatchdog for what is done with it.
+        [HttpPost("/server_heartbeat")]
+        public async Task<IHttpActionResult> ServerHeartbeat(IHttpRequest request, IHttpResponse response)
+        {
+            ServerHeartbeatRequest? body;
+            try { body = JsonSerializer.Deserialize<ServerHeartbeatRequest>(request.Body); }
+            catch { body = null; }
+            if (body == null || string.IsNullOrWhiteSpace(body.DeploymentId))
+                return Results.Ok(new { success = false, error = "deployment_id required" });
+
+            HalcyonSocketServer.Instance?.Watchdog.OnHeartbeat(
+                body.DeploymentId!, body.Pid, body.Seq, body.DispatchAgeMs, body.TickAgeMs,
+                body.UptimeMs, body.Players);
+
+            // Keep the deployment row's freshness stamp moving too, so anything reading LastEvent sees
+            // a live server between the 3-minute player-count reports.
+            var depCol = Program.Database.GetCollection<DeploymentDbObject>(true);
+            var dep    = depCol?.FindAll().FirstOrDefault(d => d.DeploymentId == body.DeploymentId);
+            if (dep != null) { dep.LastEvent = DateTime.Now; depCol!.Update(dep); }
+
+            return Results.Ok(new { success = true });
+        }
+
         // POST /v1/server/admin/purge_stations — dev cleanup: wipe ALL stations + deployments +
         // roles (they accumulated one-per-boot before deployment ids were made stable). Gated by
         // the server master key (x-api-key). Destructive; returns the counts removed.

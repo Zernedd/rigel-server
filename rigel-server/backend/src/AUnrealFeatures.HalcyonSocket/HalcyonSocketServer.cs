@@ -29,11 +29,20 @@ public sealed class HalcyonSocketServer : AstraHttpServer, IHalcyonSocketServer
 
     private readonly AgentHub _hub = new(AGENT_PORT);
 
+    // Watches every deployment and replaces one when it is CERTAIN it is down -- a crashed process, or
+    // a frozen engine, which the agent alone cannot see. See ServerWatchdog for the three verdicts and
+    // for why nothing weaker is allowed to act.
+    public ServerWatchdog Watchdog { get; }
+
     public HalcyonSocketServer() : base(HOSTNAME, PORT)
     {
         _hub.Start();
+        Watchdog = new ServerWatchdog(_hub, (b, m, r, a, n) => RequestSpinUp(b, m, r, a, n));
+        _hub.OnSpunUp      = Watchdog.OnSpunUp;
+        _hub.OnExited      = Watchdog.OnExited;
+        _hub.OnProbeResult = Watchdog.OnProbeResult;
         Instance = this;
-        Console.WriteLine($"[HalcyonSocket] control HTTP on {PORT}, agent TCP on {AGENT_PORT}");
+        Console.WriteLine($"[HalcyonSocket] control HTTP on {PORT}, agent TCP on {AGENT_PORT}, watchdog armed");
     }
 
     // Relay a spin-up request to a connected agent. box=null -> least-loaded box. Fire-and-forget:
@@ -85,6 +94,11 @@ public sealed class HalcyonSocketServer : AstraHttpServer, IHalcyonSocketServer
         if (!agent.SendLine(json))
             return new SpinUpResult { success = false, request_id = reqId, agent = agent.Box, error = "send to agent failed" };
 
+        // Tell the watchdog how to put this exact server back up later: same box, same map, same args,
+        // same deployment id. Recorded for EVERY launch, the dashboard's included, so nothing that gets
+        // spun up here is left unwatched.
+        Watchdog.OnSpinUpRequested(deploymentId, reqId, agent.Box, map, region, finalArgs, name);
+
         Console.WriteLine($"[HalcyonSocket] spinup {reqId} -> agent '{agent.Box}' (map='{map}', region='{region}')");
         return new SpinUpResult { success = true, request_id = reqId, agent = agent.Box };
     }
@@ -113,6 +127,89 @@ public sealed class HalcyonSocketServer : AstraHttpServer, IHalcyonSocketServer
         catch { body = null; }
         return Results.Ok(RequestSpinUp(body?.box, body?.map, body?.region, body?.args, body?.name));
     }
+
+    // GET /watchdog — what the watchdog believes about every server, and why. The "verdict" field is the
+    // one to read when a server did or did not get replaced.
+    [HttpGet("/watchdog")]
+    public async Task<IHttpActionResult> WatchdogStatus(IHttpRequest request, IHttpResponse response)
+        => Results.Ok(new WatchdogStatusResult { servers = WatchdogRows() });
+
+    public WatchdogRow[] WatchdogRows() => Watchdog.Servers.Select(w => new WatchdogRow
+    {
+        deployment_id     = w.DeploymentId,
+        name              = w.Name,
+        box               = w.Box,
+        pid               = w.Pid,
+        players           = w.Players,
+        uptime_minutes    = (int)(w.UptimeMs / 60000),
+        last_heartbeat    = w.LastHeartbeat,
+        dispatch_age_ms   = w.DispatchAgeMs,
+        tick_age_ms       = w.TickAgeMs,
+        verdict           = w.LastVerdict,
+        restarts          = w.RestartsInWindow,
+        last_restart      = w.LastRestartAt,
+        retired           = w.Retired,
+        retired_reason    = w.RetiredReason
+    }).OrderBy(r => r.name).ToArray();
+
+    // POST /watchdog/retire — stop watching one deployment, so a DELIBERATE shutdown is not undone.
+    // POST /watchdog/resume — put it back under watch (also clears the give-up state).
+    [HttpPost("/watchdog/retire")]
+    public async Task<IHttpActionResult> WatchdogRetire(IHttpRequest request, IHttpResponse response)
+    {
+        var b = ReadWatchdogBody(request);
+        return Results.Ok(new SuccessResult
+        {
+            success = b != null && Watchdog.Retire(b.deployment_id ?? "", b.reason ?? "stopped on purpose")
+        });
+    }
+
+    [HttpPost("/watchdog/resume")]
+    public async Task<IHttpActionResult> WatchdogResume(IHttpRequest request, IHttpResponse response)
+    {
+        var b = ReadWatchdogBody(request);
+        return Results.Ok(new SuccessResult { success = b != null && Watchdog.Resume(b.deployment_id ?? "") });
+    }
+
+    private static WatchdogBody? ReadWatchdogBody(IHttpRequest request)
+    {
+        try { return JsonSerializer.Deserialize<WatchdogBody>(request.Body); }
+        catch { return null; }
+    }
+}
+
+public sealed class WatchdogBody
+{
+    public string? deployment_id { get; set; }
+    public string? reason        { get; set; }
+}
+
+public sealed class SuccessResult
+{
+    public bool success { get; set; }
+}
+
+public sealed class WatchdogRow
+{
+    public string    deployment_id   { get; set; } = "";
+    public string    name            { get; set; } = "";
+    public string    box             { get; set; } = "";
+    public int       pid             { get; set; }
+    public int       players         { get; set; }
+    public int       uptime_minutes  { get; set; }
+    public DateTime? last_heartbeat  { get; set; }
+    public ulong     dispatch_age_ms { get; set; }
+    public ulong     tick_age_ms     { get; set; }
+    public string    verdict         { get; set; } = "";
+    public int       restarts        { get; set; }
+    public DateTime? last_restart    { get; set; }
+    public bool      retired         { get; set; }
+    public string    retired_reason  { get; set; } = "";
+}
+
+public sealed class WatchdogStatusResult
+{
+    public WatchdogRow[] servers { get; set; } = Array.Empty<WatchdogRow>();
 }
 
 public sealed class SpinUpBody

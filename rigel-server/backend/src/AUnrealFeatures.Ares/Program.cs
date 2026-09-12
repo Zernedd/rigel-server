@@ -110,6 +110,27 @@ namespace AUnrealFeatures.Ares
                 //   internet: the agent protocol has no authentication.
                 .AddServer<IHalcyonSocketServer, HalcyonSocketServer>();
 
+            // The watchdog decides a server is down; taking it OUT of the station browser needs the EOS
+            // session store and the deployment table, which live over here. Wiring it as a hook keeps
+            // HalcyonSocket's single project reference intact (Ares -> HalcyonSocket, never back).
+            // A crashed or frozen server never deletes its own session, so without this the station
+            // stays listed and players keep joining a corpse for the whole restart.
+            ServerWatchdog.TakeDeploymentOffline = (deploymentId, reason) =>
+            {
+                var dropped = EosGatewayServer.RemoveSessionsByDeployment(deploymentId);
+
+                var depCol = Database.GetCollection<DeploymentDbObject>(true);
+                var dep    = depCol?.FindAll().FirstOrDefault(d => d.DeploymentId == deploymentId);
+                if (dep != null)
+                {
+                    dep.Online      = false;
+                    dep.PlayerCount = 0;
+                    depCol!.Update(dep);
+                }
+                Console.WriteLine($"[Watchdog] took deployment {deploymentId} out of the browser ({reason}): " +
+                                  $"{dropped} session(s) dropped, db row {(dep != null ? "marked offline" : "not found")}");
+            };
+
             await _hostApplication.RunAsync();
         }
     }

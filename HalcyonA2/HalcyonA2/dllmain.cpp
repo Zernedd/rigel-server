@@ -8954,6 +8954,81 @@ static std::string HexBytes(const uint8_t* p, int n)
     return s;
 }
 
+// ======================= WATCHDOG HEARTBEAT (server liveness) =======================
+// [2026-09-12] The allocator can only see a server DIE -- the agent notices the process object exited.
+// It cannot see a server FREEZE: a wedged game thread leaves the process alive, holding its port and
+// its EOS session, so the station stays in the browser and players join a server that never ticks.
+// This is the signal that tells those two apart, and it is deliberately split across two threads:
+//
+//   the ENGINE only bumps a counter (HeartbeatMark, from the ProcessEvent hook), and
+//   a WORKER thread does the POST every kHeartbeatMs.
+//
+// So the backend can read all three states off one route:
+//   posts arriving, seq advancing        -> healthy
+//   posts arriving, seq STUCK            -> the engine is wedged (the process is obviously fine, it is
+//                                           still posting) -- this is the freeze case
+//   posts stopped                        -> the process is gone, or the box/network is
+//
+// The mark sits on the ProcessEvent dispatch and NOT on our own periodic tick body, on purpose. A live
+// dedicated server dispatches UFunctions constantly (timers, replication, gamemode), and the dispatch
+// happens on more threads than the game thread -- so if the game thread alone wedged while something
+// else still dispatched, this misses it. That trade is deliberate: a missed freeze costs us a slower
+// detection, an INVENTED freeze costs a running server its players. The watchdog restarts machines, so
+// it only ever gets a signal that cannot be produced by a healthy process.
+//
+// Nothing here can stall the engine: the mark is a relaxed atomic increment on a path that already runs
+// ~90Hz, and the POST happens on a thread that is started once and lives for the process.
+static std::atomic<unsigned long long> g_hbSeq{0};        // bumped on every ProcessEvent dispatch
+static std::atomic<unsigned long long> g_hbDispatchMs{0}; // GetTickCount64() at the last dispatch
+static std::atomic<unsigned long long> g_hbTickMs{0};     // ...and at the last run of OUR periodic tick body
+static std::atomic<int>                g_hbPlayers{-1};   // last known connected count (-1 = not measured yet)
+static const unsigned                  kHeartbeatMs = 5000;
+
+static inline void HeartbeatMark()
+{
+    g_hbSeq.fetch_add(1, std::memory_order_relaxed);
+    g_hbDispatchMs.store(GetTickCount64(), std::memory_order_relaxed);
+}
+
+static void HeartbeatWorker()
+{
+    const ULONGLONG boot = GetTickCount64();
+    for (;;)
+    {
+        Sleep(kHeartbeatMs);
+        if (g_deploymentId.empty()) continue;              // not registered yet / launched by hand
+
+        const unsigned long long seq  = g_hbSeq.load(std::memory_order_relaxed);
+        const unsigned long long dms  = g_hbDispatchMs.load(std::memory_order_relaxed);
+        const unsigned long long tms  = g_hbTickMs.load(std::memory_order_relaxed);
+        const ULONGLONG          now  = GetTickCount64();
+        // Ages, not timestamps: the backend does not share our clock. The worker is alive by definition
+        // if this POST happens at all, so a large age means the ENGINE stopped, not the network.
+        auto ageOf = [now](unsigned long long at) -> unsigned long long {
+            return (at == 0) ? 0ull : (now >= at ? now - at : 0ull);
+        };
+
+        std::string body = "{\"deployment_id\":\"" + g_deploymentId
+                         + "\",\"pid\":" + std::to_string(GetCurrentProcessId())
+                         + ",\"seq\":" + std::to_string(seq)
+                         + ",\"dispatch_age_ms\":" + std::to_string(ageOf(dms))
+                         + ",\"tick_age_ms\":" + std::to_string(ageOf(tms))
+                         + ",\"uptime_ms\":" + std::to_string(now - boot)
+                         + ",\"players\":" + std::to_string(g_hbPlayers.load(std::memory_order_relaxed))
+                         + "}";
+        HttpPostLocal(kBackendHost, kBackendPort, L"/server_heartbeat", body);
+    }
+}
+
+static void StartHeartbeatWorker()
+{
+    static bool started = false;
+    if (started) return;
+    started = true;
+    std::thread(HeartbeatWorker).detach();
+    HxLog("[HalcyonA2][WATCHDOG] heartbeat worker started (every %ums)\n", kHeartbeatMs);
+}
+
 // Game-thread pass (~1s): enumerate the netdriver's ClientConnections — the AUTHORITATIVE list of
 // connected clients (VR AND spectators, class-agnostic; conn+0x30 = PlayerController). Each remote
 // client is gated on org@PC+0xA30, which is populated ONLY from the dashboard backend's validated
@@ -8992,6 +9067,7 @@ static void PlayerCountReportTick()
     if (vt < imgBase || vt >= imgBase + imgSize) return;          // not a real in-image netdriver yet
     int32_t numConns = *reinterpret_cast<int32_t*>(nd + 0xD8);    // ClientConnections.Num() (may be 0)
     if (numConns < 0) numConns = 0;
+    g_hbPlayers.store(numConns, std::memory_order_relaxed);      // so the watchdog heartbeat carries it too
 
     // Fire-and-forget so a remote POST never stalls the game thread. Capture by value.
     const std::string dep  = g_deploymentId;
@@ -11486,6 +11562,10 @@ static void CosmeticTrace(SDK::UObject* Context, SDK::UFunction* Function, void*
 
 static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, void* Parms)
 {
+    // [2026-09-12 WATCHDOG] First thing, before any early-out below can skip it: this is the proof
+    // that the engine is still dispatching. Two relaxed atomic stores -- see HeartbeatMark.
+    HeartbeatMark();
+
     // [PORT 22284] DROP A2SpectatorEntity::Server_ApplyData. The server's phantom local player rides
     // an A2SpectatorEntity that fires Server_ApplyData(FReplicatedTransformData) every tick; on the
     // headless server that Net Server RPC's UFunction chain is incomplete (the Iris "Rejected RPC
@@ -11675,6 +11755,8 @@ static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, v
     if (!inHook && InterlockedCompareExchange(&s_tickOwner, 1, 0) == 0)
     {
         inHook = true;
+        g_hbTickMs.store(GetTickCount64(), std::memory_order_relaxed);   // watchdog: our periodic pass ran
+        StartHeartbeatWorker();   // once; no-ops afterwards
 
         // [2026-09-11 PERF] Refresh the shared class index FIRST, so every consumer below reads a list
         // built by this one amortised slice instead of doing its own 167k-object walk. See ObjIndexTick.

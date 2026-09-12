@@ -32,3 +32,20 @@ public sealed class UpdatePlayerCountRequest
     [JsonPropertyName("deployment_id")] public string? DeploymentId { get; set; }
     [JsonPropertyName("player_count")]  public int     PlayerCount  { get; set; }
 }
+
+// The watchdog heartbeat (POST /server_heartbeat, every 5s). Sent by a WORKER thread inside the DLL,
+// deliberately not by the engine -- see HalcyonA2 HeartbeatWorker. That split is the whole point: the
+// post keeps arriving while the engine is wedged, so "the process is alive" and "the game is running"
+// arrive as two separate facts instead of one ambiguous silence.
+//   seq / dispatch_age_ms  come from the ProcessEvent hook -- the engine dispatching UFunctions at all
+//   tick_age_ms            the last run of the DLL's own periodic pass
+public sealed class ServerHeartbeatRequest
+{
+    [JsonPropertyName("deployment_id")]   public string? DeploymentId   { get; set; }
+    [JsonPropertyName("pid")]             public int     Pid            { get; set; }
+    [JsonPropertyName("seq")]             public ulong   Seq            { get; set; }
+    [JsonPropertyName("dispatch_age_ms")] public ulong   DispatchAgeMs  { get; set; }
+    [JsonPropertyName("tick_age_ms")]     public ulong   TickAgeMs      { get; set; }
+    [JsonPropertyName("uptime_ms")]       public ulong   UptimeMs       { get; set; }
+    [JsonPropertyName("players")]         public int     Players        { get; set; }
+}

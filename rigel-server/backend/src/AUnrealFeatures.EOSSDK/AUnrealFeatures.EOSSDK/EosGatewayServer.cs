@@ -171,6 +171,20 @@ public sealed partial class EosGatewayServer : AstraHttpServer, IEosGatewayServe
         return removed;
     }
 
+    // Drop every matchmaking session belonging to one deployment. The station list the game browses is
+    // built from these, so this is what actually takes a dead server out of the browser -- a crashed or
+    // frozen server never deletes its own session, and players keep being sent to it. Called by the
+    // watchdog the moment it is certain a server is down, before the replacement is launched.
+    // Returns the number removed.
+    public static int RemoveSessionsByDeployment(string deploymentId)
+    {
+        if (string.IsNullOrWhiteSpace(deploymentId)) return 0;
+        int n;
+        lock (_sessionLock) { n = Sessions.RemoveAll(s => s.DeploymentId == deploymentId); }
+        if (n > 0) PersistSessions();
+        return n;
+    }
+
     // Wipe every matchmaking session (used by the admin station purge — the DB purge alone leaves these
     // in-memory sessions, which is what the game's station listing actually reads, so stations linger).
     // Returns the number removed.

@@ -12,7 +12,13 @@
   shows up in the browser. UE picks the next free game port (7777, 7778, ...).
 
   Messages sent: hello {box, capacity, running}, heartbeat {running} every 30s,
-  spunup {id, pid, status, msg}, exited {pid, code, running}.
+  spunup {id, pid, status, msg}, exited {pid, code, running}, probe_result {pid, alive}.
+  Messages handled: spinup {id, map, region, args}, probe {pid}, kill {pid, reason}.
+
+  probe/kill serve the backend's watchdog (ServerWatchdog). It replaces a server only when it is
+  CERTAIN the old one is down, and this box is the only thing that can supply that certainty: the
+  watchdog will not act on silence alone, it asks here whether the process still exists. kill is used
+  before every replacement, because a FROZEN server is still alive and still owns its game port.
 
   Capacity counts EVERY A2 server process on the box, including the one the RigelGameServer task
   starts. One server uses roughly 2 cores and ~1 GB, so the default of 2 suits a 6-core VPS.
@@ -112,7 +118,36 @@ while ($true) {
                 $readTask = $reader.ReadLineAsync()
                 $msg = $null
                 try { $msg = $line | ConvertFrom-Json } catch { Log "bad message: $line" }
-                if ($msg -and $msg.type -eq 'spinup') {
+                # The watchdog asks whether a pid is still running. This is the answer it trusts over
+                # silence: only the box can tell a dead server apart from a dead network.
+                if ($msg -and $msg.type -eq 'probe') {
+                    $p = Get-Process -Id ([int]$msg.pid) -ErrorAction SilentlyContinue
+                    $alive = [bool]($p -and -not $p.HasExited -and $p.ProcessName -eq $procName)
+                    Send $writer @{ type = 'probe_result'; pid = "$($msg.pid)"; alive = $alive }
+                    Log "probe pid $($msg.pid): alive=$alive"
+                }
+                # Force-stop a server the watchdog has ruled down. A FROZEN one is still alive and still
+                # owns its game port, so it has to go before the replacement launches or the box ends up
+                # running two servers for one station.
+                elseif ($msg -and $msg.type -eq 'kill') {
+                    $targetId = [int]$msg.pid
+                    $p = Get-Process -Id $targetId -ErrorAction SilentlyContinue
+                    if (-not $p -or $p.ProcessName -ne $procName) {
+                        Log "kill pid ${targetId}: already gone (or not a game server) -- nothing to do"
+                        Send $writer @{ type = 'exited'; pid = "$targetId"; code = 'gone'; running = (Running-Count) }
+                    }
+                    else {
+                        try {
+                            Stop-Process -Id $targetId -Force -ErrorAction Stop
+                            Start-Sleep -Milliseconds 1500
+                            Log "kill pid ${targetId}: stopped ($($msg.reason))"
+                        }
+                        catch { Log "kill pid ${targetId}: FAILED -- $($_.Exception.Message)" }
+                        $pending.Remove($targetId); $ours.Remove($targetId)
+                        Send $writer @{ type = 'exited'; pid = "$targetId"; code = 'killed'; running = (Running-Count) }
+                    }
+                }
+                elseif ($msg -and $msg.type -eq 'spinup') {
                     $running = Running-Count
                     if ($running -ge $Capacity) {
                         Log "spinup $($msg.id) refused: box full ($running/$Capacity)"

@@ -16,6 +16,12 @@ public sealed class AgentConnection
     public int      Running  { get; set; }
     public DateTime LastSeen { get; set; } = DateTime.UtcNow;
 
+    // When this connection came up. The watchdog waits this long again before judging a server on
+    // SILENCE: whatever took the agent away (a box reboot, a network blip) may have been blocking the
+    // game server's heartbeats too, and the backlog of quiet that follows a reconnect is not evidence
+    // that the game is wedged.
+    public DateTime ConnectedAt { get; } = DateTime.UtcNow;
+
     private readonly object _writeLock = new();
 
     public int Free => Math.Max(0, Capacity - Running);
@@ -38,6 +44,12 @@ public sealed class AgentHub
 {
     private readonly TcpListener _listener;
     private readonly ConcurrentDictionary<Guid, AgentConnection> _agents = new();
+
+    // Set by HalcyonSocketServer once the watchdog exists. Kept as callbacks so the hub stays a dumb
+    // transport and every decision lives in one place (ServerWatchdog).
+    public Action<string /*reqId*/, string /*pid*/, string /*status*/, string /*box*/>? OnSpunUp;
+    public Action<string /*box*/,   string /*pid*/, string /*code*/>?                   OnExited;
+    public Action<string /*box*/,   string /*pid*/, bool   /*alive*/>?                  OnProbeResult;
 
     public AgentHub(int port) => _listener = new TcpListener(IPAddress.Any, port);
 
@@ -118,10 +130,18 @@ public sealed class AgentHub
                     break;
                 case "spunup":
                     Console.WriteLine($"[HalcyonSocket] spunup id={GetStr(root, "id")} pid={GetStr(root, "pid")} status={GetStr(root, "status")} msg={GetStr(root, "msg")}");
+                    OnSpunUp?.Invoke(GetStr(root, "id"), GetStr(root, "pid"), GetStr(root, "status"), conn.Box);
                     break;
                 case "exited":
                     conn.Running = GetInt(root, "running");
                     Console.WriteLine($"[HalcyonSocket] instance exited pid={GetStr(root, "pid")} code={GetStr(root, "code")}");
+                    // The agent holds the Process object, so this is not a guess about the process --
+                    // it is the process telling us. The watchdog treats it as certain.
+                    OnExited?.Invoke(conn.Box, GetStr(root, "pid"), GetStr(root, "code"));
+                    break;
+                case "probe_result":
+                    OnProbeResult?.Invoke(conn.Box, GetStr(root, "pid"),
+                                          root.TryGetProperty("alive", out var al) && al.ValueKind == JsonValueKind.True);
                     break;
             }
         }
@@ -146,6 +166,27 @@ public sealed class AgentHub
     }
 
     public IReadOnlyList<AgentConnection> Agents => _agents.Values.ToList();
+
+    // The agent for a named box, or null when that box is not connected. The watchdog treats null as
+    // "cannot verify" and refuses to act -- a missing agent means we cannot tell a dead server from a
+    // dead box.
+    public AgentConnection? ByBox(string box)
+        => string.IsNullOrWhiteSpace(box) ? null : _agents.Values.FirstOrDefault(a => a.Box == box);
+
+    // Ask a box whether a pid is still running. The answer comes back as "probe_result".
+    public bool Probe(string box, string pid)
+    {
+        var a = ByBox(box);
+        return a != null && a.SendLine(JsonSerializer.Serialize(new { type = "probe", pid }));
+    }
+
+    // Force-stop a pid on a box. Used before every replacement launch: a FROZEN server is still alive
+    // and still owns its game port, so launching next to it would leave two servers for one station.
+    public bool Kill(string box, string pid, string reason)
+    {
+        var a = ByBox(box);
+        return a != null && a.SendLine(JsonSerializer.Serialize(new { type = "kill", pid, reason }));
+    }
 
     // Pick a target agent: exact box name if given (and it has free capacity), else the box with the
     // most free capacity.
