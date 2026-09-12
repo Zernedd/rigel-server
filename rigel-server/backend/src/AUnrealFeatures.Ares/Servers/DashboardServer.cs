@@ -150,13 +150,19 @@ public sealed class AresDashboardServer : AstraHttpServer, IAresDashboardServer
     public async Task<IHttpActionResult> GetUsers(IHttpRequest request, IHttpResponse response)
     {
         var users = Program.Database.GetCollection<UserDataResponse>(true);
+        // Skip records with no UserId. The login paths can leave a half-written user behind (no id,
+        // no username) and such a row is not just cosmetic noise -- every action on this tab is keyed
+        // by user_id, so it is unactionable, and the UI renders user_id.slice(0,8), which threw on the
+        // null and took the WHOLE users table down with it. Filter at the source, and never hand the
+        // client a null where it expects a string.
         var list = users?.FindAll()
+            .Where(u => !string.IsNullOrWhiteSpace(u.UserId))
             .OrderByDescending(u => u.LastLogin)
             .Take(50)
             .Select(u => new DashboardUser
             {
-                UserId    = u.UserId,
-                Username  = u.Username,
+                UserId    = u.UserId ?? string.Empty,
+                Username  = string.IsNullOrWhiteSpace(u.Username) ? "(unknown)" : u.Username,
                 Platform  = u.Platform,
                 LastLogin = u.LastLogin,
                 CreatedAt = u.CreatedAt,
@@ -384,6 +390,56 @@ public sealed class AresDashboardServer : AstraHttpServer, IAresDashboardServer
         }).ToList() ?? new();
 
         return Results.Ok(list);
+    }
+
+    // DELETE /api/stations/{station_id}?force=true
+    //
+    // A "fleet" in the dashboard IS a station: v2/fleets on :78 returns fleet_id == StationId, and
+    // /api/stations returns the same four rows. StationDb has had DELETE /stations/{id} all along but
+    // it is not reachable from the dashboard origin, so the UI had no way to remove a fleet -- which
+    // is how duplicate/stale fleets (two "Rigel_1") accumulated with no way to clear them.
+    //
+    // Guard: a fleet with players on it right now is almost never the one that was meant to be
+    // clicked. Refuse unless force=true, and report the count so the UI can ask properly.
+    [HttpDelete("/api/stations/{station_id}")]
+    public async Task<IHttpActionResult> DeleteStationApi(IHttpRequest request, IHttpResponse response, string station_id)
+    {
+        var stations = Program.Database.GetCollection<StationDbObject>(true);
+        var station  = stations?.FindOne(s => s.StationId == station_id);
+        if (station == null)
+            return Results.Ok(new DashboardActionResult { Success = false, Error = "station not found" });
+
+        var deploymentCol = Program.Database.GetCollection<DeploymentDbObject>(true);
+        var deps = deploymentCol?.Find(d => d.StationId == station_id).ToList() ?? new();
+
+        bool force = string.Equals(request.GetQueryParameter("force", "") ?? "", "true", StringComparison.OrdinalIgnoreCase);
+        int livePlayers = deps.Where(d => d.Online).Sum(d => d.PlayerCount);
+        if (livePlayers > 0 && !force)
+            return Results.Ok(new DashboardActionResult
+            {
+                Success = false,
+                Error   = $"fleet has {livePlayers} player(s) online — confirm again to delete anyway"
+            });
+
+        stations!.Delete(station.Id);
+
+        // Cascade. The EOS sessions matter as much as the rows: leaving them behind keeps a deleted
+        // fleet advertised in the station browser with a game server that no longer has a station.
+        foreach (var dep in deps)
+        {
+            EosGatewayServer.RemoveSessionsByDeployment(dep.DeploymentId);
+            deploymentCol!.Delete(dep.Id);
+        }
+
+        var roleCol = Program.Database.GetCollection<RoleResponse>(true);
+        foreach (var role in roleCol?.Find(r => r.StationId == station_id).ToList() ?? new())
+            roleCol!.Delete(role.Id);
+
+        var eventCol = Program.Database.GetCollection<StationEventDbObject>(true);
+        foreach (var ev in eventCol?.Find(e => e.StationId == station_id).ToList() ?? new())
+            eventCol!.Delete(ev.Id);
+
+        return Results.Ok(new DashboardActionResult { Success = true, Id = station_id });
     }
 
     [HttpGet("/api/deployments")]

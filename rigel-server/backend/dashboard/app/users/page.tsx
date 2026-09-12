@@ -126,16 +126,19 @@ export default function UsersPage() {
                   style={{ color: "var(--muted)" }}>No users</td>
               </tr>
             ) : users.map((u, i) => (
-              <tr key={u.user_id}
+              <tr key={u.user_id || `row-${i}`}
                 style={{
                   background: i % 2 === 0 ? "var(--surface)" : "var(--surface2)",
                   borderBottom: "1px solid var(--border)",
                 }}>
+                {/* Guarded even though /api/users now filters id-less rows: this table renders whatever
+                    the backend sends, and one null here previously threw inside render and blanked the
+                    entire tab rather than the single bad row. */}
                 <td className="px-4 py-3 font-mono text-xs" style={{ color: "var(--muted)" }}>
-                  {u.user_id.slice(0, 8)}…
+                  {u.user_id ? `${u.user_id.slice(0, 8)}…` : "—"}
                 </td>
                 <td className="px-4 py-3 font-medium">
-                {u.username}
+                {u.username || "(unknown)"}
                 {u.is_admin && (
                   <span className="ml-2 text-xs px-1.5 py-0.5 rounded-full font-medium"
                     style={{ background: "#2d1f0e", color: "#f0883e" }}>Admin</span>

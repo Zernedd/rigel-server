@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
 import { api, type Station } from "../lib/api";
-import { RefreshCw, Server, Plus, X } from "lucide-react";
+import { RefreshCw, Server, Plus, X, Trash2 } from "lucide-react";
 
 const PAGE_SIZE = 16;
 
@@ -18,6 +18,9 @@ export default function HomePage() {
   const [creating, setCreating]     = useState(false);
   const [newName, setNewName]       = useState("");
   const [saving, setSaving]         = useState(false);
+  const [delTarget, setDelTarget]   = useState<Station | null>(null);
+  const [deleting, setDeleting]     = useState(false);
+  const [delErr, setDelErr]         = useState<string | null>(null);
 
   function load() {
     setLoading(true);
@@ -36,6 +39,22 @@ export default function HomePage() {
       const res = await api.createStation(newName.trim());
       if (res.station_id) { setCreating(false); setNewName(""); load(); }
     } finally { setSaving(false); }
+  }
+
+  // The backend refuses a fleet that currently has players on it unless force=true, so a populated
+  // fleet takes a second, deliberate click rather than being one misclick away from deletion.
+  async function deleteStation(force: boolean) {
+    if (!delTarget) return;
+    setDeleting(true);
+    setDelErr(null);
+    try {
+      const res = await api.deleteStation(delTarget.station_id, force);
+      if (!res.success) { setDelErr(res.error ?? "Delete failed"); return; }
+      setDelTarget(null);
+      load();
+    } catch (e: unknown) {
+      setDelErr(e instanceof Error ? e.message : "Unknown error");
+    } finally { setDeleting(false); }
   }
 
   const filtered   = stations ? (onlineOnly ? stations.filter(s => s.online) : stations) : null;
@@ -75,6 +94,46 @@ export default function HomePage() {
                     className="px-4 py-2 rounded-md text-xs font-medium"
                     style={{ background: "var(--accent)", color: "#fff", opacity: saving ? 0.5 : 1 }}>
                     {saving ? "Creating…" : "Create"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Delete fleet confirmation */}
+          {delTarget && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center"
+              style={{ background: "rgba(0,0,0,0.65)" }}
+              onClick={e => { if (e.target === e.currentTarget) setDelTarget(null); }}>
+              <div className="w-full max-w-sm rounded-lg p-6 text-left"
+                style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="font-semibold text-sm">Delete “{delTarget.station_name}”?</h2>
+                  <button onClick={() => setDelTarget(null)} style={{ color: "var(--muted)" }}><X size={16} /></button>
+                </div>
+                <p className="text-xs mb-4" style={{ color: "var(--muted)" }}>
+                  Removes the fleet along with its {delTarget.deployments} deployment(s), roles, events
+                  and EOS sessions. This cannot be undone.
+                </p>
+                {delTarget.player_count > 0 && (
+                  <div className="mb-4 px-3 py-2 rounded text-xs"
+                    style={{ background: "#2d1a1a", color: "var(--red)", border: "1px solid #5c2020" }}>
+                    {delTarget.player_count} player(s) are on this fleet right now.
+                  </div>
+                )}
+                {delErr && (
+                  <div className="mb-4 px-3 py-2 rounded text-xs"
+                    style={{ background: "#2d1a1a", color: "var(--red)" }}>{delErr}</div>
+                )}
+                <div className="flex gap-2 justify-end">
+                  <button onClick={() => setDelTarget(null)}
+                    className="px-4 py-2 rounded-md text-xs"
+                    style={{ color: "var(--muted)", border: "1px solid var(--border)" }}>Cancel</button>
+                  <button onClick={() => deleteStation(delTarget.player_count > 0 || delErr !== null)}
+                    disabled={deleting}
+                    className="px-4 py-2 rounded-md text-xs font-medium"
+                    style={{ background: "var(--red)", color: "#fff", opacity: deleting ? 0.5 : 1 }}>
+                    {deleting ? "Deleting…" : delTarget.player_count > 0 ? "Delete anyway" : "Delete"}
                   </button>
                 </div>
               </div>
@@ -131,6 +190,7 @@ export default function HomePage() {
                     <th className="px-4 py-3 text-left text-xs font-medium" style={{ color: "var(--muted)" }}>Station Name</th>
                     <th className="px-4 py-3 text-left text-xs font-medium hidden sm:table-cell" style={{ color: "var(--muted)" }}>Online</th>
                     <th className="px-4 py-3 text-center text-xs font-medium" style={{ color: "var(--muted)" }}>Player Count</th>
+                    <th className="w-12" />
                   </tr>
                 </thead>
                 <tbody>
@@ -141,11 +201,12 @@ export default function HomePage() {
                         <td className="px-4 py-3"><div className="h-4 w-36 rounded animate-pulse" style={{ background: "var(--border)" }} /></td>
                         <td className="hidden sm:table-cell px-4 py-3"><div className="h-4 w-4 rounded-full animate-pulse" style={{ background: "var(--border)" }} /></td>
                         <td className="px-4 py-3"><div className="h-4 w-8 rounded animate-pulse mx-auto" style={{ background: "var(--border)" }} /></td>
+                        <td className="px-4 py-3"><div className="h-4 w-4 rounded animate-pulse mx-auto" style={{ background: "var(--border)" }} /></td>
                       </tr>
                     ))
                   ) : pageItems.length === 0 ? (
                     <tr>
-                      <td colSpan={4} className="px-4 py-12 text-center text-sm" style={{ color: "var(--muted)" }}>
+                      <td colSpan={5} className="px-4 py-12 text-center text-sm" style={{ color: "var(--muted)" }}>
                         {onlineOnly ? "No online stations" : "No stations found"}
                       </td>
                     </tr>
@@ -173,6 +234,16 @@ export default function HomePage() {
                       </td>
                       <td className="px-4 py-3 text-center">
                         <div className="font-semibold text-sm">{s.player_count}</div>
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        {/* stopPropagation: the row itself navigates to the station page. */}
+                        <button
+                          onClick={e => { e.stopPropagation(); setDelErr(null); setDelTarget(s); }}
+                          title="Delete fleet"
+                          className="p-1.5 rounded"
+                          style={{ color: "var(--red)", background: "transparent", border: "1px solid var(--border)" }}>
+                          <Trash2 size={13} />
+                        </button>
                       </td>
                     </tr>
                   ))}

@@ -229,6 +229,11 @@ export const api = {
   // Create station / deployment — via game server (port 7811) to avoid LiteDB issue
   createStation: (stationName: string) =>
     gamePost<{ station_id: string }>(`stations/create`, { station_name: stationName }),
+  // Delete goes through the dashboard API (:8080), not the game server -- it cascades to the
+  // station's deployments, roles, events and EOS sessions. `force` re-sends after the backend
+  // refuses a fleet that currently has players on it.
+  deleteStation: (stationId: string, force = false) =>
+    del<ActionResult>(`stations/${stationId}${force ? "?force=true" : ""}`),
   launchDeployment: (stationId: string, body: { deployment_name?: string; ip?: string; region?: string; version?: string }) =>
     gamePost<LaunchResult>(`stations/${stationId}/deployments`, body),
 
