@@ -10476,7 +10476,8 @@ static double  g_heartPlaceM   = 1.5;
 // and no colour/cosmetic route exists at all. So the colour is correct for the session and gone on
 // rejoin. Capture the real payload (size, mesh name, colour bytes) so persistence can be built against
 // the actual shape rather than a guess.
-static int32_t g_idxSetCosmetic = 0;   // -HeartPlace=N metres of error before we move it (0 = never)
+static int32_t g_idxSetCosmetic = 0;
+static int32_t g_idxSetColor    = 0;   // A2PlayerEntity::Server_SetCurrentColor   // -HeartPlace=N metres of error before we move it (0 = never)
 struct HeartWatch { void* pawn; ULONGLONG at; double want[3]; bool placed; };
 static HeartWatch g_heartWatch[16];
 static int        g_heartWatchN = 0;
@@ -10543,14 +10544,26 @@ static void ResolveRpcIndices()
     if (auto* peCls = SDK::UObject::FindClassFast("A2PlayerEntity"))
         if (auto* f = peCls->GetFunction("A2PlayerEntity", "Server_SetFrequentData"))
             g_idxSetFreqData = f->Name.ComparisonIndex;
-        if (!g_idxSetCosmetic)
-            if (auto* pc2 = SDK::UObject::FindClassFast("VRPawn"))
-                if (auto* fc = pc2->GetFunction("VRPawn", "Server_SetCosmeticData"))
-                {
-                    g_idxSetCosmetic = fc->Name.ComparisonIndex;
-                    HxLog("[HalcyonA2][COSMETIC] tracing Server_SetCosmeticData (FName idx=%d, parms=%d bytes)\n",
-                          g_idxSetCosmetic, fc->Size);
-                }
+        // Both cosmetic RPCs live on A2PlayerEntity, NOT VRPawn -- looking them up on the pawn is why
+        // the first attempt never armed and a colour change logged nothing.
+        if (!g_idxSetCosmetic || !g_idxSetColor)
+            if (auto* peCls2 = SDK::UObject::FindClassFast("A2PlayerEntity"))
+            {
+                if (!g_idxSetCosmetic)
+                    if (auto* fc = peCls2->GetFunction("A2PlayerEntity", "Server_SetCosmeticData"))
+                    {
+                        g_idxSetCosmetic = fc->Name.ComparisonIndex;
+                        HxLog("[HalcyonA2][COSMETIC] tracing Server_SetCosmeticData (FName idx=%d, parms=%d bytes)\n",
+                              g_idxSetCosmetic, fc->Size);
+                    }
+                if (!g_idxSetColor)
+                    if (auto* fk = peCls2->GetFunction("A2PlayerEntity", "Server_SetCurrentColor"))
+                    {
+                        g_idxSetColor = fk->Name.ComparisonIndex;
+                        HxLog("[HalcyonA2][COSMETIC] tracing Server_SetCurrentColor (FName idx=%d, parms=%d bytes)\n",
+                              g_idxSetColor, fk->Size);
+                    }
+            }
         if (!g_idxSpawnHeart)
             if (auto* pc = SDK::UObject::FindClassFast("VRPawn"))
                 if (auto* fs = pc->GetFunction("VRPawn", "Server_SpawnHeartBall"))
@@ -11123,11 +11136,13 @@ static void CosmeticTrace(SDK::UObject* Context, SDK::UFunction* Function, void*
     for (int i = 0; i < size && i < 96 && n < static_cast<int>(sizeof(hex)) - 3; ++i)
         n += _snprintf_s(hex + n, sizeof(hex) - n, _TRUNCATE, "%02X", raw[i]);
     hex[n] = 0;
-    std::string mesh = reinterpret_cast<const SDK::FName*>(Parms)->ToString();
+    const bool isCosmetic = (Function->Name.ComparisonIndex == g_idxSetCosmetic);
+    std::string mesh = isCosmetic ? reinterpret_cast<const SDK::FName*>(Parms)->ToString() : std::string("-");
     static int s_shown = 0;
     if (++s_shown <= 40)
-        HxLog("[HalcyonA2][COSMETIC] %s set cosmetics: mesh='%s' parms=%d bytes raw=%s\n",
-              Context->GetName().c_str(), mesh.c_str(), size, hex);
+        HxLog("[HalcyonA2][COSMETIC] %s %s: mesh='%s' parms=%d bytes raw=%s\n",
+              Context->GetName().c_str(), isCosmetic ? "SetCosmeticData" : "SetCurrentColor",
+              mesh.c_str(), size, hex);
 }
 
 static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, void* Parms)
@@ -11195,8 +11210,9 @@ static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, v
     }
 
     // [2026-09-12 COSMETIC] what a colour change actually carries
-    if (g_idxSetCosmetic && Function && Context && Parms &&
-        Function->Name.ComparisonIndex == g_idxSetCosmetic)
+    if (Function && Context && Parms &&
+        ((g_idxSetCosmetic && Function->Name.ComparisonIndex == g_idxSetCosmetic) ||
+         (g_idxSetColor    && Function->Name.ComparisonIndex == g_idxSetColor)))
     {
         __try { CosmeticTrace(Context, Function, Parms); } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
