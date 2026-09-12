@@ -434,6 +434,10 @@ namespace AUnrealFeatures.Ares.Servers
 
             EnsureStationRoles(stationId);
 
+            // One session per deployment: drop any previous session for this deployment before adding the
+            // new one. Without this, every (re)register appended a fresh session (new Guid Id) and the old
+            // ones piled up as ghosts -- which is how the browser accumulated dozens for one server.
+            EosGatewayServer.RemoveSessionsByDeployment(deploymentId);
             EosGatewayServer.UpsertSession(new EosSessionInfo
             {
                 Id            = Guid.NewGuid().ToString(),

@@ -191,11 +191,25 @@ public sealed partial class EosGatewayServer : AstraHttpServer, IEosGatewayServe
     // keepDeploymentIds; drop the rest. Returns the number removed.
     public static int PruneSessionsExcept(HashSet<string> keepDeploymentIds)
     {
-        int n;
+        int removed;
         lock (_sessionLock)
-            n = Sessions.RemoveAll(s => string.IsNullOrEmpty(s.DeploymentId) || !keepDeploymentIds.Contains(s.DeploymentId!));
-        if (n > 0) PersistSessions();
-        return n;
+        {
+            var before = Sessions.Count;
+            // Keep exactly ONE session per live deployment -- the LAST (newest) one, since register_server
+            // appends. Everything else goes: duplicates of a live deployment (a server that re-registered
+            // across restarts left a trail) and every session of a deployment that is not in the keep set
+            // (dead). This is what actually clears the ghost pile; removing only by deployment kept all the
+            // duplicates of the one live server.
+            var lastByDep = new Dictionary<string, EosSessionInfo>();
+            foreach (var s in Sessions)
+                if (!string.IsNullOrEmpty(s.DeploymentId) && keepDeploymentIds.Contains(s.DeploymentId!))
+                    lastByDep[s.DeploymentId!] = s;   // later entries overwrite -> keeps the newest
+            var survivors = new HashSet<EosSessionInfo>(lastByDep.Values);
+            Sessions.RemoveAll(s => !survivors.Contains(s));
+            removed = before - Sessions.Count;
+        }
+        if (removed > 0) PersistSessions();
+        return removed;
     }
 
     // Wipe every matchmaking session (used by the admin station purge — the DB purge alone leaves these
