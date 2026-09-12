@@ -10462,6 +10462,16 @@ static int32_t g_idxEnterArena  = 0;
 static int32_t g_idxHitResponse = 0;
 static int32_t g_idxSendPhys    = 0;
 static int32_t g_idxSetFreqData = 0;   // A2PlayerEntity::Server_SetFrequentData — ingest ping-correction site
+// [2026-09-12 HEARTBALL] AVRPawn::Server_SpawnHeartBall(FVector Location). The client sends the hand
+// location and the server spawns there, so "it spawns far away" is either a bad Location on the wire or
+// the server placing it somewhere else. Log the incoming Location next to where the server thinks that
+// player actually IS -- pose lives in the Mass entity (pawn+0x928, position @entity+0x100), NOT in the
+// actor transform, so those two disagreeing is the thing to look for. Then sample the spawned ball
+// (AVRPawn::HeartBall @0x1E60) a second later to see where it ended up.
+static int32_t g_idxSpawnHeart = 0;
+struct HeartWatch { void* pawn; ULONGLONG at; double want[3]; };
+static HeartWatch g_heartWatch[16];
+static int        g_heartWatchN = 0;
 // [2026-09-09] HandleFiringClearerOverlapOnServer is the switcher's counterpart -- it REMOVES a
 // player from a team. Both are reflected UFunctions, so any call the GAME makes passes through
 // ProcessEvent and can simply be observed. This is what tells us whether the clearer is responsible.
@@ -10525,6 +10535,13 @@ static void ResolveRpcIndices()
     if (auto* peCls = SDK::UObject::FindClassFast("A2PlayerEntity"))
         if (auto* f = peCls->GetFunction("A2PlayerEntity", "Server_SetFrequentData"))
             g_idxSetFreqData = f->Name.ComparisonIndex;
+        if (!g_idxSpawnHeart)
+            if (auto* pc = SDK::UObject::FindClassFast("VRPawn"))
+                if (auto* fs = pc->GetFunction("VRPawn", "Server_SpawnHeartBall"))
+                {
+                    g_idxSpawnHeart = fs->Name.ComparisonIndex;
+                    HxLog("[HalcyonA2][HEARTBALL] tracing Server_SpawnHeartBall (FName idx=%d)\n", g_idxSpawnHeart);
+                }
     if (auto* tcC = SDK::UObject::FindClassFast("TeamChangeComponent"))
     {
         if (auto* f = tcC->GetFunction("TeamChangeComponent", "HandleFiringClearerOverlapOnServer"))
@@ -10989,6 +11006,74 @@ static void QuestRpcTrace(SDK::UObject* Context, SDK::UFunction* Function)
         HxLog("[HalcyonA2][QRPC] %s on %p\n", Function->GetName().c_str(), static_cast<void*>(Context));
 }
 
+// [2026-09-12 HEARTBALL] Helper: SEH lives in ProcessEvent_Hook, so no C++ temporaries there (C2712).
+static void HeartSpawnTrace(SDK::UObject* Context, void* Parms)
+{
+    const uintptr_t pw = reinterpret_cast<uintptr_t>(Context);
+    const double* loc = reinterpret_cast<const double*>(Parms);          // FVector Location (3 x double)
+    void* entity = *reinterpret_cast<void**>(pw + 0x928);                // AVRPawn::Entity
+    double ex = 0, ey = 0, ez = 0;
+    if (entity)
+    {
+        const uintptr_t e = reinterpret_cast<uintptr_t>(entity);
+        ex = *reinterpret_cast<double*>(e + 0x100);
+        ey = *reinterpret_cast<double*>(e + 0x108);
+        ez = *reinterpret_cast<double*>(e + 0x110);
+    }
+    double ax = 0, ay = 0, az = 0;
+    auto* actor = static_cast<SDK::AActor*>(Context);
+    if (actor->RootComponent)
+    {
+        SDK::FVector p = actor->RootComponent->K2_GetComponentLocation();
+        ax = p.X; ay = p.Y; az = p.Z;
+    }
+    const double dxE = loc[0] - ex, dyE = loc[1] - ey, dzE = loc[2] - ez;
+    const double dE  = sqrt(dxE*dxE + dyE*dyE + dzE*dzE) / 100.0;        // metres from the LIVE player pose
+    const double dxA = loc[0] - ax, dyA = loc[1] - ay, dzA = loc[2] - az;
+    const double dA  = sqrt(dxA*dxA + dyA*dyA + dzA*dzA) / 100.0;        // metres from the actor transform
+    HxLog("[HalcyonA2][HEARTBALL] %s asked to spawn at (%.0f,%.0f,%.0f) | entity pose (%.0f,%.0f,%.0f) d=%.1fm "
+          "| actor xform (%.0f,%.0f,%.0f) d=%.1fm | existing HeartBall=%p\n",
+          Context->GetName().c_str(), loc[0], loc[1], loc[2], ex, ey, ez, dE, ax, ay, az, dA,
+          *reinterpret_cast<void**>(pw + 0x1E60));
+    if (g_heartWatchN < 16)
+    {
+        g_heartWatch[g_heartWatchN].pawn = Context;
+        g_heartWatch[g_heartWatchN].at   = GetTickCount64();
+        g_heartWatch[g_heartWatchN].want[0] = loc[0];
+        g_heartWatch[g_heartWatchN].want[1] = loc[1];
+        g_heartWatch[g_heartWatchN].want[2] = loc[2];
+        ++g_heartWatchN;
+    }
+}
+
+// Where did the ball actually END UP? Sampled ~1s after the request, so any post-spawn move shows up.
+static void HeartSpawnFollowUp()
+{
+    if (!g_heartWatchN) return;
+    const ULONGLONG now = GetTickCount64();
+    for (int i = 0; i < g_heartWatchN; )
+    {
+        if (now - g_heartWatch[i].at < 1000) { ++i; continue; }
+        auto* pawn = static_cast<SDK::UObject*>(g_heartWatch[i].pawn);
+        void* ball = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(pawn) + 0x1E60);
+        double bx = 0, by = 0, bz = 0;
+        if (ball)
+        {
+            auto* ba = static_cast<SDK::AActor*>(ball);
+            if (ba->RootComponent)
+            {
+                SDK::FVector p = ba->RootComponent->K2_GetComponentLocation();
+                bx = p.X; by = p.Y; bz = p.Z;
+            }
+        }
+        const double dx = bx - g_heartWatch[i].want[0], dy = by - g_heartWatch[i].want[1], dz = bz - g_heartWatch[i].want[2];
+        HxLog("[HalcyonA2][HEARTBALL] 1s later: ball=%p at (%.0f,%.0f,%.0f) -- %.1fm from where it was asked for\n",
+              ball, bx, by, bz, sqrt(dx*dx + dy*dy + dz*dz) / 100.0);
+        g_heartWatch[i] = g_heartWatch[--g_heartWatchN];
+    }
+}
+static void SafeHeartSpawnFollowUp() { __try { HeartSpawnFollowUp(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+
 static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, void* Parms)
 {
     // [PORT 22284] DROP A2SpectatorEntity::Server_ApplyData. The server's phantom local player rides
@@ -11044,6 +11129,13 @@ static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, v
     if (g_nheIdx && Function && Function->Name.ComparisonIndex == g_nheIdx)
     {
         __try { GolfHitEvent(Context); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+
+    // [2026-09-12 HEARTBALL] where did the client ask for it, and where does the server think they are?
+    if (g_idxSpawnHeart && Function && Context && Parms &&
+        Function->Name.ComparisonIndex == g_idxSpawnHeart)
+    {
+        __try { HeartSpawnTrace(Context, Parms); } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
 
     // [RPCTRACE] log the ball RPCs the two-client test drives (cheap integer compares).
@@ -11367,6 +11459,7 @@ static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, v
         PROF(SafeDetectTeamChanger);   // [TEAMVOL] fire the real team-changer overlap (headless never does)
         PROF(SafePollTeamRosters);   // [ROSTER] catch the exact moment of removal
         PROF(SafeRePushRoles);       // [ROLES] re-send station roles to owning clients (god voice)
+        PROF(SafeHeartSpawnFollowUp);// [HEARTBALL] where the spawned ball ended up
         PROF(SafeRolesTestPush);     // [ROLESTEST] -RolesTest: local proof that Client_SetRoles crosses the wire
         // Fallback only: if the tick above somehow doesn't advance a GSM out of GAME_BEGIN within ~11s,
         // force it to RUNNING via the NetVar (skips the Luau onEnter). Disarmed automatically the moment
