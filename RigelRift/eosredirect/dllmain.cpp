@@ -182,41 +182,53 @@ int my_ovr_initEx(const char* /*appId*/, int productVersion)
     return g_initExOrig ? g_initExOrig(kOurAppId, productVersion) : 0;
 }
 
-// Resolve and hook whichever init export a module carries. Returns true once something is hooked.
-bool TryHookOculusInit(HMODULE mod)
+// [2026-09-12] We first tried hooking the init export after the platform loader appeared, on a tight
+// module-sweep poll. The diag proved that loses the race: "[appid] hooked platform init (Ex=0 W=1)"
+// printed, but the substitution line never did -- the plugin had already CALLED
+// ovr_PlatformInitializeWindows (with the stock app id) before our hook landed, ~9s into start-up.
+//
+// So intercept at RESOLUTION instead of racing the call: the plugin loads the loader DLL dynamically
+// and looks its functions up with GetProcAddress (there is no static import -- confirmed: the exe
+// imports nothing ovr/platform). Hook GetProcAddress and, for the two init names, hand back our own
+// wrapper while stashing the real pointer to call through. This cannot be out-raced: the function has
+// to be resolved before it can be called.
+using GetProcAddress_t = FARPROC (WINAPI*)(HMODULE, LPCSTR);
+GetProcAddress_t g_gpaOrig = nullptr;
+
+FARPROC WINAPI my_GetProcAddress(HMODULE mod, LPCSTR name)
 {
-    static bool done = false;
-    if (done || !mod) return done;
-
-    auto ex = reinterpret_cast<ovrInitEx_t>(GetProcAddress(mod, "ovr_PlatformInitializeWindowsEx"));
-    auto w  = reinterpret_cast<ovrInit_t>  (GetProcAddress(mod, "ovr_PlatformInitializeWindows"));
-    if (!ex && !w) return false;                 // not the platform loader
-
-    MH_Initialize();                             // idempotent; ALREADY_INITIALIZED is fine
-    if (ex && MH_CreateHook(reinterpret_cast<void*>(ex), reinterpret_cast<void*>(&my_ovr_initEx),
-                            reinterpret_cast<void**>(&g_initExOrig)) == MH_OK)
-        MH_EnableHook(reinterpret_cast<void*>(ex));
-    if (w && MH_CreateHook(reinterpret_cast<void*>(w), reinterpret_cast<void*>(&my_ovr_init),
-                           reinterpret_cast<void**>(&g_initOrig)) == MH_OK)
-        MH_EnableHook(reinterpret_cast<void*>(w));
-
-    done = (g_initExOrig != nullptr) || (g_initOrig != nullptr);
-    if (done) Note("[appid] hooked platform init (Ex=%d W=%d)", ex != nullptr, w != nullptr);
-    return done;
+    FARPROC real = g_gpaOrig(mod, name);
+    // name can be an ordinal (low word only); only compare real string pointers.
+    if (real && reinterpret_cast<uintptr_t>(name) > 0xffff)
+    {
+        if (strcmp(name, "ovr_PlatformInitializeWindowsEx") == 0)
+        {
+            g_initExOrig = reinterpret_cast<ovrInitEx_t>(real);
+            Note("[appid] intercepted GetProcAddress(ovr_PlatformInitializeWindowsEx)");
+            return reinterpret_cast<FARPROC>(&my_ovr_initEx);
+        }
+        if (strcmp(name, "ovr_PlatformInitializeWindows") == 0)
+        {
+            g_initOrig = reinterpret_cast<ovrInit_t>(real);
+            Note("[appid] intercepted GetProcAddress(ovr_PlatformInitializeWindows)");
+            return reinterpret_cast<FARPROC>(&my_ovr_init);
+        }
+    }
+    return real;
 }
 
-// Scan every loaded module for the platform-init export and hook it. Called on a tight poll so it lands
-// before the game calls init (~7s in), regardless of what the loader DLL is named.
-bool SweepForOculusInit()
+// Install the GetProcAddress hook. Runs on the worker thread, which the loader starts only after our
+// DllMain returns -- so we are NOT under the loader lock and MH_EnableHook's thread suspend is safe.
+bool InstallAppIdHook()
 {
-    HMODULE mods[512];
-    DWORD needed = 0;
-    if (!EnumProcessModules(GetCurrentProcess(), mods, sizeof(mods), &needed)) return false;
-    int n = (int)(needed / sizeof(HMODULE));
-    if (n > 512) n = 512;
-    for (int i = 0; i < n; ++i)
-        if (TryHookOculusInit(mods[i])) return true;
-    return false;
+    if (MH_Initialize() != MH_OK && MH_Initialize() != MH_ERROR_ALREADY_INITIALIZED) return false;
+    void* gpa = reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetProcAddress"));
+    if (!gpa) { Note("[appid] could not find GetProcAddress"); return false; }
+    if (MH_CreateHook(gpa, reinterpret_cast<void*>(&my_GetProcAddress),
+                      reinterpret_cast<void**>(&g_gpaOrig)) != MH_OK) { Note("[appid] hook create failed"); return false; }
+    if (MH_EnableHook(gpa) != MH_OK) { Note("[appid] hook enable failed"); return false; }
+    Note("[appid] GetProcAddress hooked; will substitute app id %s at resolution time", kOurAppId);
+    return true;
 }
 
 void InstallEosRedirect()
@@ -248,17 +260,9 @@ void InstallEosRedirect()
 
 DWORD WINAPI Worker(LPVOID)
 {
-    // Phase 1 -- app id. This is time-critical: the platform init call happens only a few seconds into
-    // start-up, and if we miss it the entitlement check runs under the stock app and the build exits.
-    // Poll fast until hooked (or give up after ~30s). One startup sweep first, in case the loader is
-    // already mapped.
-    bool appIdHooked = SweepForOculusInit();
-    for (int i = 0; i < 1500 && !appIdHooked; ++i)   // 1500 * 20ms = 30s
-    {
-        Sleep(20);
-        appIdHooked = SweepForOculusInit();
-    }
-    if (!appIdHooked) Note("[appid] platform init never appeared -- entitlement will use the stock app");
+    // Phase 1 -- app id. Install the GetProcAddress interceptor immediately, well before the plugin
+    // resolves the platform init (~9s in). Race-free: we substitute at resolution, not at the call.
+    InstallAppIdHook();
 
     // Phase 2 -- EOS station-browser redirect. Not time-critical (stations are browsed after login).
     InstallEosRedirect();
