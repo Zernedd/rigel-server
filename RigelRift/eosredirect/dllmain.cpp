@@ -127,12 +127,17 @@ void WriteAppIdConfig()
     //    against the stock mothership and being denied. Write it where the installed build reads it.
     //    The Quest build overrides only BaseUrl (TitleId/EnvironmentId/DeploymentId stay stock), so we do
     //    the same.
+    // NOTE: the URL value MUST be QUOTED. UE's config parser reads a bare URL wrong -- the live client
+    // log showed the Mothership request go to "https://v1/..." ("Could not resolve host: v1"), i.e. the
+    // host was lost and the first path segment became the host, because we wrote BaseUrl unquoted. The
+    // cooked config and the Quest build both quote it. (RiftAppId is a plain number, so it is fine
+    // unquoted -- which is why that half worked and this one didn't.)
     BOOL m = WritePrivateProfileStringA("OnlineSubsystemMothership", "BaseUrl",
-                                        "https://rigel-ms.wwiggles.org", ini);
-    Note("[ms] config %s: [OnlineSubsystemMothership] BaseUrl=https://rigel-ms.wwiggles.org", m ? "written" : "FAILED");
+                                        "\"https://rigel-ms.wwiggles.org\"", ini);
+    Note("[ms] config %s: [OnlineSubsystemMothership] BaseUrl=\"https://rigel-ms.wwiggles.org\"", m ? "written" : "FAILED");
 
     // 3. EOS BaseUrl -- harmless if the SDK ignores it (its host is fetched at runtime); set for parity.
-    WritePrivateProfileStringA("OnlineSubsystemEOS", "BaseUrl", "https://rigel-eos.wwiggles.org", ini);
+    WritePrivateProfileStringA("OnlineSubsystemEOS", "BaseUrl", "\"https://rigel-eos.wwiggles.org\"", ini);
 }
 
 // ── the dsound proxy ────────────────────────────────────────────────────────────────────────
