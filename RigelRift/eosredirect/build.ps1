@@ -42,3 +42,12 @@ if ($LASTEXITCODE -or -not ($log -match 'BUILD_OK')) { throw "build failed (exit
 Copy-Item (Join-Path $out 'dsound.dll') (Join-Path $here 'dsound.dll') -Force
 $sz = (Get-Item (Join-Path $here 'dsound.dll')).Length
 Write-Host "[eosredirect] -> $(Join-Path $here 'dsound.dll')  ($sz bytes)"
+
+# Also refresh the publish build's copy if it exists, so a rebuild never leaves RiftPublish stale
+# (that trap cost a full deploy+launch cycle once: the rebuilt DLL sat here while RiftPublish shipped
+# the old one).
+$publish = Join-Path $here '..\..\RiftPublish\A2\Binaries\Win64\dsound.dll'
+if (Test-Path (Split-Path $publish)) {
+    Copy-Item (Join-Path $here 'dsound.dll') $publish -Force
+    Write-Host "[eosredirect] -> $((Resolve-Path $publish).Path)  (RiftPublish synced)"
+}
