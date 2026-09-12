@@ -2202,6 +2202,10 @@ static ULONGLONG g_lastStationCfg      = 0;
 static ULONGLONG g_lastOwnWatch        = 0;   // TEMP ownership-watch timer
 static int       g_rbLogged            = 0;   // TEMP rollback-RPC trace counter
 static int       g_vrPawnCount         = 0;   // live VRPawn count (set by WireVRPawns)
+static bool g_netScale    = true;    // -NoNetScale: never scale player relevancy/rate with population
+static int  g_netCrowd    = 12;      // -NetCrowd=N: above this many players, hand culling back to the engine
+static int  g_netCullM    = 150;     // -NetCullM=N: distance cull for player pawns when crowded (metres)
+static int  g_netBudgetKB = 120;     // -NetBudgetKB=N: per-client pose budget used to pick the update rate
 // [PERF/SAFETY] Bumped whenever the live VRPawn count changes - i.e. a match is forming or breaking.
 // The cache-rebuild backoff re-arms to its fast interval on any change, so newly-spawned goals/cups
 // are picked up within ~500ms at exactly the moments that matter, instead of waiting out an 8s backoff.
@@ -2809,14 +2813,52 @@ static void WireVRPawnBallSimManagers()
         // budget, and get updated rarely. Pin each VRPawn to a high, non-adaptive update rate + high
         // priority so it always wins that budget, and never cull it by distance. AActor net fields:
         // NetCullDistanceSquared@0x170, NetUpdateFrequency@0x178, MinNetUpdateFrequency@0x17C, NetPriority@0x180.
+        // [2026-09-11 *** SCALE FIX -- the 70-player stutter] The settings below were tuned with a handful
+        // of players, where "always relevant, never cull, 100Hz" is free. They do not survive a full
+        // station. One pose (FReplicatedFrequentData) is 272 bytes; with overhead ~300:
+        //     8 players @30Hz ->  62 KB/s per client,  0.5 MB/s server
+        //    20 players @30Hz -> 167 KB/s per client,  3.3 MB/s server
+        //    70 players @30Hz -> 606 KB/s per client, 41.5 MB/s server  (~5 Mbps to each headset)
+        // So at 70 players this asks for roughly 330 Mbps of egress. It cannot be delivered, and when the
+        // per-connection budget is blown UE sends whichever actors fit and rotates the rest -- every
+        // player's pose then arrives in bursts, which is exactly the "random stutter" being reported, and
+        // why it wanders from player to player instead of sticking to one.
+        // So scale with population: keep the aggressive profile while the server is small (it fixed a real
+        // snap and costs nothing there), and above g_netCrowd hand distance culling back to the engine and
+        // pick an update rate that fits a per-client byte budget. Nearby players -- the ones you can
+        // actually see, including anyone you are grabbing -- stay inside the cull radius and stay smooth.
+        // -NoNetScale restores the old unconditional profile; -NetCrowd=N, -NetCullM=N, -NetBudgetKB=N tune it.
         {
             const uintptr_t p = reinterpret_cast<uintptr_t>(o);
-            *reinterpret_cast<uint8_t*>(p + 0x60) |= 0x08;    // bAlwaysRelevant — relevant to every connection regardless
-                                                              // of distance from the (single, TKB-parked) relevancy viewer
-            *reinterpret_cast<float*>(p + 0x170) = 1.0e12f;   // NetCullDistanceSquared — never distance-cull players
-            *reinterpret_cast<float*>(p + 0x178) = 100.0f;    // NetUpdateFrequency — target 100Hz
-            *reinterpret_cast<float*>(p + 0x17C) = 100.0f;    // MinNetUpdateFrequency — pin it (defeat adaptive down-throttle)
-            *reinterpret_cast<float*>(p + 0x180) = 10.0f;     // NetPriority — win the actor budget over static objects
+            const int pop = (g_vrPawnCount > 0) ? g_vrPawnCount : 1;
+            if (!g_netScale || pop <= g_netCrowd)
+            {
+                *reinterpret_cast<uint8_t*>(p + 0x60) |= 0x08;    // bAlwaysRelevant
+                *reinterpret_cast<float*>(p + 0x170) = 1.0e12f;   // never distance-cull
+                *reinterpret_cast<float*>(p + 0x178) = 100.0f;    // NetUpdateFrequency
+                *reinterpret_cast<float*>(p + 0x17C) = 100.0f;    // MinNetUpdateFrequency (pinned)
+                *reinterpret_cast<float*>(p + 0x180) = 10.0f;     // NetPriority
+            }
+            else
+            {
+                const float cull = static_cast<float>(g_netCullM) * 100.0f;   // metres -> uu
+                float hz = (static_cast<float>(g_netBudgetKB) * 1024.0f) / (static_cast<float>(pop - 1) * 300.0f);
+                if (hz > 60.0f) hz = 60.0f;
+                if (hz < 10.0f) hz = 10.0f;                       // floor: below this it reads as teleporting
+                *reinterpret_cast<uint8_t*>(p + 0x60) &= static_cast<uint8_t>(~0x08);  // let relevancy do its job
+                *reinterpret_cast<float*>(p + 0x170) = cull * cull;   // NetCullDistanceSquared
+                *reinterpret_cast<float*>(p + 0x178) = hz;            // NetUpdateFrequency
+                *reinterpret_cast<float*>(p + 0x17C) = 2.0f;          // MinNetUpdateFrequency — allow adaptive down-throttle
+                *reinterpret_cast<float*>(p + 0x180) = 10.0f;         // still outrank static scenery
+                static int s_lastPop = -1;
+                if (s_lastPop != pop)
+                {
+                    s_lastPop = pop;
+                    HxLog("[HalcyonA2][NETSCALE] %d players -> per-pawn %.0fHz, cull %dm, relevancy ON "
+                          "(budget %d KB/s per client; the old profile asked for ~%.0f KB/s)\n",
+                          pop, hz, g_netCullM, g_netBudgetKB, (pop - 1) * 300.0 * 30.0 / 1024.0);
+                }
+            }
         }
 
         void** ref = reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(o) + 0x1B38);
@@ -3709,7 +3751,7 @@ static void TuneNetDriver()
     if (dbg < 20)
     {
         ++dbg;
-        printf("[HalcyonA2][NET][dbg] NetDriver=%p vt=%p inImg=%d numConns=%d curRate=%d\n",
+        HxLog("[HalcyonA2][NET][dbg] NetDriver=%p vt=%p inImg=%d numConns=%d curRate=%d\n",
                (void*)nd, (void*)vt, (vt >= imgBase && vt < imgBase + imgSize) ? 1 : 0, numConns, cur);
     }
 
@@ -3718,7 +3760,7 @@ static void TuneNetDriver()
 
     if (cur != 90)
     {
-        printf("[HalcyonA2][NET] NetServerMaxTickRate %d -> 90 (MaxNetTickRate -> 90) — un-cap non-arena player pose\n", cur);
+        HxLog("[HalcyonA2][NET] NetServerMaxTickRate %d -> 90 (MaxNetTickRate -> 90) — un-cap non-arena player pose\n", cur);
         *reinterpret_cast<int32_t*>(nd + 0x84) = 90;   // NetServerMaxTickRate
         *reinterpret_cast<int32_t*>(nd + 0xA0) = 90;   // MaxNetTickRate
     }
@@ -3783,7 +3825,7 @@ static void TuneNetRates()
         s_lastConns = numConns;
         const int32_t nowSpeed = (conns && numConns > 0 && conns[0])
             ? *reinterpret_cast<int32_t*>(reinterpret_cast<uintptr_t>(conns[0]) + 0x38) : -1;
-        printf("[HalcyonA2][NETRATE] MaxClientRate %d (now %d) MaxInternetClientRate %d (now %d) | conns=%d "
+        HxLog("[HalcyonA2][NETRATE] MaxClientRate %d (now %d) MaxInternetClientRate %d (now %d) | conns=%d "
                "CurrentNetSpeed(first) %d (now %d) raised=%d\n",
                oldCli, maxCli, oldInet, maxInet, numConns, firstOld, nowSpeed, raised);
     }
@@ -5186,7 +5228,7 @@ static void SampleFreqRate()
     {
         g_lastFreqRateLog = now;
         if (g_freqDebug)
-            printf("[HalcyonA2][FREQRATE] pidx=%d localHz=%d repHz=%d\n", g_probePidx, g_localChanges, g_repChanges);
+            HxLog("[HalcyonA2][FREQRATE] pidx=%d localHz=%d repHz=%d\n", g_probePidx, g_localChanges, g_repChanges);
         g_localChanges = 0; g_repChanges = 0;
     }
 }
@@ -11104,7 +11146,7 @@ static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, v
                 char buf[256]; int n = 0;
                 for (int q = 0; q < 256 && n < 200; ++q)
                     if (s_poseCount[q]) { n += snprintf(buf + n, sizeof(buf) - n, "p%d=%d/s ", q, s_poseCount[q]); s_poseCount[q] = 0; }
-                if (n) printf("[HalcyonA2][POSERATE] %s\n", buf);
+                if (n) HxLog("[HalcyonA2][POSERATE] %s\n", buf);
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
@@ -13024,6 +13066,10 @@ static void Main(HMODULE)
         if (wcsstr(GetCommandLineW(), L"-NoTeamClearGuard")) { g_teamClearGuard = false; HxLog("[HalcyonA2] -NoTeamClearGuard: ScrapRun team-clear suppression OFF (a death will take the runner off the team again)\n"); }
         if (wcsstr(GetCommandLineW(), L"-SeatRound")) { g_seatRound = true; HxLog("[HalcyonA2] -SeatRound: round-start team seating back ON\n"); }
         if (wcsstr(GetCommandLineW(), L"-TeamOverlap")) { g_teamOverlap = true; HxLog("[HalcyonA2] -TeamOverlap: geometrically fire the runner team-changer overlap so ScrapRun rosters fill\n"); }
+        if (wcsstr(GetCommandLineW(), L"-NoNetScale")) { g_netScale = false; HxLog("[HalcyonA2] -NoNetScale: player relevancy/rate stays maxed regardless of population\n"); }
+        if (const wchar_t* a = wcsstr(GetCommandLineW(), L"-NetCrowd="))    { int v = _wtoi(a + 11); if (v >  0 && v < 200)  g_netCrowd    = v; }
+        if (const wchar_t* a = wcsstr(GetCommandLineW(), L"-NetCullM="))    { int v = _wtoi(a + 10); if (v > 10 && v < 5000) g_netCullM    = v; }
+        if (const wchar_t* a = wcsstr(GetCommandLineW(), L"-NetBudgetKB=")) { int v = _wtoi(a + 13); if (v > 10 && v < 5000) g_netBudgetKB = v; }
         if (wcsstr(GetCommandLineW(), L"-RolesTest")) { g_rolesTest = true; HxLog("[HalcyonA2] -RolesTest: push a fabricated global_voip role to every client (delivery test)\n"); }
         if (wcsstr(GetCommandLineW(), L"-TeamOverlapFire")) { g_teamOverlapFire = true; HxLog("[HalcyonA2] -TeamOverlapFire: 4Hz geometric team-changer scan ON (costs ~100ms/s of game thread)\n"); }
         if (const wchar_t* tr = wcsstr(GetCommandLineW(), L"-TeamRadius="))
