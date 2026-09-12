@@ -33,6 +33,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include "MinHook.h"
 
 // From thunks.asm: the resolved real-dsound entry points, one per ordinal.
@@ -74,6 +75,43 @@ void Note(const char* fmt, ...)
     va_end(ap);
     fputc('\n', f);
     fclose(f);
+}
+
+// ── the app id, done at its real source: config ──────────────────────────────────────────────
+// [2026-09-12] Confirmed in IDA: the game reads the app id straight from config --
+//     GConfig->GetString(L"OnlineSubsystemOculus", L"RiftAppId", out, GEngineIni)  (sub_14506CA30)
+//     -> atoll(out) -> ovr_PlatformInitializeWindows
+// so the entitlement check is only ever for whatever RiftAppId resolves to. make_rift.py writes exactly
+// that key, but into the BUILD folder's Engine.ini -- and an INSTALLED build reads user config from
+// %LOCALAPPDATA%\A2\Saved\Config\Windows\ instead (the game's own log reads OculusXR.ini from there), so
+// our override was ignored and the cooked STOCK id (23916854551246326) won.
+//
+// Fix it at the source and be done with the fragile function-pointer race: write the override into the
+// user Engine.ini UE actually reads. This DLL is a static import, so its DllMain runs during process
+// load -- before UE's config system initialises -- so the value is in place before GConfig reads it.
+// User config layers OVER the cooked DefaultEngine.ini, so our RiftAppId wins. Idempotent
+// (WritePrivateProfileString just sets the one key), and it applies for whatever account runs the game
+// because %LOCALAPPDATA% resolves per-user.
+void WriteAppIdConfig()
+{
+    const char* lad = getenv("LOCALAPPDATA");
+    if (!lad || !*lad) { Note("[appid] no LOCALAPPDATA -- cannot write config override"); return; }
+
+    char dir[MAX_PATH];
+    if (_snprintf_s(dir, sizeof(dir), _TRUNCATE, "%s\\A2\\Saved\\Config\\Windows", lad) < 0) return;
+
+    // Create A2\Saved\Config\Windows one segment at a time (dependency-free).
+    char part[MAX_PATH];
+    strcpy_s(part, sizeof(part), dir);
+    for (char* p = part + 3; *p; ++p)                 // skip "C:\"
+        if (*p == '\\') { *p = 0; CreateDirectoryA(part, nullptr); *p = '\\'; }
+    CreateDirectoryA(part, nullptr);
+
+    char ini[MAX_PATH];
+    if (_snprintf_s(ini, sizeof(ini), _TRUNCATE, "%s\\Engine.ini", dir) < 0) return;
+    BOOL ok = WritePrivateProfileStringA("OnlineSubsystemOculus", "RiftAppId", kOurAppId, ini);
+    Note("[appid] config override %s: [OnlineSubsystemOculus] RiftAppId=%s -> %s",
+         ok ? "written" : "FAILED", kOurAppId, ini);
 }
 
 // ── the dsound proxy ────────────────────────────────────────────────────────────────────────
@@ -276,6 +314,7 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID)
     if (reason == DLL_PROCESS_ATTACH)
     {
         DisableThreadLibraryCalls(mod);
+        WriteAppIdConfig();                  // BEFORE UE reads config: point RiftAppId at our own app
         ResolveRealDsound();                 // must happen before the game calls any dsound ordinal
         CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr);   // EOS DLL is not up yet; wait off-thread
     }
