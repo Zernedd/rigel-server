@@ -2763,6 +2763,31 @@ static void PumpPhysicsSync()
 // likely never set (the arena/sim-join server path that would set it doesn't run),
 // so the inputs we see arriving get discarded before reaching the sim. Point every
 // VRPawn at our manager. Also logs the prior value so we learn whether it was null.
+// [2026-09-12] How many connected PlayerStates are SPECTATORS. A spectator watches from OUTSIDE the
+// play space, so distance culling hurts it far more than it hurts a VR player standing in the crowd:
+// shrinking the relevancy radius to protect bandwidth would cull exactly the players it came to watch.
+// Cheap: walks GameState.PlayerArray (a handful of entries), never GObjects.
+// GameState@World+0x160, PlayerArray{Data@0x2B0, Num@0x2B8}, PlayerState.bIsSpectator@0x2A2 bit1.
+static int CountSpectators()
+{
+    auto* w = SDK::UWorld::GetWorld();
+    if (!w) return 0;
+    void* gs = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(w) + 0x160);
+    if (!gs) return 0;
+    void** arr = *reinterpret_cast<void***>(reinterpret_cast<uintptr_t>(gs) + 0x2B0);
+    const int pnum = *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(gs) + 0x2B8);
+    if (!arr || pnum <= 0 || pnum > 256) return 0;
+    int specs = 0;
+    for (int k = 0; k < pnum; ++k)
+    {
+        auto* ps = reinterpret_cast<SDK::UObject*>(arr[k]);
+        if (!ps) continue;
+        if ((*reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(ps) + 0x2A2) >> 1) & 1) ++specs;
+    }
+    return specs;
+}
+static int SafeCountSpectators() { __try { return CountSpectators(); } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; } }
+
 static void WireVRPawnBallSimManagers()
 {
     if (!g_ballSimMgr)
@@ -2777,6 +2802,8 @@ static void WireVRPawnBallSimManagers()
         return;
     }
     int found = 0, wired = 0, orphans = 0;
+    // Spectators present? Then relevancy must reach across the play space (see CountSpectators).
+    const int specs = SafeCountSpectators();
     // [2026-09-04] Force the [DISC] seat-gate line to re-log ~every 2s (not only on verdict change) so it's
     // catchable in any log window while diagnosing why the player isn't seated.
     static uint64_t s_lastDiscLog = 0;
@@ -2881,7 +2908,12 @@ static void WireVRPawnBallSimManagers()
                 if (afford < 4.0f) afford = 4.0f;                                 // always afford your immediate neighbours
                 const float need = static_cast<float>(pop - 1);
                 float cullM = static_cast<float>(g_netCullM);
-                if (need > afford) cullM *= sqrtf(afford / need);                 // shrink the radius, keep the rate
+                // Shrink the radius to protect bandwidth ONLY when nobody is spectating. A spectator sits
+                // outside the play space, so a shrunken radius culls precisely the players it is watching
+                // -- that trade is right for a VR player in the crowd and wrong for a spectator. With a
+                // spectator connected we keep the full configured radius and let the per-connection rate
+                // cap absorb the cost; spectators are few, and this is the case being reported as "lag".
+                if (need > afford && specs == 0) cullM *= sqrtf(afford / need);   // shrink the radius, keep the rate
                 if (cullM < 40.0f) cullM = 40.0f;                                 // never cull someone right next to you
                 const float cull = cullM * 100.0f;                                // metres -> uu
 
