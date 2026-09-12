@@ -10469,7 +10469,14 @@ static int32_t g_idxSetFreqData = 0;   // A2PlayerEntity::Server_SetFrequentData
 // actor transform, so those two disagreeing is the thing to look for. Then sample the spawned ball
 // (AVRPawn::HeartBall @0x1E60) a second later to see where it ended up.
 static int32_t g_idxSpawnHeart = 0;
-static double  g_heartPlaceM   = 1.5;   // -HeartPlace=N metres of error before we move it (0 = never)
+static double  g_heartPlaceM   = 1.5;
+// [2026-09-12 COSMETICS] A colour change sends AVRPawn::Server_SetCosmeticData(FName MeshName,
+// FA2CosmeticMaterialMetadata, FTeamColor Preferred, FTeamColor Custom). The server applies it and
+// NOTHING persists it -- the client never GETs or POSTs player_inventory (proven in the backend log),
+// and no colour/cosmetic route exists at all. So the colour is correct for the session and gone on
+// rejoin. Capture the real payload (size, mesh name, colour bytes) so persistence can be built against
+// the actual shape rather than a guess.
+static int32_t g_idxSetCosmetic = 0;   // -HeartPlace=N metres of error before we move it (0 = never)
 struct HeartWatch { void* pawn; ULONGLONG at; double want[3]; bool placed; };
 static HeartWatch g_heartWatch[16];
 static int        g_heartWatchN = 0;
@@ -10536,6 +10543,14 @@ static void ResolveRpcIndices()
     if (auto* peCls = SDK::UObject::FindClassFast("A2PlayerEntity"))
         if (auto* f = peCls->GetFunction("A2PlayerEntity", "Server_SetFrequentData"))
             g_idxSetFreqData = f->Name.ComparisonIndex;
+        if (!g_idxSetCosmetic)
+            if (auto* pc2 = SDK::UObject::FindClassFast("VRPawn"))
+                if (auto* fc = pc2->GetFunction("VRPawn", "Server_SetCosmeticData"))
+                {
+                    g_idxSetCosmetic = fc->Name.ComparisonIndex;
+                    HxLog("[HalcyonA2][COSMETIC] tracing Server_SetCosmeticData (FName idx=%d, parms=%d bytes)\n",
+                          g_idxSetCosmetic, fc->Size);
+                }
         if (!g_idxSpawnHeart)
             if (auto* pc = SDK::UObject::FindClassFast("VRPawn"))
                 if (auto* fs = pc->GetFunction("VRPawn", "Server_SpawnHeartBall"))
@@ -11097,6 +11112,24 @@ static void HeartSpawnFollowUp()
 }
 static void SafeHeartSpawnFollowUp() { __try { HeartSpawnFollowUp(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
 
+// [2026-09-12 COSMETIC] Dump the incoming cosmetic payload. FA2CosmeticMaterialMetadata's layout is not
+// in the SDK dump, so print the raw parameter block as hex alongside the decoded MeshName -- that is
+// enough to store and replay it verbatim later.
+static void CosmeticTrace(SDK::UObject* Context, SDK::UFunction* Function, void* Parms)
+{
+    const int size = Function->Size;
+    const auto* raw = reinterpret_cast<const unsigned char*>(Parms);
+    char hex[3 * 96 + 1]; int n = 0;
+    for (int i = 0; i < size && i < 96 && n < static_cast<int>(sizeof(hex)) - 3; ++i)
+        n += _snprintf_s(hex + n, sizeof(hex) - n, _TRUNCATE, "%02X", raw[i]);
+    hex[n] = 0;
+    std::string mesh = reinterpret_cast<const SDK::FName*>(Parms)->ToString();
+    static int s_shown = 0;
+    if (++s_shown <= 40)
+        HxLog("[HalcyonA2][COSMETIC] %s set cosmetics: mesh='%s' parms=%d bytes raw=%s\n",
+              Context->GetName().c_str(), mesh.c_str(), size, hex);
+}
+
 static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, void* Parms)
 {
     // [PORT 22284] DROP A2SpectatorEntity::Server_ApplyData. The server's phantom local player rides
@@ -11159,6 +11192,13 @@ static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, v
         Function->Name.ComparisonIndex == g_idxSpawnHeart)
     {
         __try { HeartSpawnTrace(Context, Parms); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+
+    // [2026-09-12 COSMETIC] what a colour change actually carries
+    if (g_idxSetCosmetic && Function && Context && Parms &&
+        Function->Name.ComparisonIndex == g_idxSetCosmetic)
+    {
+        __try { CosmeticTrace(Context, Function, Parms); } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
 
     // [RPCTRACE] log the ball RPCs the two-client test drives (cheap integer compares).
