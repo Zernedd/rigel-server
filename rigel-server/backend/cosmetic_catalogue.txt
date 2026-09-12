@@ -1,0 +1,25 @@
+# Cosmetic items every player is granted, so the shuttle wardrobe is not empty.
+# Read by MothershipServer from the backend's run folder:
+#   C:\Env\rigel-server\run\backend\cosmetic_catalogue.txt
+# One item id per line; "#" starts a comment; "-<id>" removes an id. Re-read once a minute, so an edit
+# takes effect without a restart.
+#
+# WHY THIS EXISTS. The client will not load or save player_inventory until it has processed a non-empty
+# entitlement list -- the gate is a byte at +0x2073 on its inventory subsystem, set only at the tail of
+# the routine that walks the entitlement response (client 22284, 0x1454FE6CC; the Tick that reads it is
+# at 0x14550B943). Granting a player only what they already wear cannot break that deadlock for someone
+# who has never joined a station: nothing stored -> no entitlements -> gate shut -> still nothing stored.
+# A shared base list opens it for everyone.
+#
+# WHAT BELONGS HERE. Only ids the game really has. An invented id resolves to a missing data asset on the
+# client. The ids are not in the pak in plaintext (IoStore hashes the paths), so we go by observation:
+# the server already adds every id it has seen a real client equip, by scanning stored player_inventory
+# records. This file is for seeding a cold database and for adding items by hand once their ids are known
+# -- look for "Server_SetEquippedItems" captures in the game server log.
+#
+# Observed on real clients (these also come from the scan; listed so a fresh database is not empty):
+ChassisRobotD
+ColorPresetDefault
+#
+# Test junk -- never grant these:
+-ColorPresetMOCKTEST

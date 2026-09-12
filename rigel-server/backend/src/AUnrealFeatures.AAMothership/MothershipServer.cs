@@ -1663,6 +1663,80 @@ public sealed class MothershipServer : AstraHttpServer, IMothershipServer
         return ids;
     }
 
+    // [2026-09-12 *** WHY A BRAND-NEW PLAYER STILL CANNOT SAVE IN THE SHUTTLE] The client's own
+    // inventory sync -- the code that loads AND saves player_inventory -- is switched off until it has
+    // processed a catalogue. In the client (build 22284) that gate is a byte on the inventory subsystem
+    // at +0x2073, and it is written in exactly one place, 0x1454FE6CC, at the tail of the routine that
+    // walks the entitlement response. Its Tick at 0x14550B943 reads:
+    //
+    //     if (!Ready())                  return;
+    //     if (byte[this+0x2073] == 0)    return;    // <-- nothing happens until the catalogue landed
+    //     if (byte[this+0x2071] != 0)    goto save; // dirty check at +0x2072, save at 0x1454E2430
+    //     if (byte[this+0x2070] != 0)    return;    // load already requested
+    //     ... request player_inventory (FName at 0x149C5D248), load at 0x14550B9FF
+    //
+    // So with an empty entitlement list the client never asks for player_inventory and never writes it,
+    // which is exactly what the request log shows: across 33k lines every single player_inventory read
+    // and write came from a game server (65.32.77.248 / 127.0.0.1) and not once from a headset, while
+    // player_quests and safety_and_settings came from headsets 190 times each.
+    //
+    // Granting only what a player already wears (below) cannot break that deadlock for someone who has
+    // never been on a station: nothing stored -> no entitlements -> gate stays shut -> still nothing
+    // stored. So every player also gets a base catalogue.
+    //
+    // The catalogue is only ever ids we have SEEN A REAL CLIENT EQUIP -- the union of every stored
+    // player_inventory -- plus whatever cosmetic_catalogue.txt lists. Nothing is invented: an id the
+    // game does not know would resolve to a missing data asset on the client. It grows by itself as
+    // people play, and the file (same convention as auto_complete_quests.txt, edit and it is picked up
+    // without a rebuild) is there to seed a cold database and to add items by hand.
+    //
+    // Rebuilt at most once a minute: a single headset hits /v1/inventory/client ~32 times a minute, and
+    // this walks every user-data row.
+    private static readonly object s_catalogueLock = new();
+    private static (DateTime At, List<string> Ids) s_catalogue = (DateTime.MinValue, new());
+
+    private static List<string> CosmeticCatalogue()
+    {
+        lock (s_catalogueLock)
+        {
+            if (DateTime.UtcNow - s_catalogue.At < TimeSpan.FromMinutes(1)) return s_catalogue.Ids;
+
+            var ids     = new List<string>();
+            var blocked = new List<string>();
+            void Add(string id)
+            {
+                var hash = id.IndexOf('#');
+                if (hash >= 0) id = id.Substring(0, hash);
+                id = id.Trim();
+                if (id.Length == 0 || id == "None") return;
+                if (id[0] == '-') { var b = id.Substring(1).Trim(); if (b.Length > 0) blocked.Add(b); return; }
+                if (blocked.Contains(id) || ids.Contains(id)) return;
+                ids.Add(id);
+            }
+
+            // Read the file FIRST, so a "-<id>" line can keep a junk id (a test item, something renamed)
+            // out of the scan that follows.
+            try
+            {
+                var path = Path.Combine(AppContext.BaseDirectory, "cosmetic_catalogue.txt");
+                if (File.Exists(path)) foreach (var line in File.ReadAllLines(path)) Add(line);
+            }
+            catch { /* an unreadable seed file just means the observed ids stand alone */ }
+
+            try
+            {
+                foreach (var row in Database.GetCollection<MothershipUserDataDbObject>(true)!
+                                            .Find(d => d.KeyName == "player_inventory"))
+                    foreach (var id in DecodeEquippedItems(row.Value)) Add(id);
+            }
+            catch (Exception ex) { AuthLog($"[INVENTORY] catalogue scan failed: {ex.Message}"); }
+
+            s_catalogue = (DateTime.UtcNow, ids);
+            AuthLog($"[INVENTORY] catalogue rebuilt: {ids.Count} item(s)");
+            return ids;
+        }
+    }
+
     /// <summary>Deterministic id so the same item keeps the same entitlement id across requests.</summary>
     private static string StableId(string seed)
     {
@@ -2267,22 +2341,27 @@ public sealed class MothershipServer : AstraHttpServer, IMothershipServer
             catch { /* skip a malformed stored item rather than fail the whole load */ }
         }
 
-        // [2026-09-12 *** WHY THE OFFLINE SHUTTLE SHOWS DEFAULTS] A player can only equip what they OWN,
-        // and this list was empty for everyone (inventory rows: 0), so the shuttle had nothing to put on
-        // and fell back to defaults -- even though the server-side restore made the player look right
-        // once they joined a station. The request log says the same thing from the other side: real
-        // headsets call this route constantly but never fetch player_inventory, so the look cannot be
-        // coming from user data.
+        // [2026-09-12] A player can only equip what they OWN, and this list was empty for everyone
+        // (inventory rows: 0). Two things followed from that. The shuttle had nothing to put on and fell
+        // back to defaults, and -- the reason nothing SAVED there either -- the client's inventory
+        // subsystem never opened its user-data gate, so it never loaded or wrote player_inventory at
+        // all. See CosmeticCatalogue() for the gate and the evidence.
         //
-        // Grant an entitlement for every item the player actually wears. Their equipped list is stored
-        // by the game server in player_inventory (20 slots, EA2ItemSlot order), so it names exactly the
-        // items they need to own. Item shape is the client's own: entitlement_id / in_game_id / name,
-        // read straight out of its parser.
+        // So grant, in order of preference: the items this player actually wears (their stored equipped
+        // list names exactly what they need to own), then the shared catalogue, so that a player who has
+        // never joined a station still gets a non-empty response and can dress up in the shuttle.
+        // Item shape is the client's own -- entitlement_id / in_game_id / name, read out of its parser.
         if (entitlements.Count == 0)
         {
             var udCol = Database.GetCollection<MothershipUserDataDbObject>(true)!;
-            var inv = udCol.FindOne(d => d.UserId == userId && d.KeyName == "player_inventory");
-            foreach (var id in DecodeEquippedItems(inv?.Value))
+            var inv   = udCol.FindOne(d => d.UserId == userId && d.KeyName == "player_inventory");
+            var worn  = DecodeEquippedItems(inv?.Value);
+
+            var granted = new List<string>(worn);
+            foreach (var id in CosmeticCatalogue())
+                if (!granted.Contains(id)) granted.Add(id);
+
+            foreach (var id in granted)
             {
                 entitlements.Add(new
                 {
@@ -2292,8 +2371,12 @@ public sealed class MothershipServer : AstraHttpServer, IMothershipServer
                 });
             }
             if (entitlements.Count > 0)
-                AuthLog($"[INVENTORY] {userId}: granted {entitlements.Count} entitlement(s) from their equipped list");
+                AuthLog($"[INVENTORY] {userId}: granted {entitlements.Count} entitlement(s) ({worn.Count} worn + catalogue)");
+            else
+                AuthLog($"[INVENTORY] {userId}: nothing to grant -- catalogue is empty, so the client's " +
+                        "inventory gate stays shut and it will not save player_inventory");
         }
+
         return JsonAnon(new { Results = new[] { new { platform = "QUEST", isPrimary = true, entitlements } } });
     }
 
