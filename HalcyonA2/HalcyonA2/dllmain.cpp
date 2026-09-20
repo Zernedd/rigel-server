@@ -10706,6 +10706,17 @@ static __int64 __fastcall QAddBundle_Hook(void* sp, void* bundle, void* a3, unsi
 // One-shot dump of the quest definitions the server hands players: %TEMP%\HalcyonA2-questdefs.txt, one line per
 // FAAQuestEntry (0x120): ID (as the Mothership blob writes it: four uint32 as hex), version, repetition, title,
 // PrerequisiteQuests (TArray<FGuid> @0x50) and child count (@0xA8). Used to find the quests that gate the rest.
+// Out of line on purpose: DumpQuestDefsOnce uses __try, and a frame with __try may not hold objects
+// that need unwinding (std::string). Keep the FName -> text conversion in its own frame.
+static void GlyphIdToBuf(uintptr_t fnameAddr, char* out, size_t cap)
+{
+    out[0] = 0;
+    std::string gs = reinterpret_cast<const SDK::FName*>(fnameAddr)->ToString();
+    size_t n = gs.size() < cap - 1 ? gs.size() : cap - 1;
+    for (size_t k = 0; k < n; ++k) out[k] = gs[k];
+    out[n] = 0;
+}
+
 static void DumpQuestDefsOnce(void* bundle)
 {
     static bool s_done = false;
@@ -10737,7 +10748,27 @@ static void DumpQuestDefsOnce(void* bundle)
                 const uint32_t* pg = reinterpret_cast<uint32_t*>(pd + static_cast<uintptr_t>(k) * 0x10);
                 fprintf(f, "%s%08X%08X%08X%08X", k ? "," : "", pg[0], pg[1], pg[2], pg[3]);
             }
-            fprintf(f, "\tchildren=%d\n", *reinterpret_cast<int*>(r + 0xA8));
+            // Fields that decide whether the quest UI DISPLAYS a row, not just whether it is unlocked:
+            // bTestQuest@0x118 (dev content the UI may hide), GlyphID@0x100 (icon the binder resolves;
+            // 'None' means no Runtime_Glyph), OptionalRequiredProgress@0xE8 (a collection quest needs a
+            // count), QuestType@0x10 (FGameplayTagContainer, tag count at +0x08).
+            char glyph[96] = {};
+            GlyphIdToBuf(r + 0x100, glyph, sizeof(glyph));
+            // StartDate@0x38 / EndDate@0x40 are FDateTime (100ns ticks since year 1) and
+            // ValidLengthSeconds@0x4C bounds a timed quest. A window that has already closed would
+            // hide a quest no matter how unlocked it is - print ticks and the year.
+            const long long sd = *reinterpret_cast<long long*>(r + 0x38);
+            const long long ed = *reinterpret_cast<long long*>(r + 0x40);
+            const long long TPD = 864000000000LL;   // ticks per day
+            fprintf(f, "\tchildren=%d\ttest=%d\tglyph=%s\treqProg=%.1f\ttags=%d\tstartY=%lld\tendY=%lld\tvalidSec=%d\n",
+                    *reinterpret_cast<int*>(r + 0xA8),
+                    (int)*reinterpret_cast<uint8_t*>(r + 0x118),
+                    glyph[0] ? glyph : "-",
+                    *reinterpret_cast<float*>(r + 0xE8),
+                    *reinterpret_cast<int*>(r + 0x10 + 0x08),
+                    sd ? 1 + sd / TPD / 365 : 0,
+                    ed ? 1 + ed / TPD / 365 : 0,
+                    *reinterpret_cast<int*>(r + 0x4C));
         }
         fclose(f);
         HxLog("[HalcyonA2][QBUNDLE] dumped %d quest definitions to %ls\n", n, path);

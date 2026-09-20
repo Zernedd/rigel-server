@@ -247,6 +247,7 @@ ULONGLONG     g_nextCheck = 0;
 // here exercises that too.
 volatile long g_sawLevelInstance = 0;
 ULONGLONG     g_firedAt   = 0;
+ULONGLONG     g_armedAt   = 0;   // so the late pass can run even if the load never fires
 void*         g_streaming = nullptr;   // the ULevelStreamingDynamic LoadLevelInstance handed back
 bool          g_verified  = false;
 int           g_polls     = 0;
@@ -390,6 +391,84 @@ void VerifyPass(const char* when)
 
     if (!g_diag) return;
 
+    // The red coin quests are a TIMED quest system, not progression buttons: TKB_Quests.umap holds
+    // BP_RedCoin_C / BP_RedCoinTimedQuest_C / BP_RedCoinTimedQuestManager_C, whose native base is
+    // AA2TimedQuestActor (server-driven: StartTimerFromServerInteraction, replicated ActivePlayers).
+    // Histogram them by class - which of the three exist is the whole question, and a sample of 25
+    // cannot answer it. Keep the filter tight: "Collect" once matched MaterialParameterCollection.
+    {
+        wchar_t clsName[16][128] = {};
+        int clsCount[16] = {};
+        int nclass = 0, total = 0;
+        wchar_t nm[512], cl[512];
+        const int32_t n2 = g_objs->NumElements;
+        for (int32_t i = 0; i < n2; ++i)
+        {
+            void* o = g_objs->GetByIndex(i);
+            if (!o) continue;
+            ObjName(o, nm, 512);
+            if (!nm[0] || wcsncmp(nm, L"Default__", 9) == 0) continue;
+            void* c = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(o) + kUObj_Class);
+            if (!c) continue;
+            ObjName(c, cl, 512);
+            if (!cl[0]) continue;
+            if (!wcsstr(cl, L"RedCoin") && !wcsstr(cl, L"TimedQuest") &&
+                !wcsstr(cl, L"QuestDisplayKiosk")) continue;
+            ++total;
+            int slot = -1;
+            for (int k = 0; k < nclass; ++k) if (wcscmp(clsName[k], cl) == 0) { slot = k; break; }
+            if (slot < 0 && nclass < 16) { slot = nclass++; wcscpy_s(clsName[slot], 128, cl); }
+            if (slot >= 0) ++clsCount[slot];
+
+            // For the timed-quest actors themselves, read the same pair that decides a button's fate:
+            // AA2TimedQuestActor GlyphMeshComponent@0x2B0 / QuestProgressComponent@0x2B8 (note these
+            // differ from AA2ProgressionButtonGlyphActor's 0x2E0/0x2E8 - different class, different
+            // layout). Is the actor bound to a quest, and is its glyph visible?
+            if (wcsstr(cl, L"QuestDisplayKiosk"))
+            {
+                const uintptr_t a = reinterpret_cast<uintptr_t>(o);
+                void* root = *reinterpret_cast<void**>(a + 0x1A8);
+                const double* t = root ? reinterpret_cast<const double*>(
+                                      reinterpret_cast<uintptr_t>(root) + 0x1D0 + 0x20) : nullptr;
+                wchar_t pk[512] = L"?";
+                void* out = o;
+                for (int d = 0; d < 8 && out; ++d)
+                {
+                    ObjName(out, pk, 512);
+                    void* nx = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(out) + kUObj_Outer);
+                    if (!nx) break;
+                    out = nx;
+                }
+                GLog("  KIOSK %-26ls pkg=%-58ls at (%.0f,%.0f,%.0f)", nm, pk,
+                     t ? t[0] : 0.0, t ? t[1] : 0.0, t ? t[2] : 0.0);
+            }
+            if (wcsstr(cl, L"TimedQuest") && !wcsstr(cl, L"Manager"))
+            {
+                const uintptr_t a = reinterpret_cast<uintptr_t>(o);
+                void* gm = *reinterpret_cast<void**>(a + 0x2B0);
+                void* qp = *reinterpret_cast<void**>(a + 0x2B8);
+                void* dyn = gm ? *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(gm) + 0x5E0) : nullptr;
+                int vis = gm ? (*reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(gm) + 0x190) >> 5) & 1 : -1;
+                int hid = gm ? (*reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(gm) + 0x191) >> 3) & 1 : -1;
+                wchar_t qn[256] = L"";
+                const uint32_t* qid = nullptr;
+                if (qp)
+                {
+                    NameText(reinterpret_cast<const void*>(reinterpret_cast<uintptr_t>(qp) + 0xBC), qn, 256);
+                    qid = reinterpret_cast<const uint32_t*>(reinterpret_cast<uintptr_t>(qp) + 0xC4);
+                }
+                const int32_t activePlayers = *reinterpret_cast<int32_t*>(a + 0x2C8 + 8);
+                GLog("  TIMEDQUEST %-22ls quest='%ls' id=%08X%08X%08X%08X vis=%d hidden=%d dynMat=%s activePlayers=%d",
+                     nm, qn[0] ? qn : L"-",
+                     qid ? qid[0] : 0, qid ? qid[1] : 0, qid ? qid[2] : 0, qid ? qid[3] : 0,
+                     vis, hid, dyn ? "SET" : "null", activePlayers);
+            }
+        }
+        for (int k = 0; k < nclass; ++k)
+            GLog("  REDCOIN CLASS %-40ls x%d", clsName[k], clsCount[k]);
+        GLog("red coin / timed quest actors in world: %d across %d class(es)", total, nclass);
+    }
+
     int pkg = 0, mine = 0;
     wchar_t name[512], cls[512];
     const int32_t num = g_objs->NumElements;
@@ -503,7 +582,11 @@ void GlyphTick()
 // Same 10s gate, but keeps running after g_done so the streaming has time to finish first.
 void VerifyTick()
 {
-    if (g_verified || !g_firedAt || GetTickCount64() - g_firedAt < 20000) return;
+    // Run the late pass even when the glyph level never loaded: the interesting comparison (do quest
+    // actors get a quest update once progression arrives?) has nothing to do with our own load.
+    if (g_verified) return;
+    const ULONGLONG ready = g_firedAt ? g_firedAt + 20000 : g_armedAt + 60000;
+    if (GetTickCount64() < ready) return;
     g_verified = true;
     VerifyPassSafe();
 }
@@ -603,5 +686,6 @@ void GlyphFix_Start()
         GLog("LoadInstance hooked @%p", li);
     else
         GLog("LoadInstance hook failed - falling back to waiting for PKR_Quests_01");
+    g_armedAt = GetTickCount64();
     GLog("armed (the parkour glyph level will stream in when the district loads)");
 }

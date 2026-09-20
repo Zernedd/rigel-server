@@ -19,3 +19,12 @@ E482CB0741EA1ADB0224C59B066B1ACA 1   # ACT_TKB_Intro             -- no prereqs; 
 # completing one unlocks its district's RedCoin quests the normal way.
 C25FCC7E456FD3C4FCF46BAE729197A0 1   # Quest_CLB_Explorer_Glyphs -- gates Quest_CLB_Explorer_RedCoin (+2 subs)
 B9E9549641EAC070C0F12090700CD99E 1   # Quest_TKB_Explorer_Glyphs -- gates RedCoinNormal (+4) -> RedCoinHard (+4)
+
+# Parkour ACTIVITY gates -- the second tier, and the reason parkour still looked broken after the
+# intro gates above. ACT_PKR_Intro is forced, so LCN_*/ACT_PKR_Intro show; but the Master_/Quest_/Sub_
+# parkour progression hangs off FOUR more ACT_* activities that never complete on our servers either.
+# Between them they keep 50 parkour quests Locked (and therefore hidden).
+D5FCE5104355C2EBD6E2A5AFA44A2021 1   # ACT_PKR_Climb_Adv -- unblocks 21 (Subquest_PKR_Climber_Advanced_*)
+DB4B2BA6441A88A97E6330A7EBD6BE4C 1   # ACT_PKR_Climb     -- unblocks 15 (FreeClimb/GrabClimb drills)
+14E8E0204883B8A91B8D838736C87A84 1   # ACT_PKR_Slide     -- unblocks 7  (Master_PKR_Sliding chain)
+6289ECB747FB74A1936801BF61F67342 1   # ACT_PKR_Parkour   -- unblocks 7  (Master_PKR_Parkour chain)
