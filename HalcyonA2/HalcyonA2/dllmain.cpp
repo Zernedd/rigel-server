@@ -8403,13 +8403,13 @@ static void LoadPkrGlyphLevel()
             const double sing = Z * X - W * Y;
             const double R2D = 57.295779513082321;
             const double yaw = atan2(2.0 * (W * Z + X * Y), 1.0 - 2.0 * (Y * Y + Z * Z)) * R2D;
-            if (sing > 0.4999995)       { rot[0] =  90.0; rot[1] = yaw; rot[2] = 0.0; }
-            else if (sing < -0.4999995) { rot[0] = -90.0; rot[1] = yaw; rot[2] = 0.0; }
+            if (sing > 0.4999995)       { rot[0] =  90.0; rot[1] = yaw; rot[2] = yaw - 2.0 * atan2(X, W) * R2D; }
+            else if (sing < -0.4999995) { rot[0] = -90.0; rot[1] = yaw; rot[2] = -yaw - 2.0 * atan2(X, W) * R2D; }
             else
             {
                 rot[0] = asin(2.0 * sing) * R2D;
                 rot[1] = yaw;
-                rot[2] = atan2(2.0 * (W * X + Y * Z), 1.0 - 2.0 * (X * X + Y * Y)) * R2D;
+                rot[2] = atan2(-2.0 * (W * X + Y * Z), 1.0 - 2.0 * (X * X + Z * Z)) * R2D;
             }
             found = true;
         }
@@ -10745,6 +10745,138 @@ static void DumpQuestDefsOnce(void* bundle)
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
+// [2026-09-20 PKRQUESTS] Publish the parkour glyph quests the station never registers.
+//
+// Measured: the bundle this server hands players is 194 rows and contains NONE of the five quests the
+// parkour glyph buttons ask for, while the club ones it does contain (Sub_CLB_Explorer_Glyphs_1..5) are
+// exactly the glyphs that DO work in game. Same root cause as the missing level: these definitions live
+// inside PKR_Quests_Unbugged, which Prime_LIs_PKR never instances, so the gamemode quest loader
+// (caller GAME+0x46F755D) never sees them.
+//
+// A client button holds only its quest GUID (UA2QuestProgressComponent::QuestID). With no definition the
+// client has no state for that GUID, so it resolves to EA2QuestState::Locked(0) and
+// UA2GlyphMeshComponent::OnLocalQuestUpdated takes the blank branch. Streaming the level client-side
+// creates the buttons; without these rows they stay blank. Both halves are needed.
+//
+// So send a second, tiny bundle straight after the real one, through the same
+// sub_4689030(UA2PlayerQuestComponent*, FAAQuestBundle*, bIsRemoving) the game itself uses. Every row is
+// a ZEROED FAAQuestEntry (0x120) with only ID and VersionNumber set: every FString and TArray in it is
+// therefore null, which is a valid empty value needing no allocator and no ownership - the callee
+// serialises the bundle into the RPC and does not free it (its normal callers pass long-lived bundles).
+// No prerequisites, so the client can resolve the quest to Inactive rather than Locked.
+//
+// -NoPkrQuests turns it off, and if the content is ever fixed so the rows appear in the real bundle,
+// this detects them and does nothing.
+static bool g_pkrQuests = true;
+
+// Which quests to publish is NOT hardcoded: the payload asks the world. Every quest button in the
+// level (parkour glyph buttons, the red-coin search desks, the club/tackleball ones) carries a
+// UA2QuestProgressComponent whose QuestID@0xC4 is the quest it waits on and QuestName@0xBC names it.
+// Walk those, and publish any ID the real bundle does not contain. That covers every button the
+// station instances, including ones we have not looked at, and needs no GUID literals.
+//
+// For the parkour glyph buttons specifically the server must also have PKR_Quests_Unbugged loaded
+// (-PkrGlyphs), or their components do not exist here to be found. The red-coin desks live in
+// PKR_TransitStation_Unbugged, which the station DOES instance, so those are always visible to it.
+enum { kMaxPubQuests = 96 };
+static uint32_t g_pubIds[kMaxPubQuests][4];
+static int      g_pubCount   = 0;
+static int      g_pubScans   = 0;
+
+static void ScanQuestButtonIds()
+{
+    if (g_pubScans >= 10) return;
+    ++g_pubScans;
+    auto* cls = SDK::UObject::FindClassFast("A2QuestProgressComponent");
+    if (!cls) return;
+    const int before = g_pubCount;
+    const int32_t num = SDK::UObject::GObjects->Num();
+    for (int32_t i = 0; i < num && g_pubCount < kMaxPubQuests; ++i)
+    {
+        auto* o = SDK::UObject::GObjects->GetByIndex(i);
+        if (!o || o->IsDefaultObject() || !o->IsA(cls)) continue;
+        const uint32_t* id = reinterpret_cast<const uint32_t*>(reinterpret_cast<uintptr_t>(o) + 0xC4);
+        if (!id[0] && !id[1] && !id[2] && !id[3]) continue;          // unset
+        bool seen = false;
+        for (int k = 0; k < g_pubCount && !seen; ++k)
+            seen = g_pubIds[k][0] == id[0] && g_pubIds[k][1] == id[1] &&
+                   g_pubIds[k][2] == id[2] && g_pubIds[k][3] == id[3];
+        if (seen) continue;
+        for (int c = 0; c < 4; ++c) g_pubIds[g_pubCount][c] = id[c];
+        ++g_pubCount;
+    }
+    if (g_pubCount != before)
+        HxLog("[HalcyonA2][PKRQUESTS] scan #%d: %d quest button id(s) in the world (+%d)\n",
+              g_pubScans, g_pubCount, g_pubCount - before);
+}
+
+// FAAQuestEntry stride 0x120: ID@0x00, VersionNumber@0x30, Repetition@0x48, PrerequisiteQuests@0x50,
+// ChildQuests@0xA0, Runtime_Glyph@0xE0, Title@0xF0, GlyphID@0x100, Description@0x108, bTestQuest@0x118.
+// FAAQuestBundle: UniqueID FString@0x00, Dependencies TArray@0x10, Table@0x20 (rows Data@0x20, Num@0x28).
+static uint8_t g_pkrRows[kMaxPubQuests][0x120];
+static uint8_t g_pkrBundle[0x40];
+
+static bool BundleHasId(void* bundle, const uint32_t id[4])
+{
+    __try
+    {
+        const uintptr_t b = reinterpret_cast<uintptr_t>(bundle);
+        const uintptr_t rows = *reinterpret_cast<uintptr_t*>(b + 0x20);
+        const int n = *reinterpret_cast<int*>(b + 0x28);
+        if (!rows || n <= 0 || n > 20000) return true;               // unreadable: assume present, do nothing
+        for (int i = 0; i < n; ++i)
+        {
+            const uint32_t* g = reinterpret_cast<uint32_t*>(rows + static_cast<uintptr_t>(i) * 0x120);
+            if (g[0] == id[0] && g[1] == id[1] && g[2] == id[2] && g[3] == id[3]) return true;
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return true; }
+    return false;
+}
+
+// Build and send one bundle holding a zeroed FAAQuestEntry per missing id. Zeroed means every FString
+// and TArray in the row is null - a valid empty value, so there is no allocation and no ownership: the
+// callee serialises the bundle into the RPC and does not free it (its normal callers pass long-lived
+// bundles). No prerequisites, so the client can resolve the quest to Inactive instead of Locked.
+static void PublishMissingQuests(void* comp, void* realBundle)
+{
+    if (!g_pkrQuests || !comp || !QSendSet_Orig) return;
+    ScanQuestButtonIds();
+    if (g_pubCount <= 0) return;
+
+    int rows = 0;
+    memset(g_pkrRows, 0, sizeof(g_pkrRows));
+    for (int k = 0; k < g_pubCount && rows < kMaxPubQuests; ++k)
+    {
+        if (BundleHasId(realBundle, g_pubIds[k])) continue;          // the game already publishes it
+        uint32_t* g = reinterpret_cast<uint32_t*>(g_pkrRows[rows]);
+        for (int c = 0; c < 4; ++c) g[c] = g_pubIds[k][c];
+        *reinterpret_cast<int32_t*>(g_pkrRows[rows] + 0x30) = 1;     // VersionNumber
+        ++rows;
+    }
+    if (rows == 0) return;                                           // nothing missing - content is fine
+
+    memset(g_pkrBundle, 0, sizeof(g_pkrBundle));                     // empty UniqueID / Dependencies
+    *reinterpret_cast<uintptr_t*>(g_pkrBundle + 0x20) = reinterpret_cast<uintptr_t>(g_pkrRows);
+    *reinterpret_cast<int32_t*>(g_pkrBundle + 0x28)   = rows;        // TArray Num
+    *reinterpret_cast<int32_t*>(g_pkrBundle + 0x2C)   = rows;        // TArray Max
+
+    static volatile long s_sends = 0;
+    const long n = InterlockedIncrement(&s_sends);
+    __try
+    {
+        QSendSet_Orig(comp, g_pkrBundle, 0);
+        if (n <= 20)
+            HxLog("[HalcyonA2][PKRQUESTS] published %d missing quest definition(s) to comp=%p (#%ld)\n",
+                  rows, comp, n);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        HxLog("[HalcyonA2][PKRQUESTS] publish FAULTED -- disabling\n");
+        g_pkrQuests = false;
+    }
+}
+
 static __int64 __fastcall QSendSet_Hook(void* comp, void* bundle, char removing)
 {
     DumpQuestDefsOnce(bundle);
@@ -10752,7 +10884,11 @@ static __int64 __fastcall QSendSet_Hook(void* comp, void* bundle, char removing)
     if (n <= 300)
         HxLog("[HalcyonA2][QBUNDLE] Client_SetQuests #%ld -> comp=%p rows=%d removing=%d caller=GAME+0x%llX\n", n, comp,
               SafeBundleRows(bundle), (int)removing, (unsigned long long)(reinterpret_cast<uintptr_t>(_ReturnAddress()) - GetBase()));
-    return QSendSet_Orig(comp, bundle, removing);
+    const __int64 r = QSendSet_Orig(comp, bundle, removing);
+    // Follow the real bundle with the parkour glyph quests it is missing (unless it already has them).
+    if (g_pkrQuests && !removing && bundle != reinterpret_cast<void*>(g_pkrBundle))
+        PublishMissingQuests(comp, bundle);
+    return r;
 }
 
 // Texture-streaming thunk sub_54ABCC0(a1): this = *(a1+0x890); return (*this->vtable[0x600/8])(this).
@@ -14028,6 +14164,7 @@ static void Main(HMODULE)
         grab(L"-BallClass=", g_ballClass, sizeof(g_ballClass));   // renderable ball to replace broken death balls
         if (wcsstr(GetCommandLineW(), L"-KillMgrRepl")) { g_disableMgrRepl = true; HxLog("[HalcyonA2] -KillMgrRepl: BallSimManager set non-replicating (old flood-suppression behaviour)\n"); }
         if (wcsstr(GetCommandLineW(), L"-QuestTestSeed")) g_questTestSeed = true;
+        if (wcsstr(GetCommandLineW(), L"-NoPkrQuests")) { g_pkrQuests = false; HxLog("[HalcyonA2][PKRQUESTS] disabled by -NoPkrQuests\n"); }
         if (wcsstr(GetCommandLineW(), L"-QuestTestNoOrg")) { g_questTestNoOrg = true; HxLog("[HalcyonA2][QUEST] -QuestTestNoOrg: registering players without an org (LOCAL TESTING ONLY)\n"); }
         if (wcsstr(GetCommandLineW(), L"-NoAuthGate")) { g_gateEnforce = false; HxLog("[HalcyonA2][GATE] -NoAuthGate: auth gate is LOG-ONLY (no kicks) - testing only\n"); }
         if (wcsstr(GetCommandLineW(), L"-NoFixLOD")) g_fixLod = false;   // disable the DefaultLODSettings pop-in fix

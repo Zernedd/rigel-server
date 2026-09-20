@@ -52,6 +52,7 @@ constexpr uintptr_t kOffAppendString = 0x0113F2E0;   // void FName::AppendString
 constexpr uintptr_t kOffGWorld       = 0x09A387B8;   // UWorld**
 constexpr uintptr_t kOffProcessEvent = 0x01357960;   // void UObject::ProcessEvent(UFunction*, void*)
 constexpr uintptr_t kOffLoadInstance = 0x03AAF180;   // ULevelStreamingLevelInstance::LoadInstance
+constexpr uintptr_t kOffGlyphQuestUpd = 0x05470390;  // UA2GlyphMeshComponent::OnLocalQuestUpdated
 
 // UObject: VTable@0x00 Flags@0x08 Index@0x0C Class@0x10 Name@0x18 Outer@0x20
 constexpr uintptr_t kUObj_Class = 0x10, kUObj_Name = 0x18, kUObj_Outer = 0x20;
@@ -208,20 +209,23 @@ bool ResolveStatics()
     return g_lliFn && g_lliCdo && g_lsClassCount > 0;
 }
 
-// FTransform quat -> UE rotator (pitch, yaw, roll) in degrees; the maths the server-side probe used.
+// FTransform quat -> UE rotator (pitch, yaw, roll) in degrees.
+// [2026-09-20] This MUST match FQuat::Rotator() exactly. The first version had roll as
+// atan2(+2*(W*X+Y*Z), 1-2*(X*X+Y*Y)) -- wrong sign AND Y*Y where UE uses Z*Z -- which produced a
+// bogus rotation for the glyph level and scattered the buttons around parkour.
 void QuatToRotator(const double* q, double* rot)
 {
     const double X = q[0], Y = q[1], Z = q[2], W = q[3];
     const double sing = Z * X - W * Y;
     const double R2D = 57.295779513082321;
     const double yaw = atan2(2.0 * (W * Z + X * Y), 1.0 - 2.0 * (Y * Y + Z * Z)) * R2D;
-    if (sing > 0.4999995)       { rot[0] =  90.0; rot[1] = yaw; rot[2] = 0.0; }
-    else if (sing < -0.4999995) { rot[0] = -90.0; rot[1] = yaw; rot[2] = 0.0; }
+    if (sing > 0.4999995)       { rot[0] =  90.0; rot[1] = yaw; rot[2] = yaw - 2.0 * atan2(X, W) * R2D; }
+    else if (sing < -0.4999995) { rot[0] = -90.0; rot[1] = yaw; rot[2] = -yaw - 2.0 * atan2(X, W) * R2D; }
     else
     {
         rot[0] = asin(2.0 * sing) * R2D;
         rot[1] = yaw;
-        rot[2] = atan2(2.0 * (W * X + Y * Z), 1.0 - 2.0 * (X * X + Y * Y)) * R2D;
+        rot[2] = atan2(-2.0 * (W * X + Y * Z), 1.0 - 2.0 * (X * X + Z * Z)) * R2D;
     }
 }
 
@@ -430,12 +434,23 @@ void VerifyPass(const char* when)
                 NameText(reinterpret_cast<const void*>(reinterpret_cast<uintptr_t>(qp) + 0xBC), qname, 256);
                 qid = reinterpret_cast<const uint32_t*>(reinterpret_cast<uintptr_t>(qp) + 0xC4);
             }
-            GLog("  BUTTON[%s] %-34ls locked=%d reqQuest=%08X%08X%08X%08X at (%.0f,%.0f,%.0f)"
-                 " | mesh=%p dynMat=%s questName='%ls' questId=%08X%08X%08X%08X",
-                 ours ? "ours " : "stock", name, locked ? 1 : 0, q[0], q[1], q[2], q[3],
-                 t ? t[0] : 0.0, t ? t[1] : 0.0, t ? t[2] : 0.0,
-                 gm, dynMat ? "SET" : "null", qname[0] ? qname : L"-",
-                 qid ? qid[0] : 0, qid ? qid[1] : 0, qid ? qid[2] : 0, qid ? qid[3] : 0);
+            // What the player can actually SEE. UA2GlyphMeshComponent::OnLocalQuestUpdated
+            // (Windows sub_145470390) branches entirely on FAARuntimeQuestState::State@0x11 vs
+            // EA2QuestState::Locked(0), so a quest the player has no progression for leaves the
+            // glyph hidden. dynMat only proves the handler RAN. USceneComponent::bVisible is
+            // byte 0x190 bit 5, bHiddenInGame is byte 0x191 bit 3.
+            int vis = -1, hidden = -1;
+            if (gm)
+            {
+                vis    = (*reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(gm) + 0x190) >> 5) & 1;
+                hidden = (*reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(gm) + 0x191) >> 3) & 1;
+            }
+            GLog("  BUTTON[%s] %-34ls VISIBLE=%d hiddenInGame=%d dynMat=%s locked=%d"
+                 " questName='%ls' at (%.0f,%.0f,%.0f)",
+                 ours ? "ours " : "stock", name, vis, hidden, dynMat ? "SET" : "null",
+                 locked ? 1 : 0, qname[0] ? qname : L"-",
+                 t ? t[0] : 0.0, t ? t[1] : 0.0, t ? t[2] : 0.0);
+            (void)q; (void)qid;
         }
         if (!ours) continue;
         ++mine;
@@ -493,6 +508,33 @@ void VerifyTick()
     VerifyPassSafe();
 }
 
+// -- UA2GlyphMeshComponent::OnLocalQuestUpdated ------------------------------------------------
+// The one thing that decides what a glyph shows. Its body branches on FAARuntimeQuestState::State
+// @0x11 against EA2QuestState::Locked(0) -- Locked=0 Inactive=1 Active=2 Completed=3 Archived=4 --
+// so a quest the player has no progression for arrives Locked and the glyph stays blank. Logging
+// the State per button is what separates "the client never spawned it" from "the SERVER never
+// published the quest". bVisible is useless here: it reads 1 from the moment the actor spawns.
+typedef void (__fastcall *GlyphQuestUpd_t)(void*, const void*);
+GlyphQuestUpd_t g_gquOrig = nullptr;
+int g_gquLogged = 0;
+
+void __fastcall GlyphQuestUpd_Hook(void* self, const void* questState)
+{
+    if (questState && g_gquLogged < 40)
+    {
+        ++g_gquLogged;
+        const uint32_t* id = reinterpret_cast<const uint32_t*>(questState);
+        const uint8_t prog = *reinterpret_cast<const uint8_t*>(
+            reinterpret_cast<uintptr_t>(questState) + 0x10);
+        const uint8_t st = *reinterpret_cast<const uint8_t*>(
+            reinterpret_cast<uintptr_t>(questState) + 0x11);
+        static const char* kNames[] = { "Locked", "Inactive", "Active", "Completed", "Archived" };
+        GLog("  QUESTUPD comp=%p id=%08X%08X%08X%08X progress=%u state=%u(%s)",
+             self, id[0], id[1], id[2], id[3], prog, st, st < 5 ? kNames[st] : "?");
+    }
+    g_gquOrig(self, questState);
+}
+
 // -- ULevelStreamingLevelInstance::LoadInstance: the engine's own level-instance loader --------
 // Only raises a flag; the work still happens on the ProcessEvent tick, on the game thread.
 typedef void* (__fastcall *LoadInstance_t)(void*);
@@ -545,6 +587,15 @@ void GlyphFix_Start()
     {
         GLog("ProcessEvent hook enable failed - glyph fix off");
         return;
+    }
+    if (g_diag)
+    {
+        void* gq = reinterpret_cast<void*>(g_base + kOffGlyphQuestUpd);
+        if (MH_CreateHook(gq, reinterpret_cast<void*>(&GlyphQuestUpd_Hook),
+                          reinterpret_cast<void**>(&g_gquOrig)) == MH_OK && MH_EnableHook(gq) == MH_OK)
+            GLog("OnLocalQuestUpdated hooked @%p", gq);
+        else
+            GLog("OnLocalQuestUpdated hook failed");
     }
     void* li = reinterpret_cast<void*>(g_base + kOffLoadInstance);
     if (MH_CreateHook(li, reinterpret_cast<void*>(&LoadInstance_Hook),

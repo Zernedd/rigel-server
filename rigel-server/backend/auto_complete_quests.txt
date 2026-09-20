@@ -7,3 +7,15 @@
 8B11E312471FA29F389F188492CE82A1 1   # LCN_PKR_Intro   -- no prereqs; 41 quests depend on it (Climb, Slide, Parkour acts...)
 2ECE0E784C2B987D4BC86992E7921052 1   # ACT_PKR_Intro   -- no prereqs; 12 quests depend on it (Intro Drift / Climb / Search)
 98A8010444398D2F275BDDBC37958ADD 1   # LCN_PKR_Climb   -- no prereqs; 22 quests depend on it (ACT_PKR_Climb_Adv chain)
+
+# Red coin gates -- 13 RedCoin quests (TKB Normal/Hard x4 + CLB x2, plus their parents) are ALL gated
+# behind the Explorer_Glyphs quest of their district, which is itself gated behind that district's
+# ACT_*_Intro. The two ACT_*_Intro activities never complete on our servers -- exactly like ACT_PKR_Intro
+# above -- so the glyph quests stayed Locked, so every RedCoin quest stayed Locked and never showed.
+4223C1AC48FB5086635410AA3FD358F0 1   # ACT_CLB_Intro             -- no prereqs; gates Quest_CLB_Explorer_Glyphs
+E482CB0741EA1ADB0224C59B066B1ACA 1   # ACT_TKB_Intro             -- no prereqs; gates Quest_TKB_Explorer_Glyphs
+# The two below make the RedCoin quests visible immediately. Delete them if you would rather players
+# earn the glyph hunt first: with the ACT gates above unlocked the glyph quests become playable, and
+# completing one unlocks its district's RedCoin quests the normal way.
+C25FCC7E456FD3C4FCF46BAE729197A0 1   # Quest_CLB_Explorer_Glyphs -- gates Quest_CLB_Explorer_RedCoin (+2 subs)
+B9E9549641EAC070C0F12090700CD99E 1   # Quest_TKB_Explorer_Glyphs -- gates RedCoinNormal (+4) -> RedCoinHard (+4)
