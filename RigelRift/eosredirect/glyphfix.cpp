@@ -414,9 +414,28 @@ void VerifyPass(const char* when)
                                   reinterpret_cast<uintptr_t>(root) + 0x1D0 + 0x20) : nullptr;
             const bool locked = *reinterpret_cast<bool*>(reinterpret_cast<uintptr_t>(o) + 0x2B4);
             const uint32_t* q = reinterpret_cast<const uint32_t*>(reinterpret_cast<uintptr_t>(o) + 0x2BC);
-            GLog("  BUTTON[%s] %-34ls locked=%d quest=%08X%08X%08X%08X at (%.0f,%.0f,%.0f)",
+            // What actually decides whether a glyph is DRAWN:
+            //   AA2ProgressionButtonGlyphActor: GlyphMeshComponent@0x2E0, QuestProgressComponent@0x2E8
+            //   UA2GlyphMeshComponent : UStaticMeshComponent -> DynamicMaterial@0x5E0
+            //   UA2QuestProgressComponent -> QuestName@0xBC (FName), QuestID@0xC4 (FGuid)
+            // The mesh is only ever textured from OnLocalQuestUpdated, so a button whose quest never
+            // reaches the client stays blank no matter how correctly it is placed.
+            void* gm = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(o) + 0x2E0);
+            void* qp = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(o) + 0x2E8);
+            void* dynMat = gm ? *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(gm) + 0x5E0) : nullptr;
+            wchar_t qname[256] = L"";
+            const uint32_t* qid = nullptr;
+            if (qp)
+            {
+                NameText(reinterpret_cast<const void*>(reinterpret_cast<uintptr_t>(qp) + 0xBC), qname, 256);
+                qid = reinterpret_cast<const uint32_t*>(reinterpret_cast<uintptr_t>(qp) + 0xC4);
+            }
+            GLog("  BUTTON[%s] %-34ls locked=%d reqQuest=%08X%08X%08X%08X at (%.0f,%.0f,%.0f)"
+                 " | mesh=%p dynMat=%s questName='%ls' questId=%08X%08X%08X%08X",
                  ours ? "ours " : "stock", name, locked ? 1 : 0, q[0], q[1], q[2], q[3],
-                 t ? t[0] : 0.0, t ? t[1] : 0.0, t ? t[2] : 0.0);
+                 t ? t[0] : 0.0, t ? t[1] : 0.0, t ? t[2] : 0.0,
+                 gm, dynMat ? "SET" : "null", qname[0] ? qname : L"-",
+                 qid ? qid[0] : 0, qid ? qid[1] : 0, qid ? qid[2] : 0, qid ? qid[3] : 0);
         }
         if (!ours) continue;
         ++mine;
