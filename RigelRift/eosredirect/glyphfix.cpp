@@ -51,11 +51,15 @@ constexpr uintptr_t kOffGObjects     = 0x097C7EA0;   // TUObjectArray (the array
 constexpr uintptr_t kOffAppendString = 0x0113F2E0;   // void FName::AppendString(FString&) const
 constexpr uintptr_t kOffGWorld       = 0x09A387B8;   // UWorld**
 constexpr uintptr_t kOffProcessEvent = 0x01357960;   // void UObject::ProcessEvent(UFunction*, void*)
+constexpr uintptr_t kOffLoadInstance = 0x03AAF180;   // ULevelStreamingLevelInstance::LoadInstance
 
 // UObject: VTable@0x00 Flags@0x08 Index@0x0C Class@0x10 Name@0x18 Outer@0x20
 constexpr uintptr_t kUObj_Class = 0x10, kUObj_Name = 0x18, kUObj_Outer = 0x20;
 // ULevelStreaming: PackageNameToLoad@0x54 (FName), LevelTransform@0x80 (FTransform: quat@+0, trans@+0x20)
 constexpr uintptr_t kULS_PackageNameToLoad = 0x54, kULS_LevelTransform = 0x80;
+// ULevelStreaming::LoadedLevel@0x158 -> ULevel::Actors@0xA0 (TArray: Data@0, Num@8), OwningWorld@0xC0.
+// Name-free, so the Quest hook can run the same check without any reflection at all.
+constexpr uintptr_t kULS_LoadedLevel = 0x158, kULevel_Actors = 0xA0, kULevel_OwningWorld = 0xC0;
 
 const wchar_t* const kGlyphLevel  = L"/Game/A2/Maps/Districts/Parkour/PKR_Quests_Unbugged";
 const wchar_t* const kGlyphLeaf   = L"PKR_Quests_Unbugged";
@@ -221,12 +225,26 @@ void QuatToRotator(const double* q, double* rot)
     }
 }
 
+// Set by -GlyphDiag. The residency line is always logged (two pointer reads); the full object walk
+// that enumerates and places every button is diagnostic only, because it resolves a name for every
+// UObject in the process, which is a visible hitch on a client.
+bool g_diag = false;
+
+bool VerifyPassSafe();      // defined below; also called once before the load, as a baseline
+
 // -- state ------------------------------------------------------------------------------------
 volatile long g_busy     = 0;       // re-entrancy guard: our own ProcessEvent call comes back through
 bool          g_enabled  = true;
 bool          g_done     = false;   // glyph level is in for this world - stop polling
 void*         g_world     = nullptr;
 ULONGLONG     g_nextCheck = 0;
+// Raised by the LoadInstance hook: the engine has begun streaming a level instance, so this world
+// has them (the station map, never the menu). Same trigger the Quest build uses, so exercising it
+// here exercises that too.
+volatile long g_sawLevelInstance = 0;
+ULONGLONG     g_firedAt   = 0;
+void*         g_streaming = nullptr;   // the ULevelStreamingDynamic LoadLevelInstance handed back
+bool          g_verified  = false;
 int           g_polls     = 0;
 int           g_announced = 0;      // keep the "watching" line from repeating on every travel
 
@@ -271,7 +289,15 @@ bool GlyphPass()
     }
 
     if (already) { GLog("PKR_Quests_Unbugged is already streaming - nothing to do"); return true; }
-    if (!found) return false;                       // parkour has not streamed in yet; poll again later
+    if (!found)
+    {
+        // PKR_Quests_01 is only resident once the player is near parkour, so waiting for it makes
+        // the glyphs late or absent. Once the engine has streamed ANY level instance we know this is
+        // the station map, and the placement is a fixed world-space transform, so go ahead.
+        if (!g_sawLevelInstance) return false;
+        GLog("no PKR_Quests_01 yet, but a level instance has streamed - using the measured placement");
+        for (int i = 0; i < 3; ++i) { loc[i] = kFallbackLoc[i]; rot[i] = kFallbackRot[i]; }
+    }
 
     // A level instance at the origin with no rotation is not a placement we ever measured, so treat it
     // as "transform not populated" and use the values read off a live server instead.
@@ -304,12 +330,14 @@ bool GlyphPass()
     p.LevelName.Max  = len + 1;
     for (int i = 0; i < 3; ++i) { p.Location[i] = loc[i]; p.Rotation[i] = rot[i]; }
 
+    if (g_diag) VerifyPassSafe();                   // baseline, so "after" means something
     GLog("streaming %ls at loc=(%.0f,%.0f,%.0f) rot=(P%.1f,Y%.1f,R%.1f)",
          kGlyphLevel, loc[0], loc[1], loc[2], rot[0], rot[1], rot[2]);
 
     g_peOrig(g_lliCdo, g_lliFn, &p);                // call past our own hook
 
     GLog("LoadLevelInstance -> success=%d streaming=%p", p.bOutSuccess ? 1 : 0, p.ReturnValue);
+    if (p.bOutSuccess) { g_firedAt = GetTickCount64(); g_streaming = p.ReturnValue; }
     return p.bOutSuccess;
 }
 
@@ -325,13 +353,109 @@ bool GlyphPassSafe()
     }
 }
 
+// The only honest answer to "did it work": walk the Outer chain of every object and list the ones
+// that belong to OUR level instance, with their classes. Counting by object NAME is not enough -
+// "ProgressionButton_Glyph" also matches the Blueprint class and its CDO, which exist either way.
+bool InPackage(void* o, const wchar_t* needle)
+{
+    wchar_t n[512];
+    for (int d = 0; d < 8 && o; ++d)
+    {
+        ObjName(o, n, 512);
+        if (n[0] && wcsstr(n, needle)) return true;
+        o = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(o) + kUObj_Outer);
+    }
+    return false;
+}
+
+void VerifyPass(const char* when)
+{
+    // The name-free check first: did the streaming level actually finish loading?
+    if (g_streaming)
+    {
+        void* lvl = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(g_streaming) + kULS_LoadedLevel);
+        if (!lvl) GLog("  streaming->LoadedLevel is still null (not resident yet)");
+        else
+        {
+            const int32_t nActors = *reinterpret_cast<int32_t*>(
+                reinterpret_cast<uintptr_t>(lvl) + kULevel_Actors + 8);
+            void* owner = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(lvl) + kULevel_OwningWorld);
+            GLog("  streaming->LoadedLevel=%p Actors.Num=%d OwningWorld=%p", lvl, nActors, owner);
+        }
+    }
+
+    if (!g_diag) return;
+
+    int pkg = 0, mine = 0;
+    wchar_t name[512], cls[512];
+    const int32_t num = g_objs->NumElements;
+    for (int32_t i = 0; i < num; ++i)
+    {
+        void* o = g_objs->GetByIndex(i);
+        if (!o) continue;
+        ObjName(o, name, 512);
+        if (!name[0]) continue;
+        if (wcsstr(name, kGlyphLeaf)) ++pkg;
+        if (wcsncmp(name, L"Default__", 9) == 0) continue;
+        const bool ours = InPackage(o, kGlyphLeaf);
+
+        // Dump EVERY glyph button in the world, ours or not. The ones the game already has are the
+        // control group: if they carry the same state ours do, our spawned buttons are not the
+        // reason nothing shows up.
+        cls[0] = 0;
+        {
+            void* cc = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(o) + kUObj_Class);
+            if (cc) ObjName(cc, cls, 512);
+        }
+        if (cls[0] && wcsstr(cls, L"ProgressionButton_Glyph"))
+        {
+            void* root = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(o) + 0x1A8);
+            const double* t = root ? reinterpret_cast<const double*>(
+                                  reinterpret_cast<uintptr_t>(root) + 0x1D0 + 0x20) : nullptr;
+            const bool locked = *reinterpret_cast<bool*>(reinterpret_cast<uintptr_t>(o) + 0x2B4);
+            const uint32_t* q = reinterpret_cast<const uint32_t*>(reinterpret_cast<uintptr_t>(o) + 0x2BC);
+            GLog("  BUTTON[%s] %-34ls locked=%d quest=%08X%08X%08X%08X at (%.0f,%.0f,%.0f)",
+                 ours ? "ours " : "stock", name, locked ? 1 : 0, q[0], q[1], q[2], q[3],
+                 t ? t[0] : 0.0, t ? t[1] : 0.0, t ? t[2] : 0.0);
+        }
+        if (!ours) continue;
+        ++mine;
+        if (mine <= 12) GLog("  in-level: %-46ls class=%ls", name, cls[0] ? cls : L"?");
+    }
+    GLog("verify(%s): %d object(s) named *%ls*, %d object(s) inside our level instance",
+         when, pkg, kGlyphLeaf, mine);
+
+    // Reference point: where did the level the game DOES instance (PKR_Quests_01) put its actors?
+    int shown = 0;
+    for (int32_t i = 0; i < num && shown < 4; ++i)
+    {
+        void* o = g_objs->GetByIndex(i);
+        if (!o) continue;
+        ObjName(o, name, 512);
+        if (!name[0] || wcsncmp(name, L"Default__", 9) == 0) continue;
+        if (!wcsstr(name, L"QuestDisplayKiosk") && !wcsstr(name, L"QuestArrows")) continue;
+        if (!InPackage(o, kBuggedLevel)) continue;
+        void* root = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(o) + 0x1A8);
+        const double* t = root ? reinterpret_cast<const double*>(
+                              reinterpret_cast<uintptr_t>(root) + 0x1D0 + 0x20) : nullptr;
+        GLog("  reference (PKR_Quests_01) %-30ls at (%.0f,%.0f,%.0f)", name,
+             t ? t[0] : 0.0, t ? t[1] : 0.0, t ? t[2] : 0.0);
+        ++shown;
+    }
+}
+bool VerifyPassSafe()
+{
+    __try { VerifyPass(g_firedAt ? "after" : "before"); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { GLog("verify faulted"); return false; }
+}
+
 void GlyphTick()
 {
     // A level instance belongs to the world it was streamed into, so a travel (menu -> station, or a
     // reconnect) means the glyph level has to go in again - re-arm rather than stay "done" forever.
     void* world = *reinterpret_cast<void**>(g_base + kOffGWorld);
     if (world != g_world) { g_world = world; g_done = false; g_polls = 0; }
-    if (!world || g_done) return;
+    if (!world || g_done) return;      // VerifyTick still runs - see PE_Hook
 
     if (++g_polls == 1 && g_announced < 4) { ++g_announced; GLog("watching for the parkour district"); }
 
@@ -340,6 +464,25 @@ void GlyphTick()
         g_done = true;
         GLog("glyph level is in - idle from here");
     }
+}
+
+// Same 10s gate, but keeps running after g_done so the streaming has time to finish first.
+void VerifyTick()
+{
+    if (g_verified || !g_firedAt || GetTickCount64() - g_firedAt < 20000) return;
+    g_verified = true;
+    VerifyPassSafe();
+}
+
+// -- ULevelStreamingLevelInstance::LoadInstance: the engine's own level-instance loader --------
+// Only raises a flag; the work still happens on the ProcessEvent tick, on the game thread.
+typedef void* (__fastcall *LoadInstance_t)(void*);
+LoadInstance_t g_loadInstOrig = nullptr;
+
+void* __fastcall LoadInstance_Hook(void* self)
+{
+    if (!g_sawLevelInstance) InterlockedExchange(&g_sawLevelInstance, 1);
+    return g_loadInstOrig(self);
 }
 
 // -- ProcessEvent hook: the only place it is safe to touch the world (game thread) -------------
@@ -352,6 +495,7 @@ void __fastcall PE_Hook(void* ctx, void* fn, void* parms)
     {
         g_nextCheck = GetTickCount64() + 10000;
         GlyphTick();
+        VerifyTick();
         InterlockedExchange(&g_busy, 0);
     }
     g_peOrig(ctx, fn, parms);
@@ -364,6 +508,7 @@ void __fastcall PE_Hook(void* ctx, void* fn, void* parms)
 void GlyphFix_Start()
 {
     if (wcsstr(GetCommandLineW(), L"-NoGlyphFix")) return;
+    g_diag = wcsstr(GetCommandLineW(), L"-GlyphDiag") != nullptr;
 
     g_base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     if (!g_base) return;
@@ -382,5 +527,11 @@ void GlyphFix_Start()
         GLog("ProcessEvent hook enable failed - glyph fix off");
         return;
     }
+    void* li = reinterpret_cast<void*>(g_base + kOffLoadInstance);
+    if (MH_CreateHook(li, reinterpret_cast<void*>(&LoadInstance_Hook),
+                      reinterpret_cast<void**>(&g_loadInstOrig)) == MH_OK && MH_EnableHook(li) == MH_OK)
+        GLog("LoadInstance hooked @%p", li);
+    else
+        GLog("LoadInstance hook failed - falling back to waiting for PKR_Quests_01");
     GLog("armed (the parkour glyph level will stream in when the district loads)");
 }
