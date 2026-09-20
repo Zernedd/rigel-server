@@ -8262,6 +8262,224 @@ static void LoadGamemodeIntoSlot()
 static void SafeLoadGamemodeIntoSlot() { __try { LoadGamemodeIntoSlot(); } __except (EXCEPTION_EXECUTE_HANDLER) { printf("[HalcyonA2][GM] load faulted (SEH)\n"); } }
 
 // ---------------------------------------------------------------------------
+// [2026-09-20 *** PARKOUR GLYPHS -- the level holding them is never instanced]
+// Station_Prime streams Prime_LIs_PKR, which instances
+// /Game/A2/Maps/Districts/Parkour/PKR_Quests_01 -- that level has ONLY the kiosks
+// (BP_QuestDisplayKiosk_*) and arrows (BP_QuestArrows_*). The actual glyph buttons
+// (BP_ProgressionButton_Glyph_C x5 + A2GlyphMeshComponent) and the glyph quests
+// (Sub_PKR_Climber_GlyphsEasy / _GlyphsHard) live in PKR_Quests_Unbugged, which NOTHING
+// references -- even though the same map DID move the neighbouring level to the fixed
+// variant (PKR_TransitStation_Unbugged). Verified by unpacking the container with retoc.
+// That is why parkour glyphs "don't appear at all": there is nothing to render or touch.
+//
+// Fix: stream the missing level ourselves via Engine.LevelStreamingDynamic.LoadLevelInstance
+// at the SAME world transform the existing LI_PKR_Quests level-instance uses -- read live, so a
+// re-cook that moves the district cannot strand the glyphs at stale coordinates.
+//
+// NOTE: AA2ProgressionButtonActor is entirely CLIENT-LOCAL (OnButtonPressedLocally,
+// OnLocalButtonBeginOverlap, OnLocalQuestUpdated; no Server_ RPCs, no replicated properties),
+// so this makes the glyph QUESTS exist server-side; the buttons themselves need the same load
+// on the client. -NoPkrGlyphs disables.
+// [2026-09-20 RESULT] Measured on a local server: the load WORKS (LoadLevelInstance success=1, glyph
+// actors 15 -> 20, correct placement -- the derived rotation P-60/Y180/R-180 matches the pkrRot
+// constant already used for the PKR district). But it does NOT help players, so it is OPT-IN only:
+//   * the quest bundle stays at 194 rows -- Sub_PKR_Climber_GlyphsEasy/Hard are NOT registered;
+//   * AA2ProgressionButtonActor is client-local, and LoadLevelInstance creates a runtime duplicate
+//     package, which a client cannot load -- so the buttons never reach anyone.
+// The real fix has to ship in the client build (same call, run client-side) or as a content re-cook
+// that makes Prime_LIs_PKR instance PKR_Quests_Unbugged.
+static bool      g_pkrGlyphs      = false;   // OPT-IN (-PkrGlyphs): proven to load the level, but see the note above
+static bool      g_pkrGlyphDone   = false;
+static bool      g_pkrGlyphVerify = false;
+static int       g_pkrGlyphTries  = 0;
+static ULONGLONG g_lastPkrGlyph   = 0;
+static ULONGLONG g_pkrGlyphFired  = 0;
+static const wchar_t* kPkrGlyphLevel = L"/Game/A2/Maps/Districts/Parkour/PKR_Quests_Unbugged";
+
+static int CountGlyphActors()
+{
+    auto* cls = SDK::UObject::FindClassFast("A2ProgressionButtonGlyphActor");
+    if (!cls) return -1;
+    int n = 0;
+    const int32_t num = SDK::UObject::GObjects->Num();
+    for (int32_t i = 0; i < num; ++i)
+    {
+        auto* o = SDK::UObject::GObjects->GetByIndex(i);
+        if (o && !o->IsDefaultObject() && o->IsA(cls)) ++n;
+    }
+    return n;
+}
+
+
+// [2026-09-20 PKRGLYPH DIAG] The glyph buttons DO exist in the world (15 of them), so the level is
+// instanced after all. AA2ProgressionButtonActor gates itself on bLocked@0x2B4 +
+// RequiredActiveQuestID@0x2BC, and UA2GlyphMeshComponent drives its look from OnLocalQuestUpdated --
+// so a glyph that "doesn't appear" is most likely locked/idle because its quest never became active.
+// Dump the real state so the cause is not guesswork.
+static void DumpGlyphActors()
+{
+    auto* cls = SDK::UObject::FindClassFast("A2ProgressionButtonGlyphActor");
+    if (!cls) { HxLog("[HalcyonA2][PKRGLYPH] A2ProgressionButtonGlyphActor class not found\n"); return; }
+    auto* locFn = cls->GetFunction("Actor", "K2_GetActorLocation");
+    int n = 0;
+    const int32_t num = SDK::UObject::GObjects->Num();
+    for (int32_t i = 0; i < num; ++i)
+    {
+        auto* o = SDK::UObject::GObjects->GetByIndex(i);
+        if (!o || o->IsDefaultObject() || !o->IsA(cls)) continue;
+        const uintptr_t a = reinterpret_cast<uintptr_t>(o);
+        const bool  locked = *reinterpret_cast<bool*>(a + 0x2B4);
+        const uint32_t* g  = reinterpret_cast<const uint32_t*>(a + 0x2BC);
+        void* glyphComp    = *reinterpret_cast<void**>(a + 0x2E0);
+        void* questComp    = *reinterpret_cast<void**>(a + 0x2E8);
+        double loc[3] = {};
+        if (locFn) SafeProcessEvent(o, locFn, loc);
+        HxLog("[HalcyonA2][PKRGLYPH] %-34s locked=%d quest=%08X%08X%08X%08X glyphComp=%p questComp=%p at (%.0f,%.0f,%.0f)\n",
+              o->GetName().c_str(), locked ? 1 : 0, g[0], g[1], g[2], g[3], glyphComp, questComp,
+              loc[0], loc[1], loc[2]);
+        ++n;
+    }
+    HxLog("[HalcyonA2][PKRGLYPH] dumped %d glyph button(s)\n", n);
+}
+static void SafeDumpGlyphActors() { __try { DumpGlyphActors(); } __except (EXCEPTION_EXECUTE_HANDLER) { HxLog("[HalcyonA2][PKRGLYPH] dump faulted\n"); } }
+
+// Is the glyph level itself instanced? Counting glyph ACTORS is not good enough: the club district
+// has its own BP_ProgressionButton_Glyph and the station has 13 BP_HeartBallReceptacle_Glyph, so an
+// actor count > 0 made this bail out with "nothing to do" while parkour still had exactly none.
+static bool IsGlyphLevelLoaded()
+{
+    const int32_t num = SDK::UObject::GObjects->Num();
+    for (int32_t i = 0; i < num; ++i)
+    {
+        auto* o = SDK::UObject::GObjects->GetByIndex(i);
+        if (!o || o->IsDefaultObject()) continue;
+        if (o->GetName().find("PKR_Quests_Unbugged") != std::string::npos) return true;
+    }
+    return false;
+}
+
+static void LoadPkrGlyphLevel()
+{
+    if (!g_pkrGlyphs || g_pkrGlyphDone) return;
+    auto* world = SDK::UWorld::GetWorld();
+    if (!world) return;
+
+    // Only bail if the GLYPH LEVEL is loaded -- not merely because some other district has glyphs.
+    if (IsGlyphLevelLoaded())
+    {
+        HxLog("[HalcyonA2][PKRGLYPH] PKR_Quests_Unbugged already instanced -- nothing to do\n");
+        g_pkrGlyphDone = true;
+        return;
+    }
+    static bool s_dumped = false;
+    if (!s_dumped) { s_dumped = true; SafeDumpGlyphActors(); }
+
+    // In a cooked build the level-instance ACTOR does not exist at runtime -- the contents are streamed
+    // as a generated package (client log: PKR_Quests_01_LevelInstance_<hash>_1). So take the placement
+    // from the ULevelStreaming for PKR_Quests_01 instead: PackageNameToLoad@0x54, LevelTransform@0x80
+    // (FTransform = quat@+0x00, translation@+0x20).
+    auto* lsCls = SDK::UObject::FindClassFast("LevelStreaming");
+    if (!lsCls) { HxLog("[HalcyonA2][PKRGLYPH] LevelStreaming class not found\n"); return; }
+    double loc[3] = {}, rot[3] = {};
+    bool found = false;
+    static bool s_lsDumped = false;
+    const int32_t num = SDK::UObject::GObjects->Num();
+    InterlockedIncrement(&g_walks); g_objN = num;
+    for (int32_t i = 0; i < num; ++i)
+    {
+        auto* o = SDK::UObject::GObjects->GetByIndex(i);
+        if (!o || o->IsDefaultObject() || !o->IsA(lsCls)) continue;
+        const uintptr_t a = reinterpret_cast<uintptr_t>(o);
+        const std::string pkg = reinterpret_cast<SDK::FName*>(a + 0x54)->ToString();
+        const double* q = reinterpret_cast<const double*>(a + 0x80);
+        const double* t = reinterpret_cast<const double*>(a + 0x80 + 0x20);
+        if (!s_lsDumped && pkg.find("PKR") != std::string::npos)
+            HxLog("[HalcyonA2][PKRGLYPH] streaming level '%s' at (%.0f,%.0f,%.0f) quat=(%.3f,%.3f,%.3f,%.3f)\n",
+                  pkg.c_str(), t[0], t[1], t[2], q[0], q[1], q[2], q[3]);
+        if (!found && pkg.find("PKR_Quests_01") != std::string::npos)
+        {
+            loc[0] = t[0]; loc[1] = t[1]; loc[2] = t[2];
+            const double X = q[0], Y = q[1], Z = q[2], W = q[3];
+            const double sing = Z * X - W * Y;
+            const double R2D = 57.295779513082321;
+            const double yaw = atan2(2.0 * (W * Z + X * Y), 1.0 - 2.0 * (Y * Y + Z * Z)) * R2D;
+            if (sing > 0.4999995)       { rot[0] =  90.0; rot[1] = yaw; rot[2] = 0.0; }
+            else if (sing < -0.4999995) { rot[0] = -90.0; rot[1] = yaw; rot[2] = 0.0; }
+            else
+            {
+                rot[0] = asin(2.0 * sing) * R2D;
+                rot[1] = yaw;
+                rot[2] = atan2(2.0 * (W * X + Y * Z), 1.0 - 2.0 * (X * X + Y * Y)) * R2D;
+            }
+            found = true;
+        }
+    }
+    s_lsDumped = true;
+    if (!found)
+    {
+        if (g_pkrGlyphTries <= 3 || (g_pkrGlyphTries % 10) == 0)
+            HxLog("[HalcyonA2][PKRGLYPH] PKR_Quests_01 streaming level not present yet (try %d)\n", g_pkrGlyphTries);
+        return;
+    }
+
+
+    auto* lsdCls = SDK::UObject::FindClassFast("LevelStreamingDynamic");
+    SDK::UFunction* fn = lsdCls ? lsdCls->GetFunction("LevelStreamingDynamic", "LoadLevelInstance") : nullptr;
+    auto* cdo = static_cast<SDK::UObject*>(SDK::ULevelStreamingDynamic::GetDefaultObj());
+    if (!fn || !cdo)
+    {
+        HxLog("[HalcyonA2][PKRGLYPH] LoadLevelInstance UFunction/CDO missing (fn=%p cdo=%p)\n", (void*)fn, (void*)cdo);
+        return;
+    }
+
+    struct LLIParms
+    {
+        SDK::UObject* WorldContextObject;
+        SDK::FString  LevelName;
+        double        Location[3];
+        double        Rotation[3];
+        bool          bOutSuccess;
+        uint8_t       Pad49[7];
+        SDK::FString  OptionalLevelNameOverride;
+        SDK::UClass*  OptionalLevelStreamingClass;
+        bool          bLoadAsTempPackage;
+        uint8_t       Pad69[7];
+        void*         ReturnValue;
+    } p{};
+    static_assert(sizeof(LLIParms) == 0x78, "LoadLevelInstance parms layout");
+
+    p.WorldContextObject = reinterpret_cast<SDK::UObject*>(world);
+    p.LevelName          = SDK::FString(kPkrGlyphLevel);
+    p.Location[0] = loc[0]; p.Location[1] = loc[1]; p.Location[2] = loc[2];
+    p.Rotation[0] = rot[0]; p.Rotation[1] = rot[1]; p.Rotation[2] = rot[2];
+
+    HxLog("[HalcyonA2][PKRGLYPH] streaming the missing glyph level at loc=(%.0f,%.0f,%.0f) rot=(P%.1f,Y%.1f,R%.1f) (placement copied from PKR_Quests_01)\n",
+          loc[0], loc[1], loc[2], rot[0], rot[1], rot[2]);
+
+    if (!SafeProcessEvent(cdo, fn, &p))
+    {
+        HxLog("[HalcyonA2][PKRGLYPH] LoadLevelInstance FAULTED\n");
+        return;
+    }
+    HxLog("[HalcyonA2][PKRGLYPH] LoadLevelInstance -> success=%d streaming=%p\n", p.bOutSuccess ? 1 : 0, p.ReturnValue);
+    g_pkrGlyphDone  = true;
+    g_pkrGlyphFired = GetTickCount64();
+}
+static void SafeLoadPkrGlyphLevel() { __try { LoadPkrGlyphLevel(); } __except (EXCEPTION_EXECUTE_HANDLER) { HxLog("[HalcyonA2][PKRGLYPH] load faulted (SEH)\n"); } }
+
+static void VerifyPkrGlyphLevel()
+{
+    if (g_pkrGlyphVerify || !g_pkrGlyphFired) return;
+    if (GetTickCount64() - g_pkrGlyphFired < 20000) return;
+    g_pkrGlyphVerify = true;
+    const int n = CountGlyphActors();
+    HxLog("[HalcyonA2][PKRGLYPH] verify: %d A2ProgressionButtonGlyphActor instance(s) in the world%s\n",
+          n, n > 0 ? " -- glyph level IS live" : " -- stream produced nothing");
+}
+static void SafeVerifyPkrGlyphLevel() { __try { VerifyPkrGlyphLevel(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+
+
+// ---------------------------------------------------------------------------
 // SLOT-SPAWN placement (-SpawnSlotAtMarker) — the correct approach. Coordinate-rewrite is dead (the
 // client transform isn't affine). Instead spawn a REAL AModuleSlot at the marker (Movable -> its
 // transform replicates) and initialize it the way a level-placed slot is, using the reflected
@@ -12035,6 +12253,19 @@ static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, v
             else             SafeLoadGamemodeIntoSlot();
             if (++g_gmLoadTries >= 30) g_gmLoadDone = true;   // wait out the marker's level-instance transform
         }
+
+        // [PKRGLYPH] Stream the parkour glyph level the station forgot to instance.
+        if (g_pkrGlyphs && !g_pkrGlyphDone && GetTickCount64() - g_lastPkrGlyph > 5000)
+        {
+            g_lastPkrGlyph = GetTickCount64();
+            SafeLoadPkrGlyphLevel();
+            if (++g_pkrGlyphTries >= 60)
+            {
+                g_pkrGlyphDone = true;
+                HxLog("[HalcyonA2][PKRGLYPH] gave up after %d tries (LI_PKR_Quests never appeared)\n", g_pkrGlyphTries);
+            }
+        }
+        SafeVerifyPkrGlyphLevel();
         // Spawn path: once the async load binds LoadedGameMode, push its netvars so clients render it.
         if (g_spawnSlot && g_gmLoadDone && !g_pushedAfterLoad && GetTickCount64() - g_lastGmLoad > 2000)
         {
@@ -13849,6 +14080,7 @@ static void Main(HMODULE)
         if (wcsstr(GetCommandLineW(), L"-NoBallOwnArb")) { g_ballOwnArb = false; HxLog("[HalcyonA2] -NoBallOwnArb: ball ownership arbitration OFF (legacy force-accept, last writer wins)\n"); }
         if (wcsstr(GetCommandLineW(), L"-NoTeamClearGuard")) { g_teamClearGuard = false; HxLog("[HalcyonA2] -NoTeamClearGuard: ScrapRun team-clear suppression OFF (a death will take the runner off the team again)\n"); }
         if (wcsstr(GetCommandLineW(), L"-SeatRound")) { g_seatRound = true; HxLog("[HalcyonA2] -SeatRound: round-start team seating back ON\n"); }
+        if (wcsstr(GetCommandLineW(), L"-PkrGlyphs")) { g_pkrGlyphs = true; HxLog("[HalcyonA2] -PkrGlyphs: streaming the missing parkour glyph level (server-side only -- clients do NOT get it)\n"); }
         if (wcsstr(GetCommandLineW(), L"-TeamOverlap")) { g_teamOverlap = true; HxLog("[HalcyonA2] -TeamOverlap: geometrically fire the runner team-changer overlap so ScrapRun rosters fill\n"); }
         if (wcsstr(GetCommandLineW(), L"-NoNetScale")) { g_netScale = false; HxLog("[HalcyonA2] -NoNetScale: player relevancy/rate stays maxed regardless of population\n"); }
         if (const wchar_t* a = wcsstr(GetCommandLineW(), L"-NetCrowd="))    { int v = _wtoi(a + 11); if (v >  0 && v < 200)  g_netCrowd    = v; }
