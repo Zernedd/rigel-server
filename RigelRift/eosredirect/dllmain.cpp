@@ -42,6 +42,10 @@ extern "C" void* g_real4;  extern "C" void* g_real5;  extern "C" void* g_real6;
 extern "C" void* g_real7;  extern "C" void* g_real8;  extern "C" void* g_real9;
 extern "C" void* g_real10; extern "C" void* g_real11; extern "C" void* g_real12;
 
+// glyphfix.cpp: the client-side parkour glyph fix. Separate translation unit so the game-object
+// reflection it needs stays well away from the dsound proxy and the EOS redirect.
+void GlyphFix_Start();
+
 namespace {
 
 const char* kEosGateway = "https://rigel-eos.wwiggles.org";   // our EOS gateway (VPS TLS)
@@ -350,6 +354,10 @@ DWORD WINAPI Worker(LPVOID)
     // time, both before the game uses the thing being resolved: substitutes our app id when the platform
     // init is looked up, and installs the EOS curl hook when EOS_Initialize is looked up.
     InstallAppIdHook();
+
+    // Arm the parkour glyph fix. It installs its own ProcessEvent hook and then sits idle until the
+    // parkour district streams in, so doing it here costs nothing and cannot delay the EOS work below.
+    ::GlyphFix_Start();
 
     // Fallback only: if the GetProcAddress path ever misses EOS_Initialize, still get the curl hook in as
     // soon as the module is present. Tight poll early (the SDK loads within a few seconds), then relax.

@@ -30,8 +30,8 @@ $cmds = @(
   "call `"$vcvars`"",
   "cd /d `"$out`"",
   "ml64 /nologo /c /Fo thunks.obj `"$here\thunks.asm`"",
-  "cl /nologo /c /O2 /MT /EHsc /GS- /I`"$mh\include`" `"$here\dllmain.cpp`" `"$mh\src\buffer.c`" `"$mh\src\hook.c`" `"$mh\src\trampoline.c`" `"$mh\src\hde\hde64.c`"",
-  "cl /nologo /LD /Fe:dsound.dll dllmain.obj buffer.obj hook.obj trampoline.obj hde64.obj thunks.obj /link /DEF:`"$here\exports.def`" kernel32.lib user32.lib psapi.lib",
+  "cl /nologo /c /O2 /MT /EHsc /GS- /I`"$mh\include`" `"$here\dllmain.cpp`" `"$here\glyphfix.cpp`" `"$mh\src\buffer.c`" `"$mh\src\hook.c`" `"$mh\src\trampoline.c`" `"$mh\src\hde\hde64.c`"",
+  "cl /nologo /LD /Fe:dsound.dll dllmain.obj glyphfix.obj buffer.obj hook.obj trampoline.obj hde64.obj thunks.obj /link /DEF:`"$here\exports.def`" kernel32.lib user32.lib psapi.lib",
   "echo BUILD_OK"
 ) -join ' && '
 
