@@ -46,6 +46,12 @@ PickState& Pick()
     return p;
 }
 
+Notice& Notes()
+{
+    static Notice n;
+    return n;
+}
+
 DWORD g_mainThread = 0;
 
 void Log(const char* fmt, ...)

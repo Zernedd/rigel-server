@@ -39,6 +39,8 @@ struct PaletteItem
     std::string name;        // display name, e.g. "LE_BP_RedCoin"
     std::string path;        // full package path used to load the class
     std::string category;    // derived from the folder, e.g. "Quests", "Progression"
+    std::string blocked;     // non-empty: cannot be placed by the editor, and why
+    std::string limited;     // non-empty: places fine, but this part of it will not work, and why
 };
 
 // A live object in the editor's world view. Handle is the FString index the game's own level editor
@@ -72,6 +74,7 @@ struct PropInfo
     bool        writable = false;
     bool        link = false;       // an owned component / child actor you can step into
     bool        net = false;        // replicated: every player (Quest too) gets the server's value
+    bool        inert = false;      // an input to a sandbox Luau script that never runs here: no effect
     std::vector<std::pair<std::string, long long>> enumNames;
 };
 
@@ -91,6 +94,7 @@ struct Snapshot
     std::string               inspectPath;      // sub-object path inside it ("" = the actor itself)
     std::string               inspectClass;     // class of the object at inspectPath
     std::vector<PropInfo>     props;
+    std::vector<std::string>  glyphs;    // quest icon ids seen in the game's own quest bundles
 };
 
 // ── commands: render thread -> game thread ───────────────────────────────────────────────────
@@ -129,6 +133,8 @@ struct Command
     std::string str4;               // QuestCompile: description
     float       snap = 0.0f;
     double      fallback = 400.0;   // SpawnTraced: distance to use when the ray hits nothing
+    double      radius = 250.0;     // QuestCompile: checkpoint touch distance, cm
+    int         timeLimit = 0;      // QuestCompile: seconds from the first checkpoint, 0 = none
 };
 
 // ── editor camera input: window thread -> game thread ─────────────────────────────────────────
@@ -172,6 +178,18 @@ struct PickState
     std::string hovered;            // answer: handle of the object under the cursor ("" = none)
 };
 PickState& Pick();
+
+// ── notices for the user (status bar toast) ────────────────────────────────────────────────────
+// From the server (SE|NOTE) or the editor itself, e.g. "this prefab can't be placed". Any thread.
+struct Notice
+{
+    std::mutex  mx;
+    std::string text;
+    ULONGLONG   at = 0;
+    void Set(const std::string& t) { std::lock_guard<std::mutex> lk(mx); text = t; at = GetTickCount64(); }
+    std::string Get(ULONGLONG maxAgeMs) { std::lock_guard<std::mutex> lk(mx); return GetTickCount64() - at < maxAgeMs ? text : std::string(); }
+};
+Notice& Notes();
 
 class EditorState
 {

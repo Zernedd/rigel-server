@@ -12572,6 +12572,7 @@ static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, v
         // DetectRunnerAtFinish.
         PROF(SafeDetectRunnerAtFinish);
         PROF(SafeNvApplyTick);       // [NETVARS] dashboard overrides -- no-op unless a new version is queued
+        PROF(SafeSpecEditTick);      // [SPECEDIT] collision stand-ins for placed meshes -- no-op unless -SpecEdit
         PROF(SafeNvWorldCensus);     // [NVCENSUS] one-shot, log-only, 90s after boot
         PROF(SafeDetectTeamChanger);   // [TEAMVOL] fire the real team-changer overlap (headless never does)
         PROF(SafePollTeamRosters);   // [ROSTER] catch the exact moment of removal

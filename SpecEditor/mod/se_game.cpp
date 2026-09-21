@@ -52,6 +52,7 @@ bool         g_paletteDirty = true;
 ULONGLONG    g_lastPump = 0;
 bool         g_editorMode = false;   // client-side "Enter Level Editor" state
 SDK::UFunction* g_setQuestsFn = nullptr;   // A2PlayerQuestComponent::Client_SetQuests (see LogIncomingQuests)
+std::vector<std::string> g_glyphs;        // quest icon ids seen in any bundle (for the Quest Editor's picker)
 SDK::UFunction* g_clientMsgFn = nullptr;   // APlayerController::ClientMessage (see ApplyRemoteProp)
 
 struct PendingStep { std::string handle; int kind; };
@@ -161,6 +162,24 @@ std::string Fmt3(const Rot& r)
 // tools/make_catalogue.py). Read once. Without it the palette could only offer classes already loaded in
 // memory -- 2 of ~97 on the station -- because a class has to be loaded to be found by walking GObjects.
 // The server loads a catalogue class on demand when one is spawned.
+// From the server-side SE|AUDIT sweep of all 97 LE prefabs. BLOCKED: the blueprint graph calls into a
+// LuauBlueprintComponent -- the sandbox's Luau runtime, which only binds for prefabs the sandbox engine
+// spawned itself; placed by the editor they are broken and interacting with one crashed players' games (the
+// server refuses them too). LIMITED: they place and show fine, but their behaviour is Luau-driven.
+void ClassifyPrefab(PaletteItem& it)
+{
+    static const char* blocked[] = { "LE_BP_LightSwitch_C", "LE_BP_Teleporter_C" };
+    static const char* limited[] = { "LE_BP_ArenaModerationPanel_C", "LE_BP_TableScoreboard_C", "LE_BP_ScoreboardA_Sideboard_C",
+                                     "LE_BP_VFX_TackleBallGoal01a_C", "LE_BP_QuestDisplayKiosk_C", "LE_BP_RockWallQuestManager_C",
+                                     "LE_BP_DiscGolfHole_C" };
+    for (const char* b : blocked)
+        if (it.name == b) it.blocked = "Can't be placed by the editor: it runs on the game's sandbox scripts, which only start for "
+                                       "objects the game itself placed. Placed this way it is broken and crashed players who touched it.";
+    for (const char* l : limited)
+        if (it.name == l) it.limited = "Places and displays fine, but its behaviour (scores, panels, quest logic) comes from the "
+                                       "game's sandbox scripts, which don't run for editor-placed objects.";
+}
+
 const std::vector<PaletteItem>& Catalogue()
 {
     static std::vector<PaletteItem> s_items;
@@ -190,6 +209,7 @@ const std::vector<PaletteItem>& Catalogue()
         it.path     = s.substr(bar + 1);
         const size_t dot = it.path.find_last_of('.');
         it.name = dot == std::string::npos ? it.path : it.path.substr(dot + 1);
+        ClassifyPrefab(it);
         if (it.name.rfind("LE_", 0) == 0) s_items.push_back(std::move(it));
     }
     fclose(f);
@@ -228,6 +248,7 @@ void BuildPalette(Snapshot& snap)
         // Full name is "Class /Game/Path/Asset.Asset_C"; keep the path part for the server to load.
         const size_t sp = full.find(' ');
         it.path = (sp == std::string::npos) ? full : full.substr(sp + 1);
+        ClassifyPrefab(it);
         snap.palette.push_back(std::move(it));
         ++extra;
     }
@@ -407,6 +428,7 @@ void FillProps(Snapshot& snap)
         pi.value = sereflect::Read(obj, pr.p, pr.t);
         pi.writable = sereflect::Writable(pr.t);
         pi.net = sereflect::Replicated(pr.p);
+        pi.inert = sereflect::IsA(obj, "LuauBehavior") && !sereflect::IsA(obj, "TextComponent");
         if (pr.t == sereflect::PType::Object) pi.link = sereflect::Hop(obj, pr.name) != nullptr;
         if (pr.t == sereflect::PType::Enum)
             for (const auto& e : sereflect::EnumNames(sereflect::EnumOf(pr.p))) pi.enumNames.push_back({ e.first, e.second });
@@ -550,12 +572,14 @@ void HandleCommands()
                 if (!steps.empty()) steps += ";";
                 steps += id + ":" + std::to_string(st.kind);
             }
-            char extra[64];
+            char extra[64], tail[64];
             snprintf(extra, sizeof(extra), "|%d|%g|", c.num2, c.f1);
-            std::string desc = c.str4;
-            for (auto& ch : desc) if (ch == '|') ch = '/';        // '|' is the field separator
-            SendToServer("SE|QUEST|" + c.str + "|" + c.str2 + "|" + c.str3 + "|" + std::to_string(c.num) + "|" + steps +
-                         extra + desc);
+            snprintf(tail, sizeof(tail), "|%.0f|%d", c.radius, c.timeLimit);
+            std::string desc = c.str4, title = c.str2;
+            for (auto& ch : desc)  if (ch == '|') ch = '/';       // '|' is the field separator
+            for (auto& ch : title) if (ch == '|') ch = '/';
+            SendToServer("SE|QUEST|" + c.str + "|" + title + "|" + c.str3 + "|" + std::to_string(c.num) + "|" + steps +
+                         extra + desc + tail);
             Log("[game] quest publish: %s '%s' glyph=%s rep=%d, %d step(s)%s", c.str.c_str(), c.str2.c_str(),
                 c.str3.c_str(), c.num, (int)g_questSteps.size() - unresolved,
                 unresolved ? " (some steps no longer exist and were skipped)" : "");
@@ -1198,6 +1222,93 @@ void RunScript(const Snapshot& snap)
         for (const auto& c : counts) Log("[script]   %4d  %s", c.second, c.first.c_str());
         return;
     }
+    if (!strcmp(op, "spawnatplayer"))         // spawnatplayer <Class> <dx> <dy> <dz> -- next to another player
+    {
+        char cls[128] = {};
+        double dx = 0, dy = 0, dz = 0;
+        sscanf_s(rest.c_str(), "%127s %lf %lf %lf", cls, (unsigned)sizeof(cls), &dx, &dy, &dz);
+        auto* pawnCls = SDK::UObject::FindClassFast("VRPawn");
+        void* mine = g_pc ? *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(g_pc) + 0x340) : nullptr;   // AcknowledgedPawn
+        SDK::UObject* other = nullptr;
+        const int32_t n = SDK::UObject::GObjects->Num();
+        for (int32_t i = 0; pawnCls && i < n && !other; ++i)
+        {
+            SDK::UObject* o = SDK::UObject::GObjects->GetByIndex(i);
+            if (!o || o == mine || o->IsDefaultObject() || !o->IsA(pawnCls) || (*(reinterpret_cast<const uint8_t*>(o) + 0x65) & 1)) continue;
+            void* r = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(o) + 0x1A8);
+            if (!r) continue;
+            const double z = reinterpret_cast<const double*>(reinterpret_cast<uintptr_t>(r) + 0x1D0 + 0x20)[2];
+            if (z < -50000.0) continue;                        // an unpossessed pawn parked out of the world
+            other = o;
+        }
+        const PaletteItem* pick = nullptr;
+        for (const auto& it : g_palette) if (it.name.find(cls) != std::string::npos) { pick = &it; break; }
+        if (!other || !pick) { Log("[script] FAIL spawnatplayer: %s", !other ? "no other player pawn" : "class not in palette"); return; }
+        void* root = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(other) + 0x1A8);
+        const double* t = reinterpret_cast<const double*>(reinterpret_cast<uintptr_t>(root) + 0x1D0 + 0x20);
+        Command c{ CmdType::SpawnItem };
+        c.str = pick->path;
+        c.loc = { t[0] + dx, t[1] + dy, t[2] + dz };
+        c.rot = { 0, 0, 0 };
+        g_lastSpawnClass = pick->name; g_lastSpawnLoc = c.loc;
+        State().Push(c);
+        Log("[script] spawnatplayer %s at (%.0f,%.0f,%.0f) next to %s", pick->name.c_str(), c.loc.x, c.loc.y, c.loc.z, other->GetName().c_str());
+        return;
+    }
+    if (!strcmp(op, "sbadd"))                 // sbadd <UniqueID> -- LOCAL TEST: sandbox-system placement in front of us
+    {
+        const double d2r = 3.14159265358979 / 180.0;
+        const double cp = std::cos(snap.cameraRot.pitch * d2r), sp = std::sin(snap.cameraRot.pitch * d2r);
+        const double cy = std::cos(snap.cameraRot.yaw * d2r),   sy = std::sin(snap.cameraRot.yaw * d2r);
+        char loc[96];
+        snprintf(loc, sizeof(loc), "%.1f,%.1f,%.1f", snap.cameraPos.x + cp * cy * 400.0, snap.cameraPos.y + cp * sy * 400.0,
+                 snap.cameraPos.z + sp * 400.0);
+        SendToServer("SE|SBADD|" + rest + "|" + loc);
+        Log("[script] sbadd %s at %s", rest.c_str(), loc);
+        return;
+    }
+    if (!strcmp(op, "sandbox"))               // sandbox -- LOCAL TEST: server logs the sandbox object system
+    {
+        SendToServer("SE|SANDBOX");
+        return;
+    }
+    if (!strcmp(op, "testquest"))             // testquest <id> -- LOCAL TEST: server builds a quest at a real player
+    {
+        SendToServer("SE|TESTQUEST|" + rest);
+        return;
+    }
+    if (!strcmp(op, "qpub"))                  // qpub <id> <radiusCm> <timeLimitS> <title...> -- publish the qstep list
+    {
+        char id[64] = {};
+        double radius = 250; int tl = 0; int used = 0;
+        sscanf_s(rest.c_str(), "%63s %lf %d %n", id, (unsigned)sizeof(id), &radius, &tl, &used);
+        Command q{ CmdType::QuestCompile };
+        q.str = id; q.str2 = rest.substr(used); q.str3 = "PKRClimb5"; q.num = 0; q.num2 = 0; q.f1 = 0;
+        q.str4 = q.str2; q.radius = radius; q.timeLimit = tl;
+        State().Push(q);
+        return;
+    }
+    if (!strcmp(op, "audit"))                 // audit <first> <count> -- server spawns each catalogue class
+    {                                           // privately and logs its components (probing)
+        int first = 0, count = 40;
+        sscanf_s(rest.c_str(), "%d %d", &first, &count);
+        const auto& cat = Catalogue();
+        for (int i = first; i < first + count && i < (int)cat.size(); ++i) SendToServer("SE|AUDIT|" + cat[i].path);
+        Log("[script] audit sent %d..%d of %d", first, (std::min)(first + count, (int)cat.size()) - 1, (int)cat.size());
+        return;
+    }
+    if (!strcmp(op, "fnaddr"))                // fnaddr <Class> <Function> -- native thunk as an image offset
+    {
+        char cls[128] = {}, fn[128] = {};
+        sscanf_s(rest.c_str(), "%127s %127s", cls, (unsigned)sizeof(cls), fn, (unsigned)sizeof(fn));
+        auto* c = SDK::UObject::FindClassFast(cls);
+        auto* f = c ? c->GetFunction(cls, fn) : nullptr;
+        const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        const uintptr_t exec = f ? reinterpret_cast<uintptr_t>(*reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(f) + 0xD8)) : 0;
+        Log("[script] FNADDR %s::%s exec=%p rva=0x%llX flags=%08x", cls, fn, (void*)exec,
+            (unsigned long long)(exec ? exec - base : 0), f ? (unsigned)f->FunctionFlags : 0);
+        return;
+    }
     if (!strcmp(op, "pick"))                  // pick <Class> -- target the existing instance nearest the camera
     {
         const SceneObject* best = nullptr;
@@ -1247,6 +1358,15 @@ void RunScript(const Snapshot& snap)
         State().Push(c);
         return;
     }
+    if (!strcmp(op, "scale"))                 // scale <sx> <sy> <sz>
+    {
+        Command c{ CmdType::SetTransform };
+        c.str = o->handle;
+        c.loc = o->location; c.rot = o->rotation;
+        sscanf_s(rest.c_str(), "%lf %lf %lf", &c.scale.x, &c.scale.y, &c.scale.z);
+        State().Push(c);
+        return;
+    }
     if (!strcmp(op, "rotate"))
     {
         Command c{ CmdType::SetTransform };
@@ -1274,6 +1394,94 @@ void RunScript(const Snapshot& snap)
             Log("[script]   %-28s %-10s = %s%s   [%s]", pi.name.c_str(),
                 pi.type == PT_Object ? (pi.link ? "Object >" : "Object") : "", pi.value.c_str(),
                 pi.writable ? "" : " (read-only)", pi.owner.c_str());
+        return;
+    }
+    if (!strcmp(op, "callfn"))                // callfn <Function> -- run it on THIS client's copy, zeroed args
+    {
+        auto* target = static_cast<SDK::UObject*>(o->ptr);
+        SDK::UFunction* fn = sereflect::FindFn(target, rest.c_str());
+        if (!fn) { Log("[script] FAIL callfn: no %s", rest.c_str()); return; }
+        static uint8_t zero[4096];
+        memset(zero, 0, sizeof(zero));
+        Log("[script] callfn %s ...", rest.c_str());
+        sereflect::CallFn(target, fn, zero);
+        Log("[script] callfn %s returned (client alive)", rest.c_str());
+        return;
+    }
+    if (!strcmp(op, "qstep"))                 // qstep -- the last spawned object becomes the next checkpoint
+    {
+        Command s2{ CmdType::QuestAddStep }; s2.str = o->handle; s2.str2 = "0"; State().Push(s2);
+        Log("[script] qstep %s", o->handle.c_str());
+        return;
+    }
+    if (!strcmp(op, "tracedown"))             // tracedown -- what does THIS client's world block from above it?
+    {
+        SDK::Params::KismetSystemLibrary_LineTraceSingle p{};
+        p.WorldContextObject = g_pc;
+        p.Start = SDK::FVector{ o->location.x, o->location.y, o->location.z + 600.0 };
+        p.End   = SDK::FVector{ o->location.x, o->location.y, o->location.z - 600.0 };
+        p.TraceChannel = SDK::ETraceTypeQuery::TraceTypeQuery1;
+        p.bTraceComplex = false;
+        p.DrawDebugType = SDK::EDrawDebugTrace::None;
+        p.bIgnoreSelf = true;
+        std::string what = "nothing";
+        if (g_pc && CallStatic("KismetSystemLibrary", "LineTraceSingle", p) && p.ReturnValue && p.OutHit.bBlockingHit)
+        {
+            SDK::UObject* c = WeakGet(reinterpret_cast<const uint8_t*>(&p.OutHit) + 0xD8);
+            SDK::UObject* owner = c ? c->Outer : nullptr;
+            char b[256];
+            snprintf(b, sizeof(b), "%s (%s) at z=%.0f", owner ? owner->GetName().c_str() : "?", owner && owner->Class ? owner->Class->GetName().c_str() : "?",
+                     p.OutHit.ImpactPoint.Z);
+            what = b;
+        }
+        Log("[script] TRACEDOWN over %s: hit %s", o->className.c_str(), what.c_str());
+        return;
+    }
+    if (!strcmp(op, "comps"))                 // comps -- every component this actor owns, with collision (probing)
+    {
+        auto* root = static_cast<SDK::UObject*>(o->ptr);
+        auto* primCls = SDK::UObject::FindClassFast("PrimitiveComponent");
+        auto* compCls = SDK::UObject::FindClassFast("ActorComponent");
+        auto* smcCls  = SDK::UObject::FindClassFast("StaticMeshComponent");
+        const int32_t n = SDK::UObject::GObjects->Num();
+        Log("[script] comps of %s", root->GetName().c_str());
+        for (int32_t i = 0; i < n; ++i)
+        {
+            SDK::UObject* c = SDK::UObject::GObjects->GetByIndex(i);
+            if (!c || c->Outer != root || !compCls || !c->IsA(compCls)) continue;
+            std::string extra;
+            if (primCls && c->IsA(primCls))
+            {
+                SDK::Params::PrimitiveComponent_GetCollisionEnabled ce{};
+                SDK::Params::PrimitiveComponent_GetCollisionProfileName pn{};
+                SDK::Params::PrimitiveComponent_GetCollisionObjectType ot{};
+                CallNative(c, "PrimitiveComponent", "GetCollisionEnabled", ce);
+                CallNative(c, "PrimitiveComponent", "GetCollisionProfileName", pn);
+                CallNative(c, "PrimitiveComponent", "GetCollisionObjectType", ot);
+                char b[200];
+                snprintf(b, sizeof(b), " coll=%d profile=%s objtype=%d", (int)ce.ReturnValue, pn.ReturnValue.ToString().c_str(), (int)ot.ReturnValue);
+                extra = b;
+                if (smcCls && c->IsA(smcCls))
+                {
+                    auto* mesh = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(c) + 0x560);
+                    extra += " mesh=" + (mesh ? mesh->GetName() : std::string("None"));
+                }
+            }
+            Log("[script]   %-40s %-32s%s", c->GetName().c_str(), c->Class ? c->Class->GetName().c_str() : "?", extra.c_str());
+        }
+        return;
+    }
+    if (!strcmp(op, "funcs"))                 // funcs -- the blueprint's own functions (probing)
+    {
+        auto* root = static_cast<SDK::UObject*>(o->ptr);
+        for (SDK::UStruct* st = root->Class; st; st = st->SuperStruct)
+        {
+            const std::string owner = st->GetName();
+            if (sereflect::IsEngineBase(owner)) break;
+            for (SDK::UField* f = st->Children; f; f = f->Next)
+                Log("[script]   fn %-40s flags=%08x [%s]", f->Name.ToString().c_str(),
+                    (unsigned)static_cast<SDK::UFunction*>(f)->FunctionFlags, owner.c_str());
+        }
         return;
     }
     if (!strcmp(op, "dump"))                  // dump [sub.path] -- every field, any type or flag (probing)
@@ -1535,6 +1743,7 @@ void PumpImpl()
     else if (!wantCam && Cam().active) CameraDeactivate();
 
     FillProps(snap);
+    snap.glyphs = g_glyphs;
     State().Publish(std::move(snap));
     HandleCommands();
 }
@@ -1550,6 +1759,12 @@ void LogIncomingQuests(const void* parms)
     const uint8_t* rows = *reinterpret_cast<const uint8_t* const*>(b + 0x20);
     const int n = *reinterpret_cast<const int32_t*>(b + 0x28);
     Log("[quests] Client_SetQuests arrived: bundle '%ls', %d row(s)%s", uid ? uid : L"", n, b[0x40] ? " (removing)" : "");
+    for (int i = 0; rows && i < n && i < 1024; ++i)             // GlyphID FName @0x100 of each FAAQuestEntry
+    {
+        const std::string g = reinterpret_cast<const SDK::FName*>(rows + static_cast<size_t>(i) * 0x120 + 0x100)->ToString();
+        if (!g.empty() && g != "None" && std::find(g_glyphs.begin(), g_glyphs.end(), g) == g_glyphs.end()) g_glyphs.push_back(g);
+    }
+    std::sort(g_glyphs.begin(), g_glyphs.end());
     if (!uid || wcscmp(uid, L"SpecEditorQuests") != 0 || !rows) return;
     for (int i = 0; i < n && i < 32; ++i)
     {
@@ -1566,6 +1781,7 @@ void HandleServerMessage(const wchar_t* w)
     std::string msg;
     for (int i = 0; w[i] && i < 1100; ++i) msg.push_back(static_cast<char>(w[i] < 128 ? w[i] : '?'));
     if (msg.rfind("SE|PROP|", 0) == 0) ApplyRemoteProp(msg);
+    else if (msg.rfind("SE|NOTE|", 0) == 0) { Notes().Set(msg.substr(8)); Log("[note] %s", msg.substr(8).c_str()); }
 }
 
 #ifdef RIGEL_EOS

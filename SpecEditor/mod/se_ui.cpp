@@ -35,20 +35,28 @@ struct QuestStep
 {
     std::string objectHandle;
     std::string label;
-    int         kind = 0;        // 0 reach, 1 collect, 2 interact
 };
+// A quest you are writing. Players complete it by reaching each checkpoint in order; the SERVER watches
+// where they are and credits the quest through the game's own completion RPC, so it works for everyone.
 struct QuestDraft
 {
-    char        name[64] = "PKR_Custom_Quest";
-    char        title[96] = "Custom Parkour Quest";
-    char        glyph[32] = "PKRClimb5";
-    int         repetition = 0;  // Once / Daily / Weekly / Monthly
-    int         validSec = 0;    // ValidLengthSeconds: how long an activation stays valid (0 = open-ended)
-    float       reqProgress = 0; // OptionalRequiredProgress (0 = the template's default)
+    std::string id;                  // made from the title once, then fixed (the quest's identity)
+    char        title[96] = "";
     char        desc[200] = "";
+    char        glyph[48] = "PKRClimb5";
+    int         repetition = 0;      // Once / Daily / Weekly / Monthly
+    float       radiusM = 2.5f;      // touch distance
+    bool        timed = false;
+    int         timeLimit = 60;      // seconds from the first checkpoint
     std::vector<QuestStep> steps;
+    bool        published = false;
+    bool        dirty = true;        // changed since it was last published
 };
-QuestDraft g_quest;
+std::vector<QuestDraft> g_quests;
+int g_questSel = -1;
+// "Place a new checkpoint here": the coin is spawned by the server, so we adopt it once it replicates back.
+struct PendingCheckpoint { int quest = -1; std::string cls; std::vector<std::string> before; double at = 0; };
+PendingCheckpoint g_pendingCp;
 
 const char* GizmoName(GizmoMode m)
 {
@@ -593,6 +601,7 @@ bool ContainsCi(const std::string& hay, const char* needle)
 // ---- spawning --------------------------------------------------------------------------------
 void SpawnAt(const PaletteItem& it, const Vec3& loc, double yaw)
 {
+    if (!it.blocked.empty()) { Notes().Set(PrettyName(it.name) + ": " + it.blocked); return; }
     Command c{ CmdType::SpawnItem };
     c.str = it.path;
     c.loc = loc;
@@ -609,6 +618,7 @@ void SpawnAt(const PaletteItem& it, const Vec3& loc, double yaw)
 // `fallback` units down the ray over empty space. Grid snap applies in X/Y so it stays on the surface.
 void SpawnTraced(const PaletteItem& it, const Vec3& from, const Vec3& dir, double fallback, double yaw)
 {
+    if (!it.blocked.empty()) { Notes().Set(PrettyName(it.name) + ": " + it.blocked); return; }
     Command c{ CmdType::SpawnTraced };
     c.str = it.path;
     c.loc = from;
@@ -823,11 +833,17 @@ void DrawPlaceActors(const Snapshot& snap, ImVec2 pos, ImVec2 size)
         ImGui::PushID(it.path.c_str());
         const ImVec2 p = ImGui::GetCursorScreenPos();
         const bool clicked = ImGui::Selectable("##it", false, ImGuiSelectableFlags_AllowDoubleClick, ImVec2(0, 26));
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s\nDouble-click to place in front of you\nor drag into the viewport", it.path.c_str());
-        if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) { g_dragPath = it.path; g_dragName = it.name; }
+        if (ImGui::IsItemHovered())
+        {
+            if (!it.blocked.empty())      ImGui::SetTooltip("%s\n\n%s", PrettyName(it.name).c_str(), it.blocked.c_str());
+            else if (!it.limited.empty()) ImGui::SetTooltip("%s\n\n%s\n\nDouble-click to place, or drag into the viewport", PrettyName(it.name).c_str(), it.limited.c_str());
+            else                          ImGui::SetTooltip("%s\nDouble-click to place in front of you\nor drag into the viewport", it.path.c_str());
+        }
+        if (it.blocked.empty() && ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) { g_dragPath = it.path; g_dragName = it.name; }
         ImDrawList* dl = ImGui::GetWindowDrawList();
         IconFor(dl, ImVec2(p.x + 2, p.y + 2), 22, it.name);
-        dl->AddText(ImVec2(p.x + 30, p.y + 5), kFg, PrettyName(it.name).c_str());
+        const std::string label = PrettyName(it.name) + (!it.blocked.empty() ? "  (unavailable)" : !it.limited.empty() ? "  (display only)" : "");
+        dl->AddText(ImVec2(p.x + 30, p.y + 5), it.blocked.empty() ? kFg : kDim, label.c_str());
         if (clicked && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) SpawnInFront(snap, it);
         ImGui::PopID();
     };
@@ -981,8 +997,15 @@ void DrawProperties(const Snapshot& snap, const SceneObject* sel)
         if (pi.owner != lastOwner) { lastOwner = pi.owner; ImGui::SeparatorText(pi.owner.c_str()); }
         ImGui::PushID(pi.path.c_str());
         ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted(pi.name.c_str());
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s  (%s)\npath: %s", pi.name.c_str(), pi.owner.c_str(), pi.path.c_str());
+        if (pi.inert) ImGui::TextDisabled("%s", pi.name.c_str()); else ImGui::TextUnformatted(pi.name.c_str());
+        if (ImGui::IsItemHovered())
+        {
+            if (pi.inert)
+                ImGui::SetTooltip("%s  (%s)\n\nNo effect: this is an input to the game's sandbox script, which doesn't run for\n"
+                                  "editor-placed objects. Changing it is saved but nothing reads it.", pi.name.c_str(), pi.owner.c_str());
+            else
+                ImGui::SetTooltip("%s  (%s)\npath: %s", pi.name.c_str(), pi.owner.c_str(), pi.path.c_str());
+        }
         ImGui::SameLine(labelW);
         ImGui::SetNextItemWidth(-1);
 
@@ -1082,6 +1105,204 @@ void DrawProperties(const Snapshot& snap, const SceneObject* sel)
     }
 }
 
+// ---- Quest Editor ------------------------------------------------------------------------------
+std::string QuestIdFrom(const char* title)
+{
+    std::string id = "SE_";
+    for (const char* c = title; *c && id.size() < 40; ++c)
+        id += isalnum(static_cast<unsigned char>(*c)) ? *c : '_';
+    char suffix[8];
+    snprintf(suffix, sizeof(suffix), "_%04X", static_cast<unsigned>(GetTickCount64() & 0xFFFF));
+    return id + suffix;
+}
+
+const SceneObject* FindObject(const Snapshot& snap, const std::string& handle)
+{
+    for (const auto& o : snap.objects) if (o.handle == handle) return &o;
+    return nullptr;
+}
+
+void PublishQuest(QuestDraft& q)
+{
+    if (q.id.empty()) q.id = QuestIdFrom(q.title);
+    for (const auto& st : q.steps)
+    {
+        Command c{ CmdType::QuestAddStep }; c.str = st.objectHandle; c.str2 = "0"; State().Push(c);
+    }
+    Command c{ CmdType::QuestCompile };
+    c.str = q.id; c.str2 = q.title; c.str3 = q.glyph; c.num = q.repetition;
+    c.num2 = 0; c.f1 = 0.0f;                                  // no activation window, template progress
+    c.str4 = q.desc[0] ? q.desc : q.title;
+    c.radius = q.radiusM * 100.0;
+    c.timeLimit = q.timed ? q.timeLimit : 0;
+    State().Push(c);
+    q.published = true;
+    q.dirty = false;
+    Notes().Set(std::string("Published '") + q.title + "' - players online get it now; it completes when they reach every checkpoint in order.");
+}
+
+void DrawQuestEditor(const Snapshot& snap, const SceneObject* sel)
+{
+    // Adopt a checkpoint coin we asked the server to place, once it has replicated back to us.
+    if (g_pendingCp.quest >= 0 && g_pendingCp.quest < (int)g_quests.size())
+    {
+        for (const auto& o : snap.objects)
+            if (o.className == g_pendingCp.cls &&
+                std::find(g_pendingCp.before.begin(), g_pendingCp.before.end(), o.handle) == g_pendingCp.before.end())
+            {
+                g_quests[g_pendingCp.quest].steps.push_back({ o.handle, "Checkpoint coin" });
+                g_quests[g_pendingCp.quest].dirty = true;
+                g_pendingCp.quest = -1;
+                break;
+            }
+        if (g_pendingCp.quest >= 0 && ImGui::GetTime() - g_pendingCp.at > 10.0) g_pendingCp.quest = -1;   // gave up
+    }
+
+    // ── quest list ──
+    ImGui::TextUnformatted("Quests");
+    ImGui::SameLine(ImGui::GetContentRegionAvail().x - 90);
+    if (ImGui::SmallButton("+ New quest"))
+    {
+        g_quests.emplace_back();
+        snprintf(g_quests.back().title, sizeof(g_quests.back().title), "New quest %d", (int)g_quests.size());
+        g_questSel = (int)g_quests.size() - 1;
+    }
+    if (g_quests.empty())
+    {
+        ImGui::Spacing();
+        ImGui::TextWrapped("Make a quest from objects you have placed. Players complete it by reaching each "
+                           "checkpoint in order - optionally against the clock. The server watches where they are, "
+                           "so it works for everyone, Quest players included.");
+        ImGui::Spacing();
+        ImGui::TextDisabled("Click  + New quest  to start.");
+        return;
+    }
+    if (ImGui::BeginListBox("##quests", ImVec2(-1, (std::min)(4, (int)g_quests.size()) * ImGui::GetTextLineHeightWithSpacing() + 6)))
+    {
+        for (int i = 0; i < (int)g_quests.size(); ++i)
+        {
+            const QuestDraft& q = g_quests[i];
+            char label[160];
+            snprintf(label, sizeof(label), "%s  -  %d checkpoint%s  %s##q%d", q.title[0] ? q.title : "(untitled)",
+                     (int)q.steps.size(), q.steps.size() == 1 ? "" : "s",
+                     !q.published ? "(not published)" : q.dirty ? "(changed)" : "(live)", i);
+            if (ImGui::Selectable(label, g_questSel == i)) g_questSel = i;
+        }
+        ImGui::EndListBox();
+    }
+    if (g_questSel < 0 || g_questSel >= (int)g_quests.size()) { ImGui::TextDisabled("Pick a quest to edit it."); return; }
+    QuestDraft& q = g_quests[g_questSel];
+    ImGui::Separator();
+
+    // ── what players see ──
+    const float lw = 110.0f;
+    auto label = [&](const char* t) { ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted(t); ImGui::SameLine(lw); ImGui::SetNextItemWidth(-1); };
+    label("Name");        if (ImGui::InputTextWithHint("##qt", "What players see in their quest list", q.title, sizeof(q.title))) q.dirty = true;
+    label("Description"); if (ImGui::InputTextWithHint("##qd", "Optional - e.g. Reach the roof in 60 seconds", q.desc, sizeof(q.desc))) q.dirty = true;
+    label("Icon");
+    if (ImGui::BeginCombo("##qg", q.glyph))
+    {
+        if (snap.glyphs.empty()) ImGui::TextDisabled("(icons appear once the game has sent you its quests)");
+        for (const auto& g : snap.glyphs)
+            if (ImGui::Selectable(g.c_str(), g == q.glyph)) { strncpy_s(q.glyph, g.c_str(), _TRUNCATE); q.dirty = true; }
+        ImGui::EndCombo();
+    }
+    label("Repeats");
+    {
+        const char* reps[] = { "Once", "Every day", "Every week", "Every month" };
+        if (ImGui::Combo("##qr", &q.repetition, reps, IM_ARRAYSIZE(reps))) q.dirty = true;
+    }
+
+    // ── checkpoints ──
+    ImGui::SeparatorText("Checkpoints (reached in this order)");
+    int remove = -1, up = -1, down = -1;
+    for (int i = 0; i < (int)q.steps.size(); ++i)
+    {
+        ImGui::PushID(i);
+        const SceneObject* o = FindObject(snap, q.steps[i].objectHandle);
+        char dist[48] = "";
+        if (o)
+        {
+            const Vec3 d = Sub(o->location, snap.cameraPos);
+            snprintf(dist, sizeof(dist), "%.0f m away", std::sqrt(Dot(d, d)) / 100.0);
+        }
+        ImGui::AlignTextToFramePadding();
+        if (o) ImGui::Text("%d. %s", i + 1, q.steps[i].label.c_str());
+        else   ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.35f, 1), "%d. %s (deleted)", i + 1, q.steps[i].label.c_str());
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", dist);
+        const float x = ImGui::GetWindowWidth() - 132;
+        ImGui::SameLine(x);
+        ImGui::BeginDisabled(!o);
+        if (ImGui::SmallButton("Go")) { Command c{ CmdType::FocusCamera }; c.loc = o->location; State().Push(c); }
+        ImGui::EndDisabled();
+        ImGui::SameLine(); ImGui::BeginDisabled(i == 0); if (ImGui::ArrowButton("##up", ImGuiDir_Up)) up = i; ImGui::EndDisabled();
+        ImGui::SameLine(); ImGui::BeginDisabled(i + 1 == (int)q.steps.size()); if (ImGui::ArrowButton("##dn", ImGuiDir_Down)) down = i; ImGui::EndDisabled();
+        ImGui::SameLine(); if (ImGui::SmallButton("X")) remove = i;
+        ImGui::PopID();
+    }
+    if (remove >= 0) { q.steps.erase(q.steps.begin() + remove); q.dirty = true; }
+    if (up > 0) { std::swap(q.steps[up], q.steps[up - 1]); q.dirty = true; }
+    if (down >= 0 && down + 1 < (int)q.steps.size()) { std::swap(q.steps[down], q.steps[down + 1]); q.dirty = true; }
+    if (q.steps.empty()) ImGui::TextDisabled("No checkpoints yet.");
+
+    const bool selIsStep = sel && std::any_of(q.steps.begin(), q.steps.end(), [&](const QuestStep& st) { return st.objectHandle == sel->handle; });
+    ImGui::BeginDisabled(!sel || selIsStep);
+    if (ImGui::Button("Add selected object", ImVec2(ImGui::GetContentRegionAvail().x * 0.5f - 4, 0)))
+    {
+        q.steps.push_back({ sel->handle, PrettyName(sel->className) });
+        q.dirty = true;
+    }
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip(!sel ? "Click an object in the viewport first." : selIsStep ? "That object is already a checkpoint." : "Use the selected object as the next checkpoint.");
+    ImGui::SameLine();
+    if (ImGui::Button("Place new checkpoint here", ImVec2(-1, 0)))
+    {
+        if (const PaletteItem* it = FindItem(snap, "LE_BP_RedCoin_C"))
+        {
+            g_pendingCp = { g_questSel, it->name, {}, ImGui::GetTime() };
+            for (const auto& o : snap.objects) if (o.className == it->name) g_pendingCp.before.push_back(o.handle);
+            SpawnInFront(snap, *it);
+        }
+        else Notes().Set("The red coin prefab isn't in the palette, so a checkpoint can't be placed for you. Place any object and use Add selected object.");
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Places a red coin in front of the camera and makes it the next checkpoint.");
+    if (g_pendingCp.quest == g_questSel) ImGui::TextDisabled("Placing checkpoint...");
+
+    // ── rules ──
+    ImGui::SeparatorText("Rules");
+    label("Touch distance"); if (ImGui::SliderFloat("##qrad", &q.radiusM, 1.0f, 10.0f, "%.1f m")) q.dirty = true;
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("How close a player has to get to a checkpoint for it to count.");
+    ImGui::AlignTextToFramePadding();
+    if (ImGui::Checkbox("Time limit", &q.timed)) q.dirty = true;
+    if (q.timed)
+    {
+        ImGui::SameLine(lw);
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::InputInt("##qtl", &q.timeLimit, 5, 30)) q.dirty = true;
+        q.timeLimit = (std::max)(5, (std::min)(3600, q.timeLimit));
+        ImGui::TextDisabled("%d:%02d from the first checkpoint; running out starts the player over.", q.timeLimit / 60, q.timeLimit % 60);
+    }
+
+    // ── publish ──
+    ImGui::Spacing();
+    const char* problem = !q.title[0] ? "Give the quest a name." :
+                          q.steps.empty() ? "Add at least one checkpoint." :
+                          std::any_of(q.steps.begin(), q.steps.end(), [&](const QuestStep& st) { return !FindObject(snap, st.objectHandle); })
+                              ? "A checkpoint was deleted - remove it from the list." :
+                          !snap.inEditor ? "Click Start Editing first." : nullptr;
+    ImGui::BeginDisabled(problem != nullptr);
+    ImGui::PushStyleColor(ImGuiCol_Button, kSelBlue);
+    if (ImGui::Button(q.published ? "Update quest" : "Publish quest", ImVec2(-1, 30))) PublishQuest(q);
+    ImGui::PopStyleColor();
+    ImGui::EndDisabled();
+    if (problem) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "%s", problem);
+    else if (q.published && !q.dirty) ImGui::TextDisabled("Live. Changes you make will show as (changed) until you update.");
+    ImGui::Spacing();
+    ImGui::TextDisabled("Quests live until the server restarts.");
+}
+
 void DrawDetailsPanel(const Snapshot& snap, const SceneObject* sel, ImVec2 pos, ImVec2 size)
 {
     if (!BeginPanel("##details", pos, size)) { ImGui::End(); return; }
@@ -1146,74 +1367,31 @@ void DrawDetailsPanel(const Snapshot& snap, const SceneObject* sel, ImVec2 pos, 
                 }
                 if (ImGui::CollapsingHeader("Properties", ImGuiTreeNodeFlags_DefaultOpen))
                     DrawProperties(snap, sel);
-                if (ContainsCi("Quest Step", g_detailsFilter) && ImGui::CollapsingHeader("Quest", ImGuiTreeNodeFlags_DefaultOpen))
+                if (ContainsCi("Quest Checkpoint", g_detailsFilter) && ImGui::CollapsingHeader("Quest", ImGuiTreeNodeFlags_DefaultOpen))
                 {
-                    if (ImGui::Button("Add as Quest Step", ImVec2(-1, 0)))
+                    if (g_questSel < 0 || g_questSel >= (int)g_quests.size())
+                        ImGui::TextDisabled("Open the Quest Editor tab and make a quest to use this as a checkpoint.");
+                    else
                     {
-                        QuestStep s; s.objectHandle = sel->handle; s.label = PrettyName(sel->className);
-                        g_quest.steps.push_back(s);
+                        QuestDraft& q = g_quests[g_questSel];
+                        const bool already = std::any_of(q.steps.begin(), q.steps.end(), [&](const QuestStep& st) { return st.objectHandle == sel->handle; });
+                        ImGui::BeginDisabled(already);
+                        if (ImGui::Button(already ? "Already a checkpoint" : "Add as checkpoint", ImVec2(-1, 0)))
+                        {
+                            q.steps.push_back({ sel->handle, PrettyName(sel->className) });
+                            q.dirty = true;
+                        }
+                        ImGui::EndDisabled();
+                        ImGui::TextDisabled("Quest: %s  (%d checkpoint%s)", q.title[0] ? q.title : "(untitled)",
+                                            (int)q.steps.size(), q.steps.size() == 1 ? "" : "s");
                     }
-                    ImGui::TextDisabled("%d step(s) in '%s'", static_cast<int>(g_quest.steps.size()), g_quest.name);
                 }
             }
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Quest Editor"))
         {
-            ImGui::TextWrapped("Author a parkour quest from placed objects. Publishing sends the definition to "
-                               "the server, so every client that joins sees it and can play it.");
-            ImGui::Separator();
-            ImGui::InputText("Quest Id",  g_quest.name,  sizeof(g_quest.name));
-            ImGui::InputText("Title",     g_quest.title, sizeof(g_quest.title));
-            ImGui::InputText("Glyph Id",  g_quest.glyph, sizeof(g_quest.glyph));
-            const char* reps[] = { "Once", "Daily", "Weekly", "Monthly" };
-            ImGui::Combo("Repetition", &g_quest.repetition, reps, IM_ARRAYSIZE(reps));
-            ImGui::InputInt("Valid for (s)", &g_quest.validSec, 60, 600);
-            if (g_quest.validSec < 0) g_quest.validSec = 0;
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("ValidLengthSeconds on the quest definition: how long an activation stays valid.\n"
-                                  "0 = open-ended. The red-coin RUN timer is separate: it is the Duration\n"
-                                  "property on the placed red-coin quest (Details > Properties).");
-            ImGui::InputFloat("Required progress", &g_quest.reqProgress, 1.0f, 5.0f, "%.0f");
-            if (g_quest.reqProgress < 0) g_quest.reqProgress = 0;
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("OptionalRequiredProgress: progress needed to complete. 0 = the template's default.");
-            ImGui::InputTextMultiline("Description", g_quest.desc, sizeof(g_quest.desc), ImVec2(-1, 48));
-            if (ImGui::CollapsingHeader("Steps", ImGuiTreeNodeFlags_DefaultOpen))
-            {
-                if (g_quest.steps.empty()) ImGui::TextDisabled("Select an object, then Details > Quest > Add as Quest Step.");
-                int remove = -1;
-                for (int i = 0; i < (int)g_quest.steps.size(); ++i)
-                {
-                    ImGui::PushID(i);
-                    ImGui::Text("%d.", i + 1);
-                    ImGui::SameLine();
-                    ImGui::SetNextItemWidth(90);
-                    const char* kinds[] = { "Reach", "Collect", "Interact" };
-                    ImGui::Combo("##kind", &g_quest.steps[i].kind, kinds, IM_ARRAYSIZE(kinds));
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("%s", g_quest.steps[i].label.c_str());
-                    ImGui::SameLine(ImGui::GetWindowWidth() - 62);
-                    if (ImGui::SmallButton("Remove")) remove = i;
-                    ImGui::PopID();
-                }
-                if (remove >= 0) g_quest.steps.erase(g_quest.steps.begin() + remove);
-            }
-            ImGui::BeginDisabled(g_quest.steps.empty());
-            ImGui::PushStyleColor(ImGuiCol_Button, kSelBlue);
-            if (ImGui::Button("Publish to Server", ImVec2(-1, 28)))
-            {
-                for (const auto& s : g_quest.steps)
-                {
-                    Command c{ CmdType::QuestAddStep }; c.str = s.objectHandle; c.str2 = std::to_string(s.kind);
-                    State().Push(c);
-                }
-                Command c{ CmdType::QuestCompile }; c.str = g_quest.name; c.str2 = g_quest.title;
-                c.str3 = g_quest.glyph; c.num = g_quest.repetition;
-                c.num2 = g_quest.validSec; c.f1 = g_quest.reqProgress; c.str4 = g_quest.desc;
-                State().Push(c);
-            }
-            ImGui::PopStyleColor();
-            ImGui::EndDisabled();
+            DrawQuestEditor(snap, sel);
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
@@ -1470,7 +1648,11 @@ void DrawStatusBar(const Snapshot& snap, ImVec2 pos, float w, float h)
     IconFolder(ImGui::GetWindowDrawList(), ImVec2(p.x + 4, p.y + 2), 14);
     ImGui::PopStyleColor();
     ImGui::SameLine();
-    ImGui::TextDisabled("|  %s  |  %d prefabs  |  RMB: look / fly", snap.status.c_str(), static_cast<int>(snap.palette.size()));
+    const std::string note = Notes().Get(8000);
+    if (!note.empty())
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "|  %s", note.c_str());
+    else
+        ImGui::TextDisabled("|  %s  |  %d prefabs  |  RMB: look / fly", snap.status.c_str(), static_cast<int>(snap.palette.size()));
     const char* hint = "INSERT hides the editor";
     ImGui::SameLine(w - ImGui::CalcTextSize(hint).x - 14);
     ImGui::TextDisabled("%s", hint);

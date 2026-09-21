@@ -1,0 +1,16 @@
+# 1) Audit every catalogue prefab on the server (private spawns, logged to HalcyonA2.log).
+# 2) Fire the light switch's own interaction/hit events on THIS client, as a player touching it would.
+log crash probe start
+enter
+wait 3
+audit 0 50
+wait 4
+audit 50 50
+wait 8
+spawn LE_BP_LightSwitch_C
+wait 6
+callfn BndEvt__LE_BP_LightSwitch_Toggleable_K2Node_ComponentBoundEvent_1_BlueprintAction__DelegateSignature
+wait 2
+callfn BndEvt__BP_LightSwitch_SM_LightSwitch_K2Node_ComponentBoundEvent_0_ComponentHitSignature__DelegateSignature
+wait 2
+log crash probe done

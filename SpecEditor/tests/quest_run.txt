@@ -1,0 +1,9 @@
+# Checkpoint quest, end to end, with a REAL player (PlayerNovBuild, F1 out of spectator) on a LOCAL
+# -SpecEditLocalTest server: the server puts two coins where that player stands and publishes a quest over
+# them. Expect in HalcyonA2.log: TESTQUEST, "reached checkpoint 1/2", "2/2", "COMPLETED by".
+log QUEST RUN start
+enter
+wait 3
+testquest SE_CheckpointTest3
+wait 20
+log QUEST RUN done

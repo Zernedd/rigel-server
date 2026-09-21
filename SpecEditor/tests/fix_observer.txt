@@ -1,0 +1,10 @@
+# OBSERVER half: never edits; reports what an ordinary client sees of the editor's floor.
+log OBSERVER start
+wait 14
+pick LE_SM_SP_Floor_2x2x025
+where
+tracedown
+wait 12
+where
+tracedown
+log OBSERVER done

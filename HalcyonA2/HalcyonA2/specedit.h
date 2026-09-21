@@ -249,6 +249,21 @@ static SDK::UClass* SeResolveEditorClass(const std::string& path)
 }
 
 // ---- operations ----------------------------------------------------------------------------
+static void SeReplicateTransform(SDK::AActor* a);   // below
+static bool SeHasComponent(SDK::AActor* a, const char* cls);   // below
+static void SeMarkProxyDirty(SDK::AActor* a);   // below
+static void SeTrack(SDK::AActor* a);   // below
+static int  SeBroadcast(const std::string& msg, SDK::UObject* pc);   // below
+
+// The player controller behind a command's context object: the controller itself (Vivox transport) or a
+// pawn (editor-pawn transport), whose APawn::Controller is at +0x2D0.
+static SDK::UObject* SeCallerPC(SDK::UObject* ctx)
+{
+    if (ctx && !ctx->IsA(SDK::APlayerController::StaticClass()))
+        ctx = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(ctx) + 0x2D0);
+    return ctx && ctx->IsA(SDK::APlayerController::StaticClass()) ? ctx : nullptr;
+}
+
 static void SeSpawn(SDK::UObject* pawn, const std::string& path, const std::string& locs, const std::string& rots)
 {
     double loc[3]{}, rot[3]{};
@@ -279,9 +294,22 @@ static void SeSpawn(SDK::UObject* pawn, const std::string& path, const std::stri
     // every client: the first live test spawned a red coin that never reached the client that asked for
     // it. SetReplicates(true) registers the actor (and only acts on a false->true change, which is why the
     // bit is no longer pre-set). Movement replication is what carries later XFORMs to clients.
-    actor->SetReplicates(true);
-    actor->SetReplicateMovement(true);
+    // Prefabs whose blueprint graph calls into a LuauBlueprintComponent (the light switch, the teleporter)
+    // depend on the sandbox's Luau runtime, which only binds for prefabs the sandbox engine spawned. Spawned
+    // here they are broken, and interacting with one crashed players' games. Refuse them BEFORE they are
+    // ever replicated: the actor exists only on the server for this instant.
+    if (SeHasComponent(actor, "LuauBlueprintComponent"))
+    {
+        HxLog("[HalcyonA2][SPECEDIT] refused %s: its behaviour runs in the sandbox Luau runtime, which a server-spawned copy never gets\n",
+              cls->GetName().c_str());
+        actor->K2_DestroyActor();
+        if (SDK::UObject* pc = SeCallerPC(pawn))
+            SeBroadcast("SE|NOTE|" + cls->GetName() + " can't be placed: it needs the game's sandbox scripts, and would crash players who touch it.", pc);
+        return;
+    }
+    SeReplicateTransform(actor);
     actor->ForceNetUpdate();
+    SeMarkProxyDirty(actor);
 
     // Let the engine build the quaternion; hand-rolled rotator maths has already cost this project a
     // misplaced level once.
@@ -291,22 +319,191 @@ static void SeSpawn(SDK::UObject* pawn, const std::string& path, const std::stri
           cls->GetName().c_str(), actor->GetName().c_str(), loc[0], loc[1], loc[2]);
 }
 
+// Make an actor's WHOLE transform reach clients that are already connected. Replicated movement carries
+// location and rotation only; scale travels in the spawn data a client gets when it first sees the actor,
+// which is why a scale edit showed up only after a rejoin. Replicating the root component adds its
+// RelativeScale3D (USceneComponent replicates its relative transform), and that reaches every client,
+// vanilla Quest included, with no client-side help. Idempotent: the engine ignores repeat calls.
+static void SeReplicateTransform(SDK::AActor* a)
+{
+    if (!a) return;
+    a->SetReplicates(true);
+    a->SetReplicateMovement(true);
+    if (a->RootComponent) a->RootComponent->SetIsReplicated(true);
+}
+
+// SE|AUDIT|<class path>: spawn the class privately (never replicated -- LE prefabs default to
+// bReplicates=false), log every component it ends up with and its collision, destroy it. Used to sort the
+// palette into prefabs that work when the server spawns them and ones whose behaviour lives in the
+// sandbox's Luau runtime, which only binds for prefabs the sandbox engine itself spawned.
+static void SeAudit(SDK::UObject* ctx, const std::string& path)
+{
+    SDK::UClass* cls = SeResolveEditorClass(path);
+    if (!cls) return;
+    SDK::FTransform xf{};
+    xf.Rotation = SDK::FQuat{ 0, 0, 0, 1 };
+    xf.Translation = SDK::FVector{ 0, 0, -200000 };
+    xf.Scale3D = SDK::FVector{ 1, 1, 1 };
+    SDK::AActor* a = SDK::UGameplayStatics::BeginDeferredActorSpawnFromClass(
+        ctx, cls, xf, SDK::ESpawnActorCollisionHandlingMethod::AlwaysSpawn, nullptr, SDK::ESpawnActorScaleMethod::MultiplyWithRoot);
+    if (!a) { HxLog("[HalcyonA2][SPECEDIT] AUDIT %s: spawn failed\n", cls->GetName().c_str()); return; }
+    SDK::UGameplayStatics::FinishSpawningActor(a, xf, SDK::ESpawnActorScaleMethod::MultiplyWithRoot);
+    auto* compCls = SDK::UObject::FindClassFast("ActorComponent");
+    auto* primCls = SDK::UObject::FindClassFast("PrimitiveComponent");
+    std::string list;
+    const int32_t n = SDK::UObject::GObjects->Num();
+    for (int32_t i = 0; i < n; ++i)
+    {
+        SDK::UObject* c = SDK::UObject::GObjects->GetByIndex(i);
+        if (!c || c->Outer != a || !compCls || !c->IsA(compCls)) continue;
+        list += " " + (c->Class ? c->Class->GetName() : std::string("?"));
+        if (primCls && c->IsA(primCls))
+        {
+            auto* pc = static_cast<SDK::UPrimitiveComponent*>(c);
+            list += "(coll=" + std::to_string((int)pc->GetCollisionEnabled()) + ")";
+        }
+    }
+    HxLog("[HalcyonA2][SPECEDIT] AUDIT %s:%s\n", cls->GetName().c_str(), list.c_str());
+    a->K2_DestroyActor();
+}
+
+static bool SeActorAlive(SDK::AActor* a);   // below
+
+// ---- collision for placed meshes ------------------------------------------------------------------
+// LE_SM_* prefabs default to OverlapAll/QueryOnly: in the stock sandbox their Luau "Physical" component
+// switches collision on, and that script only runs for prefabs the sandbox engine spawned itself. Collision
+// settings are not replicated, so the server cannot switch it on in anyone else's copy -- but it CAN spawn a
+// replicated stand-in every client builds for itself: a hidden stock StaticMeshActor with the same mesh
+// (UStaticMeshComponent::StaticMesh is a replicated property) and BlockAll collision. Vanilla Quest clients
+// then collide with the placed mesh like any other level geometry. Stand-ins are respawned (not moved) after
+// a transform edit settles, because a client may build them with Static mobility, which ignores moves.
+struct SeCollisionProxy { SDK::AActor* owner; std::vector<SDK::AActor*> proxies; ULONGLONG dirtyAt; };
+static std::vector<SeCollisionProxy> g_seProxies;
+
+// Does `a` own a component of this class (by name)? One GObjects walk; only used on spawn/edit, not per tick.
+static bool SeHasComponent(SDK::AActor* a, const char* cls)
+{
+    if (!a) return false;
+    const int32_t n = SDK::UObject::GObjects->Num();
+    for (int32_t i = 0; i < n; ++i)
+    {
+        SDK::UObject* o = SDK::UObject::GObjects->GetByIndex(i);
+        if (o && o->Outer == a && o->Class && o->Class->GetName() == cls) return true;
+    }
+    return false;
+}
+
+// Every prefab whose collision the sandbox's Luau "Physical" component would switch on (all LE_SM_* meshes,
+// DefaultMeshObject, DiscGolfHole -- from the SE|AUDIT sweep of the whole catalogue).
+static bool SeNeedsProxy(SDK::AActor* a)
+{
+    return a && a->Class && (a->Class->GetName().rfind("LE_SM_", 0) == 0 || SeHasComponent(a, "PhysicalComponent"));
+}
+
+static void SeDestroyProxies(SeCollisionProxy& e)
+{
+    for (SDK::AActor* p : e.proxies) if (SeActorAlive(p)) p->K2_DestroyActor();
+    e.proxies.clear();
+}
+
+static int SeBuildProxies(SeCollisionProxy& e)
+{
+    SeDestroyProxies(e);
+    SDK::AActor* a = e.owner;
+    if (!SeActorAlive(a)) return 0;
+    auto* smcCls = SDK::UStaticMeshComponent::StaticClass();
+    const int32_t n = SDK::UObject::GObjects->Num();
+    for (int32_t i = 0; i < n; ++i)
+    {
+        SDK::UObject* o = SDK::UObject::GObjects->GetByIndex(i);
+        if (!o || o->Outer != a || !o->IsA(smcCls)) continue;
+        auto* smc = static_cast<SDK::UStaticMeshComponent*>(o);
+        SDK::UStaticMesh* mesh = *reinterpret_cast<SDK::UStaticMesh**>(reinterpret_cast<uintptr_t>(smc) + 0x560);
+        if (!mesh || smc->GetCollisionEnabled() == SDK::ECollisionEnabled::QueryAndPhysics) continue;
+        const SDK::FTransform xf = smc->K2_GetComponentToWorld();
+        SDK::AActor* p = SDK::UGameplayStatics::BeginDeferredActorSpawnFromClass(
+            a, SDK::AStaticMeshActor::StaticClass(), xf, SDK::ESpawnActorCollisionHandlingMethod::AlwaysSpawn, nullptr,
+            SDK::ESpawnActorScaleMethod::OverrideRootScale);
+        if (!p) continue;
+        auto* sma = static_cast<SDK::AStaticMeshActor*>(p);
+        SDK::UStaticMeshComponent* c = sma->StaticMeshComponent;
+        if (c)
+        {
+            c->SetMobility(SDK::EComponentMobility::Movable);
+            c->SetStaticMesh(mesh);
+            c->SetCollisionProfileName(SDK::UKismetStringLibrary::Conv_StringToName(SDK::FString(L"BlockAll")), false);
+            c->SetIsReplicated(true);
+        }
+        SDK::UGameplayStatics::FinishSpawningActor(p, xf, SDK::ESpawnActorScaleMethod::OverrideRootScale);
+        p->SetActorHiddenInGame(true);
+        p->SetReplicates(true);
+        p->ForceNetUpdate();
+        SeTrack(p);
+        e.proxies.push_back(p);
+    }
+    return static_cast<int>(e.proxies.size());
+}
+
+// After a spawn or a transform edit: (re)build this actor's stand-ins once it has been still for 400 ms.
+static void SeMarkProxyDirty(SDK::AActor* a)
+{
+    if (!SeNeedsProxy(a)) return;
+    SeTrack(a);
+    for (auto& e : g_seProxies) if (e.owner == a) { e.dirtyAt = GetTickCount64(); return; }
+    g_seProxies.push_back({ a, {}, GetTickCount64() });
+}
+
+static void SeDropProxies(SDK::AActor* a)
+{
+    for (auto it = g_seProxies.begin(); it != g_seProxies.end(); ++it)
+        if (it->owner == a) { SeDestroyProxies(*it); g_seProxies.erase(it); return; }
+}
+
+static void SeQuestTick();   // below
+
+static void SpecEditTick()
+{
+    if (!g_specEdit) return;
+    SeQuestTick();
+    if (g_seProxies.empty()) return;
+    static ULONGLONG s_last = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (now - s_last < 100) return;
+    s_last = now;
+    for (auto it = g_seProxies.begin(); it != g_seProxies.end();)
+    {
+        if (!SeActorAlive(it->owner)) { SeDestroyProxies(*it); it = g_seProxies.erase(it); continue; }
+        if (it->dirtyAt && now - it->dirtyAt >= 400)
+        {
+            it->dirtyAt = 0;
+            const int n = SeBuildProxies(*it);
+            HxLog("[HalcyonA2][SPECEDIT] collision: %d stand-in(s) for %s\n", n, it->owner->GetName().c_str());
+        }
+        ++it;
+    }
+}
+static void SafeSpecEditTick() { __try { SpecEditTick(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+
 static void SeTransform(const std::string& name, const std::string& locs, const std::string& rots,
                         const std::string& scls)
 {
     SDK::AActor* a = SeFindEditorActor(name);
     if (!a) return;
+    SeReplicateTransform(a);
     double v[3]{};
     SDK::FHitResult hit{};   // K2_SetActorLocation writes the sweep result back through this pointer
     if (SeVec(locs, v)) a->K2_SetActorLocation(SDK::FVector{ v[0], v[1], v[2] }, false, &hit, false);
     if (SeVec(rots, v)) a->K2_SetActorRotation(SDK::FRotator{ v[0], v[1], v[2] }, false);
     if (SeVec(scls, v)) a->SetActorScale3D(SDK::FVector{ v[0], v[1], v[2] });
+    a->ForceNetUpdate();
+    SeMarkProxyDirty(a);
 }
 
 static void SeDelete(const std::string& name)
 {
     SDK::AActor* a = SeFindEditorActor(name);
     if (!a) return;
+    SeDropProxies(a);
     a->K2_DestroyActor();
     HxLog("[HalcyonA2][SPECEDIT] destroyed %s\n", name.c_str());
 }
@@ -347,6 +544,14 @@ struct SeAuthoredQuest
     int          rep = 0;
     int          validSec = 0;       // ValidLengthSeconds: how long an activation stays valid (0 = open-ended)
     float        reqProgress = 0.0f; // OptionalRequiredProgress: progress needed to complete (0 = row default)
+
+    // Checkpoint run, driven by the server (see SeQuestTick): reach each checkpoint in order.
+    std::vector<SDK::AActor*> checkpoints;
+    double       radius = 250.0;     // touch distance, cm
+    int          timeLimit = 0;      // seconds from the first checkpoint; 0 = none
+    struct Run { int next = 0; ULONGLONG startedAt = 0, doneAt = 0; };
+    std::unordered_map<int32_t, Run> runs;   // by the player's pawn GObjects index
+    std::vector<std::string> completedBy;    // player ids (org id, else pawn slot) done this session
 };
 static std::deque<SeAuthoredQuest> g_seAuthored;     // deque: element addresses stay stable
 static uint8_t  g_seTemplate[0x120];
@@ -495,7 +700,7 @@ static int SeBindStep(SDK::AActor* actor, const SeAuthoredQuest& q)
 // SE|QUEST|<questId>|<title>|<glyph>|<repetition>|<ident:kind;ident:kind...>
 static void SeQuest(const std::string& questId, const std::string& title, const std::string& glyph,
                     int repetition, const std::string& steps, int validSec = 0, float reqProgress = 0.0f,
-                    const std::string& description = std::string())
+                    const std::string& description = std::string(), double radius = 250.0, int timeLimit = 0)
 {
     // The GUID comes from the quest id ALONE, so renaming or re-publishing the same quest updates it in
     // place instead of minting a new quest and orphaning everyone's progress on the old one.
@@ -521,12 +726,18 @@ static void SeQuest(const std::string& questId, const std::string& title, const 
 
     int bound = 0, missing = 0;
     q->steps = 0;
+    q->checkpoints.clear();
+    q->runs.clear();                                     // an edited quest starts everyone afresh
+    q->completedBy.clear();
+    q->radius = (radius >= 50.0 && radius <= 5000.0) ? radius : 250.0;
+    q->timeLimit = (timeLimit > 0 && timeLimit <= 3600) ? timeLimit : 0;
     for (const auto& s : SeSplit(steps, ';', 64))
     {
         if (s.empty()) continue;
         ++q->steps;
         SDK::AActor* a = SeFindEditorActor(s.substr(0, s.find(':')));
-        if (a) bound += SeBindStep(a, *q); else ++missing;
+        if (a) { bound += SeBindStep(a, *q); SeTrack(a); q->checkpoints.push_back(a); }
+        else ++missing;
     }
 
     // Everyone gets it now, not just players who join later.
@@ -534,11 +745,285 @@ static void SeQuest(const std::string& questId, const std::string& title, const 
     for (auto* c : g_seQuestComps)
         if (SeAlive(c)) { SeSendAuthored(c); ++sent; }
 
-    HxLog("[HalcyonA2][SPECEDIT] quest %s '%s' id=%08X%08X%08X%08X: row %s, %d step(s), %d progress component(s) bound, "
-          "%d step actor(s) not found, pushed to %d player(s)\n",
+    HxLog("[HalcyonA2][SPECEDIT] quest %s '%s' id=%08X%08X%08X%08X: row %s, %d checkpoint(s) (%d not found), radius %.0fcm, "
+          "time limit %ds, pushed to %d player(s)\n",
           questId.c_str(), title.c_str(), id[0], id[1], id[2], id[3],
           built ? "built" : "WAITING FOR TEMPLATE (no player has received quests yet)",
-          q->steps, bound, missing, sent);
+          static_cast<int>(q->checkpoints.size()), missing, q->radius, q->timeLimit, sent);
+    (void)bound;
+}
+
+// ---- checkpoint runs (server-driven, so they work for every player, Quest included) -----------------
+// Five times a second: every player pawn's position (the server's working copy of its root,
+// AVRPawn.Entity@0x928 -> +0x100, the same cheap read the Deathrun finish detector uses) against each
+// published quest's next checkpoint. Reaching the last one completes the quest THROUGH THE GAME'S OWN PATH:
+// AVRPawn::Client_SetQuestCompleted(FString) -- the RPC the sandbox's SetQuestCompletedForAllPlayers uses.
+// Its client side (RVA 0x54E3740 -> 0x468B470, disassembled 2026-09-21) parses the string with FGuid::Parse
+// and calls the player's quest component with progress 0xFF, i.e. complete. Pawns are re-resolved by
+// GObjects index every pass and nothing is called on one that is not live (see DetectRunnerAtFinish's crash
+// history for why).
+static void SeQuestTick()
+{
+    if (g_seAuthored.empty()) return;
+    static ULONGLONG s_last = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (now - s_last < 200) return;
+    s_last = now;
+
+    bool any = false;
+    for (auto& q : g_seAuthored) if (!q.checkpoints.empty()) { any = true; break; }
+    if (!any) return;
+
+    static SDK::UClass* pawnCls = nullptr;
+    if (!pawnCls) pawnCls = SDK::UObject::FindClassFast("VRPawn");
+    if (!pawnCls) return;
+
+    for (const ObjIdxEntry& e : ClassObjectEntries(pawnCls))
+    {
+        SDK::UObject* o = SDK::UObject::GObjects->GetByIndex(e.idx);
+        if (!o || o != e.obj || o->IsDefaultObject()) continue;
+        const uintptr_t pw = reinterpret_cast<uintptr_t>(o);
+        if (*(reinterpret_cast<const uint8_t*>(o) + 0x65) & 0x01) continue;             // being destroyed
+        if (!*reinterpret_cast<void**>(pw + 0x2D0)) continue;                            // no controller
+        void* entity = *reinterpret_cast<void**>(pw + 0x928);
+        if (!entity) continue;
+        const double* pos = reinterpret_cast<const double*>(reinterpret_cast<uintptr_t>(entity) + 0x100);
+        if (pos[0] == 0.0 && pos[1] == 0.0 && pos[2] == 0.0) continue;                   // no pose yet
+        // Who this is, for "once per player": the org id the server recorded on the controller
+        // (AVRPlayerController+0xA30, as SeAuthorised reads it), else the pawn's slot.
+        void* ctrl = *reinterpret_cast<void**>(pw + 0x2D0);
+        std::string who = FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(ctrl) + 0xA30));
+        if (who.empty()) who = "pawn:" + std::to_string(e.idx);
+
+        for (auto& q : g_seAuthored)
+        {
+            if (q.checkpoints.empty()) continue;
+            if (std::find(q.completedBy.begin(), q.completedBy.end(), who) != q.completedBy.end()) continue;
+            auto& run = q.runs[e.idx];
+            if (run.doneAt && now - run.doneAt < 15000) continue;                        // just finished
+            if (q.timeLimit && run.next > 0 && now - run.startedAt > static_cast<ULONGLONG>(q.timeLimit) * 1000)
+            {
+                HxLog("[HalcyonA2][SPECEDIT] quest %s: %s ran out of time at checkpoint %d/%zu\n",
+                      q.questId.c_str(), o->GetName().c_str(), run.next, q.checkpoints.size());
+                run.next = 0;
+            }
+            SDK::AActor* cp = q.checkpoints[run.next];
+            if (!SeActorAlive(cp)) continue;
+            void* root = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(cp) + 0x1A8);
+            if (!root) continue;
+            const double* t = reinterpret_cast<const double*>(reinterpret_cast<uintptr_t>(root) + 0x1D0 + 0x20);
+            const double dx = pos[0] - t[0], dy = pos[1] - t[1], dz = pos[2] - t[2];
+            if (dx * dx + dy * dy + dz * dz > q.radius * q.radius) continue;
+
+            if (run.next == 0) run.startedAt = now;
+            ++run.next;
+            HxLog("[HalcyonA2][SPECEDIT] quest %s: %s reached checkpoint %d/%zu\n",
+                  q.questId.c_str(), o->GetName().c_str(), run.next, q.checkpoints.size());
+            if (run.next < static_cast<int>(q.checkpoints.size())) continue;
+
+            char guid[40];
+            snprintf(guid, sizeof(guid), "%08X%08X%08X%08X", q.id[0], q.id[1], q.id[2], q.id[3]);
+            const std::wstring w(guid, guid + 32);
+            static_cast<SDK::AVRPawn*>(o)->Client_SetQuestCompleted(SDK::FString(w.c_str()));
+            run.next = 0;
+            run.doneAt = now;
+            q.completedBy.push_back(who);
+            HxLog("[HalcyonA2][SPECEDIT] quest %s COMPLETED by %s (%.1fs) -> Client_SetQuestCompleted(%s)\n",
+                  q.questId.c_str(), o->GetName().c_str(), (now - run.startedAt) / 1000.0, guid);
+            SeBroadcast("SE|NOTE|Quest '" + std::string(q.title.begin(), q.title.end()) + "' completed by a player", nullptr);
+        }
+    }
+}
+
+// ---- local test only: read-only look at the sandbox's own object system -------------------------------
+// SE|SANDBOX. Logs USandboxEngine's prefab definitions (Blueprint class -> Settings.UniqueID, the key a
+// sandbox object node names its prefabType by), the loaded gamemode slots, how many sandbox objects exist,
+// and whether the replicated NetVar path loadedGamemodes/<SlotID>/objects resolves for each slot. Nothing
+// is written. See memory a2-22284-sandbox-object-netvars.
+static void SeSandboxProbe()
+{
+    if (!g_seLocalTest) return;
+    auto* sbCls = SDK::UObject::FindClassFast("SandboxEngine");
+    SDK::UObject* sb = nullptr;
+    const int32_t n = SDK::UObject::GObjects->Num();
+    for (int32_t i = 0; sbCls && i < n && !sb; ++i)
+    {
+        SDK::UObject* o = SDK::UObject::GObjects->GetByIndex(i);
+        if (o && !o->IsDefaultObject() && o->IsA(sbCls)) sb = o;
+    }
+    if (!sb) { HxLog("[HalcyonA2][SPECEDIT] SANDBOX: no SandboxEngine\n"); return; }
+    const uintptr_t b = reinterpret_cast<uintptr_t>(sb);
+    const int raw = *reinterpret_cast<int32_t*>(b + 0xF8 + 8);
+    const int types = *reinterpret_cast<int32_t*>(b + 0x108 + 8);           // TMap: TSet elements Num (approx)
+    const int lgms = *reinterpret_cast<int32_t*>(b + 0x180 + 8);
+    const int objs = *reinterpret_cast<int32_t*>(b + 0x2A0 + 8);
+    HxLog("[HalcyonA2][SPECEDIT] SANDBOX: RawPrefabs=%d prefabTypes~%d loadedGamemodes=%d objectMap~%d IsAuthority=%d\n",
+          raw, types, lgms, objs, *reinterpret_cast<uint8_t*>(b + 0x300));
+    SDK::UObject** rp = *reinterpret_cast<SDK::UObject***>(b + 0xF8);
+    for (int i = 0; rp && i < raw && i < 400; ++i)
+    {
+        SDK::UObject* def = rp[i];
+        if (!def) continue;
+        SDK::UObject* bp = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(def) + 0x30);
+        SDK::UObject* st = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(def) + 0x38);
+        const std::string uid = st ? reinterpret_cast<SDK::FName*>(reinterpret_cast<uintptr_t>(st) + 0xF0)->ToString() : "-";
+        const std::string bpn = bp ? bp->GetName() : "-";
+        if (bpn.rfind("LE_", 0) == 0 || i < 5)
+            HxLog("[HalcyonA2][SPECEDIT] SANDBOX   prefab %-40s UniqueID=%s\n", bpn.c_str(), uid.c_str());
+    }
+    SDK::UObject** lg = *reinterpret_cast<SDK::UObject***>(b + 0x180);
+    void* root = NvWorldRoot();
+    for (int i = 0; lg && i < lgms && i < 64; ++i)
+    {
+        SDK::UObject* l = lg[i];
+        if (!l) continue;
+        SDK::FString slot = static_cast<SDK::ULoadedGameMode*>(l)->GetSlotID();
+        const std::string slotA = slot.ToString();
+        int found = -9;
+        if (root)
+        {
+            const uint64_t segs[3] = { NvNameBits(NvName("loadedGamemodes")), NvNameBits(NvName(slotA)), NvNameBits(NvName("objects")) };
+            NvWalk w{}; void* parent = nullptr; int failAt = -1;
+            found = NvWorldWalk(root, segs, 3, &w, &parent, &failAt) ? 1 : -failAt - 1;
+            NvWalkRelease(&w);
+        }
+        HxLog("[HalcyonA2][SPECEDIT] SANDBOX   gamemode[%d] %s slot='%s' objectsPath=%s\n", i, l->GetName().c_str(), slotA.c_str(),
+              found == 1 ? "FOUND" : found == -9 ? "no world root" : ("missing at segment " + std::to_string(-found - 1)).c_str());
+    }
+}
+
+// ---- local test only: PROTOTYPE -- place an object through the sandbox's own object system -------------
+// SE|SBADD|<prefab UniqueID>|x,y,z. Static RE (memory a2-22284-sandbox-object-netvars), untested before this:
+// a sandbox object is a node in the replicated NetVar tree under <loaded gamemode>/objects; every machine's
+// sandbox spawns its own actor from it (Luau bound, NetworkGUID set) -- which is what would carry text and
+// Luau behaviour to vanilla clients. Component-less object first: prove the spawn chain.
+namespace SeSb {
+    constexpr uintptr_t DescInit = 0x46BEDA0, NodeBuild = 0x4716FE0, NodeFinish = 0x46BC8C0, AddChild = 0x463C090,
+                        Malloc = 0x5361530, FindChild = 0x463FE20;
+}
+
+static int SbObjectMapCount(SDK::UObject* sb)
+{
+    return sb ? *reinterpret_cast<int32_t*>(reinterpret_cast<uintptr_t>(sb) + 0x2A0 + 8) : -1;
+}
+
+// POD-only core (holds the SEH frame). Returns a step number reached; negative = fault at that step.
+static int SbAddCore(void* lgmHandle, uint64_t objectsName, uint8_t* desc, uint64_t idxName)
+{
+    int step = 0;
+    uint8_t iter[0x100] = {};
+    __try
+    {
+        const uintptr_t base = GetBase();
+        step = 1;
+        reinterpret_cast<void*(__fastcall*)(void*, uint8_t*, uint64_t, char)>(base + SeSb::FindChild)(lgmHandle, iter, objectsName, 0);
+        if (!iter[0x48]) return -100;                                   // no "objects" under this gamemode
+        step = 2;
+        void* node = reinterpret_cast<void*(__fastcall*)(size_t)>(base + SeSb::Malloc)(632);
+        if (!node) return -101;
+        memset(node, 0, 632);
+        step = 3;
+        reinterpret_cast<void(__fastcall*)(void*, uint64_t*, uint8_t*)>(base + SeSb::NodeBuild)(node, &idxName, desc);
+        step = 4;
+        reinterpret_cast<void(__fastcall*)(void*)>(base + SeSb::NodeFinish)(node);
+        step = 5;
+        void* nodeRef = node;
+        reinterpret_cast<void(__fastcall*)(uint8_t*, void**)>(base + SeSb::AddChild)(iter, &nodeRef);
+        step = 6;
+        NvReleaseIter(base, iter);
+        return step;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return -step; }
+}
+
+static void SeSandboxAdd(const std::string& uniqueId, const std::string& locs)
+{
+    if (!g_seLocalTest) return;
+    double loc[3]{};
+    if (!SeVec(locs, loc)) return;
+    auto* sbCls = SDK::UObject::FindClassFast("SandboxEngine");
+    auto* pcCls = SDK::UObject::FindClassFast("PrefabComponent");
+    SDK::UObject* sb = nullptr; SDK::UObject* lgm = nullptr;
+    const int32_t n = SDK::UObject::GObjects->Num();
+    for (int32_t i = 0; i < n && (!sb || !lgm); ++i)
+    {
+        SDK::UObject* o = SDK::UObject::GObjects->GetByIndex(i);
+        if (!o || o->IsDefaultObject()) continue;
+        if (!sb && sbCls && o->IsA(sbCls)) sb = o;
+        if (!lgm && pcCls && o->IsA(pcCls))
+            lgm = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(o) + 0x440);   // UPrefabComponent::GameMode
+    }
+    if (!sb || !lgm) { HxLog("[HalcyonA2][SPECEDIT] SBADD: sandbox=%p gamemode=%p -- nothing to add to\n", sb, lgm); return; }
+    SDK::AActor* slot = *reinterpret_cast<SDK::AActor**>(reinterpret_cast<uintptr_t>(lgm) + 0x320);
+    const std::string slotId = slot ? FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(slot) + 0x390)) : "?";
+
+    // Slot-relative transform (object positions are stored relative to the ModuleSlot's root).
+    SDK::FVector rel{ loc[0], loc[1], loc[2] };
+    if (slot) rel = SDK::UKismetMathLibrary::InverseTransformLocation(slot->GetTransform(), rel);
+
+    static const std::wstring kIdxPrefix = L"se_";
+    wchar_t idxw[64];
+    swprintf_s(idxw, L"se_%llu", static_cast<unsigned long long>(GetTickCount64()));
+    alignas(16) static uint8_t desc[0x400];
+    memset(desc, 0, sizeof(desc));
+    reinterpret_cast<void(__fastcall*)(uint8_t*)>(GetBase() + SeSb::DescInit)(desc);
+    const SDK::FName type = NvName(uniqueId);
+    memcpy(desc + 0, &type, sizeof(type));
+    SDK::FString idx = SDK::UKismetStringLibrary::Concat_StrStr(SDK::FString(idxw), SDK::FString(L""));
+    SDK::FString name = SDK::UKismetStringLibrary::Concat_StrStr(SDK::FString(idxw), SDK::FString(L""));
+    memcpy(desc + 16, &idx, sizeof(idx));
+    memcpy(desc + 32, &name, sizeof(name));
+    const double pos[3] = { rel.X, rel.Y, rel.Z }, rot[3] = { 0, 0, 0 }, scl[3] = { 1, 1, 1 };
+    memcpy(desc + 48, pos, sizeof(pos));
+    memcpy(desc + 72, rot, sizeof(rot));
+    memcpy(desc + 96, scl, sizeof(scl));
+    desc[120] = 0;                                                        // serverOnly = false
+
+    const int before = SbObjectMapCount(sb);
+    const std::string idxA(idxw, idxw + wcslen(idxw));
+    const int r = SbAddCore(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(lgm) + 0x218),
+                            NvNameBits(NvName("objects")), desc, NvNameBits(NvName(idxA)));
+    if (r == 6 && slot) static_cast<SDK::AModuleSlot*>(slot)->PushNetVars();
+    HxLog("[HalcyonA2][SPECEDIT] SBADD %s idx=%s slot='%s' at (%.0f,%.0f,%.0f) rel (%.0f,%.0f,%.0f): result %d, objectMap %d -> %d\n",
+          uniqueId.c_str(), idxA.c_str(), slotId.c_str(), loc[0], loc[1], loc[2], rel.X, rel.Y, rel.Z, r, before, SbObjectMapCount(sb));
+}
+
+// ---- local test only: a checkpoint quest right where a real player stands --------------------------
+// SE|TESTQUEST|<questId>. Only with -SpecEditLocalTest. The editor client cannot see a distant player's
+// pawn (net relevancy culls it), so the server, which sees everyone, places two red coins at the first
+// real player's position and publishes a checkpoint quest over them -- exercising SeQuestTick end to end.
+static void SeTestQuestAtPlayer(SDK::UObject* ctx, const std::string& questId)
+{
+    if (!g_seLocalTest) return;
+    static SDK::UClass* pawnCls = nullptr;
+    if (!pawnCls) pawnCls = SDK::UObject::FindClassFast("VRPawn");
+    const double* pos = nullptr;
+    for (const ObjIdxEntry& e : ClassObjectEntries(pawnCls))
+    {
+        SDK::UObject* o = SDK::UObject::GObjects->GetByIndex(e.idx);
+        if (!o || o != e.obj || o->IsDefaultObject()) continue;
+        const uintptr_t pw = reinterpret_cast<uintptr_t>(o);
+        if (!*reinterpret_cast<void**>(pw + 0x2D0)) continue;
+        void* entity = *reinterpret_cast<void**>(pw + 0x928);
+        if (!entity) continue;
+        const double* p3 = reinterpret_cast<const double*>(reinterpret_cast<uintptr_t>(entity) + 0x100);
+        if (p3[0] == 0.0 && p3[1] == 0.0 && p3[2] == 0.0) continue;
+        pos = p3;
+        HxLog("[HalcyonA2][SPECEDIT] TESTQUEST: player %s at (%.0f,%.0f,%.0f)\n", o->GetName().c_str(), p3[0], p3[1], p3[2]);
+        break;
+    }
+    if (!pos) { HxLog("[HalcyonA2][SPECEDIT] TESTQUEST: no real player pawn with a pose\n"); return; }
+    const std::string path = "/Game/A2/Progression/TimedQuest/LE_BP_RedCoin.LE_BP_RedCoin_C";
+    std::string steps;
+    for (int i = 0; i < 2; ++i)
+    {
+        char loc[96];
+        snprintf(loc, sizeof(loc), "%.1f,%.1f,%.1f", pos[0] + i * 80.0, pos[1], pos[2]);
+        SeSpawn(ctx, path, loc, "0,0,0");
+        if (!steps.empty()) steps += ";";
+        steps += std::string("LE_BP_RedCoin_C@") + loc + ":0";
+    }
+    SeQuest(questId, "Checkpoint Test", "PKRClimb5", 0, steps, 0, 0.0f, "Local test quest", 500.0, 0);
 }
 
 // ---- property edits (the Details panel) ------------------------------------------------------
@@ -555,14 +1040,19 @@ static void SeQuest(const std::string& questId, const std::string& title, const 
 struct SeEdit { SDK::AActor* actor; std::string path, value; };
 static std::vector<SeEdit> g_seEdits;
 
+// Liveness by the object's GObjects slot, never by dereferencing a pointer that may be stale and never by
+// walking GObjects (a full walk costs ~50 ms on the VPS; the collision tick asks this 10x a second per
+// placed mesh -- see the [PROF] perf notes). The slot index is recorded when we first see the actor (it is
+// alive then); afterwards a destroyed or garbage-collected actor's slot no longer holds the same pointer.
+static std::unordered_map<SDK::AActor*, int32_t> g_seIdx;
+static void SeTrack(SDK::AActor* a) { if (a) g_seIdx[a] = a->Index; }
 static bool SeActorAlive(SDK::AActor* a)
 {
     if (!a) return false;
-    const int32_t n = SDK::UObject::GObjects->Num();
-    for (int32_t i = 0; i < n; ++i)
-        if (SDK::UObject::GObjects->GetByIndex(i) == a)
-            return !(*(reinterpret_cast<const uint8_t*>(a) + 0x65) & 0x01);
-    return false;
+    const auto it = g_seIdx.find(a);
+    if (it == g_seIdx.end()) return false;
+    if (SDK::UObject::GObjects->GetByIndex(it->second) != a) { g_seIdx.erase(it); return false; }
+    return !(*(reinterpret_cast<const uint8_t*>(a) + 0x65) & 0x01);   // bActorIsBeingDestroyed
 }
 
 // To one controller, or (pc == nullptr) to every live one. Returns how many it went to.
@@ -607,6 +1097,7 @@ static void SeSetProp(const std::string& ident, const std::string& path, const s
     // Remember it (an editor who enters later gets it replayed) and tell every client now.
     auto it = std::find_if(g_seEdits.begin(), g_seEdits.end(),
                            [&](const SeEdit& e) { return e.actor == a && e.path == path; });
+    SeTrack(a);
     if (it != g_seEdits.end()) it->value = value; else g_seEdits.push_back({ a, path, value });
     const int n = SeBroadcast("SE|PROP|" + ident + "|" + path + "|" + value, nullptr);
     HxLog("[HalcyonA2][SPECEDIT] broadcast %s to %d client(s)\n", path.c_str(), n);
@@ -651,6 +1142,13 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
     else if (op == "XFORM"  && p.size() >= 6) SeTransform(p[2], p[3], p[4], p[5]);
     else if (op == "DELETE" && p.size() >= 3) SeDelete(p[2]);
     else if (op == "PROP"   && p.size() >= 5) SeSetProp(p[2], p[3], p[4]);
+    else if (op == "AUDIT"  && p.size() >= 3) SeAudit(pawn, p[2]);
+    else if (op == "TESTQUEST" && p.size() >= 3) SeTestQuestAtPlayer(pawn, p[2]);
+    else if (op == "SANDBOX") SeSandboxProbe();
+    else if (op == "SBADD"  && p.size() >= 4) SeSandboxAdd(p[2], p[3]);
+    else if (op == "QUEST"  && p.size() >= 12)
+        SeQuest(p[2], p[3], p[4], atoi(p[5].c_str()), p[6], atoi(p[7].c_str()), static_cast<float>(atof(p[8].c_str())), p[9],
+                atof(p[10].c_str()), atoi(p[11].c_str()));
     else if (op == "QUEST"  && p.size() >= 10)
         SeQuest(p[2], p[3], p[4], atoi(p[5].c_str()), p[6], atoi(p[7].c_str()), static_cast<float>(atof(p[8].c_str())), p[9]);
     else if (op == "QUEST"  && p.size() >= 7) SeQuest(p[2], p[3], p[4], atoi(p[5].c_str()), p[6]);
@@ -661,10 +1159,7 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
         if (op == "ENTER")
         {
             // The caller's controller: the context is the controller itself (Vivox path) or a pawn.
-            SDK::UObject* pc = pawn;
-            if (pc && !pc->IsA(SDK::APlayerController::StaticClass()))
-                pc = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(pc) + 0x2D0);   // APawn::Controller
-            if (pc && pc->IsA(SDK::APlayerController::StaticClass())) SeReplayEdits(pc);
+            if (SDK::UObject* pc = SeCallerPC(pawn)) SeReplayEdits(pc);
         }
     }
     else HxLog("[HalcyonA2][SPECEDIT] unknown command\n");

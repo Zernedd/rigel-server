@@ -1,0 +1,19 @@
+# Probe for the reported bugs: light switch props (crash / no effect), collision on spawned vs
+# station-placed items, and the classes' functions.
+log probe start
+enter
+wait 3
+pick LE_SM_CubeWedge
+comps
+pick LE_BP_HandHold_C
+comps
+spawn LE_BP_LightSwitch_C
+wait 6
+dump
+comps
+funcs
+spawn LE_SM_CubeWedge_1m
+wait 6
+comps
+funcs
+log probe done

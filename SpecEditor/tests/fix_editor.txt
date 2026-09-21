@@ -1,0 +1,17 @@
+# EDITOR half of the two-client fix test (pair with fix_observer.txt).
+log EDITOR fix test start
+enter
+wait 3
+spawn LE_SM_SP_Floor_2x2x025_A_01_C
+wait 8
+tracedown
+scale 2 2 1
+wait 6
+where
+tracedown
+spawn LE_BP_LightSwitch_C
+wait 6
+expect 0
+fnaddr VRPawn Client_SetQuestCompleted
+fnaddr VRPawn SetQuestCompletedFromLocalClient
+log EDITOR fix test done

@@ -1,0 +1,6 @@
+log SB start
+enter
+wait 3
+sandbox
+wait 4
+log SB done
