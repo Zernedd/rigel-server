@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
-import { api, type Ban, type Role, type Member, type User, type Station, type Deployment, type StationEvent, type EosSession } from "../../../lib/api";
+import { api, type Ban, type Role, type Member, type User, type Station, type Deployment, type StationEvent, type EosSession, type Whitelist } from "../../../lib/api";
 import { fmt, ago } from "../../../lib/utils";
 import {
   ChevronLeft, Plus, Trash2, X, Shield,
@@ -935,58 +935,63 @@ function SessionsTab({ stationId }: { stationId: string }) {
 }
 
 // ── Whitelist tab ─────────────────────────────────────────────────────────────
-// Stored as station config "acl.whitelist" (comma-separated usernames). Empty = visible to everyone,
-// so a station only becomes private once a name is actually added. The EOS gateway hides a whitelisted
-// station's sessions from anyone not on the list.
-
-const WHITELIST_KEY = "acl.whitelist";
+// Which accounts may SEE this station in the EOS browser. Still stored in the station config under
+// "acl.whitelist", but driven through the dedicated /whitelist endpoints rather than the generic config
+// API: those return EVERY known account for the picker (/api/users returns only the 50 most recent, so
+// anyone who had not logged in lately was simply missing from the dropdown), and they write the list
+// explicitly instead of merging a comma-separated string that one stray comma can resplit.
+//
+// An EMPTY list is the default and means visible to everyone — it does NOT mean "nobody". The UI says
+// so in as many words, because an allowlist that reads as empty-means-locked is how a station gets
+// hidden from every player by accident.
 
 function WhitelistTab({ stationId }: { stationId: string }) {
-  const [names, setNames] = useState<string[] | null>(null);
-  const [users, setUsers] = useState<User[]>([]);
-  const [err, setErr]     = useState<string | null>(null);
+  const [wl, setWl]         = useState<Whitelist | null>(null);
+  const [err, setErr]       = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
-  const [selUser, setSelUser] = useState("");
-  const [manual, setManual]   = useState("");
-  const [saving, setSaving]   = useState(false);
+  const [search, setSearch] = useState("");
+  const [picked, setPicked] = useState<string[]>([]);
+  const [manual, setManual] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [confirmPublic, setConfirmPublic] = useState(false);
 
   const load = useCallback(() => {
-    api.stationConfig(stationId)
-      .then(c => { setNames(parseList(c[WHITELIST_KEY] ?? "")); setErr(null); })
+    api.stationWhitelist(stationId)
+      .then(w => { setWl(w); setErr(null); })
       .catch(e => setErr(e.message));
-    api.users().then(setUsers).catch(() => {});
   }, [stationId]);
 
   useEffect(() => { load(); }, [load]);
 
-  function parseList(v: string): string[] {
-    return v.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
-  }
+  const names = useMemo(() => wl?.entries.map(e => e.username) ?? [], [wl]);
 
   async function persist(next: string[]) {
     setSaving(true);
     setErr(null);
     try {
-      if (next.length === 0) await api.deleteStationConfigKey(stationId, WHITELIST_KEY);
-      else await api.patchStationConfig(stationId, { [WHITELIST_KEY]: next.join(", ") });
-      setNames(next);
-      setAdding(false); setSelUser(""); setManual("");
+      await api.setStationWhitelist(stationId, next);
+      load();                                   // re-read so `known` is recomputed server-side
+      setAdding(false); setPicked([]); setManual(""); setSearch("");
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : "Save failed");
     } finally { setSaving(false); }
   }
 
-  function add() {
-    const who = (selUser || manual).trim();
-    if (!who || !names) return;
-    if (names.some(n => n.toLowerCase() === who.toLowerCase())) { setAdding(false); return; }
-    persist([...names, who]);
+  function addPicked() {
+    const extra = manual.trim() ? [manual.trim()] : [];
+    const merged = [...names];
+    for (const n of [...picked, ...extra])
+      if (!merged.some(m => m.toLowerCase() === n.toLowerCase())) merged.push(n);
+    if (merged.length === names.length) { setAdding(false); return; }
+    persist(merged);
   }
 
-  function remove(name: string) {
-    if (!names) return;
-    persist(names.filter(n => n !== name));
-  }
+  function remove(name: string) { persist(names.filter(n => n !== name)); }
+
+  // Accounts not already on the list, narrowed by the search box.
+  const candidates = (wl?.accounts ?? [])
+    .filter(a => !names.some(n => n.toLowerCase() === a.username.toLowerCase()))
+    .filter(a => !search.trim() || a.username.toLowerCase().includes(search.trim().toLowerCase()));
 
   return (
     <div>
@@ -994,31 +999,74 @@ function WhitelistTab({ stationId }: { stationId: string }) {
 
       <div className="flex items-center justify-between mb-3">
         <div className="text-xs" style={{ color: "var(--muted)" }}>
-          {names === null ? "Loading…"
-            : names.length === 0
+          {wl === null ? "Loading…"
+            : !wl.enabled
               ? "No whitelist — this station is visible to everyone."
               : `Only these ${names.length} account(s) can see this station in the browser.`}
         </div>
-        <Btn onClick={() => setAdding(true)}><Plus size={12} className="inline mr-1" />Add Account</Btn>
+        <div className="flex gap-2">
+          {wl !== null && wl.enabled && (
+            <Btn variant="ghost" disabled={saving} onClick={() => setConfirmPublic(true)}>
+              Make public
+            </Btn>
+          )}
+          <Btn onClick={() => setAdding(true)}><Plus size={12} className="inline mr-1" />Add Accounts</Btn>
+        </div>
       </div>
+
+      {confirmPublic && (
+        <Modal title="Make station public?" onClose={() => setConfirmPublic(false)}>
+          <p className="text-sm mb-3" style={{ color: "var(--muted)" }}>
+            This clears the whitelist. <strong style={{ color: "var(--text)" }}>Every player</strong> will
+            be able to see this station in the browser, not just the {names.length} account(s) listed.
+          </p>
+          <div className="flex gap-2 justify-end mt-2">
+            <Btn variant="ghost" onClick={() => setConfirmPublic(false)}>Cancel</Btn>
+            <Btn variant="danger" disabled={saving}
+              onClick={() => { setConfirmPublic(false); persist([]); }}>
+              Make public
+            </Btn>
+          </div>
+        </Modal>
+      )}
 
       {adding && (
         <Modal title="Add to whitelist" onClose={() => setAdding(false)}>
-          <Field label="Account">
-            <select className={inputCls} style={inputStyle} value={selUser}
-              onChange={e => { setSelUser(e.target.value); if (e.target.value) setManual(""); }}>
-              <option value="">Select account…</option>
-              {users.map(u => <option key={u.user_id} value={u.username}>{u.username}</option>)}
-            </select>
+          <Field label={`Accounts (${wl?.accounts.length ?? 0} known)`}>
+            <input className={inputCls} style={inputStyle} value={search}
+              onChange={e => setSearch(e.target.value)} placeholder="Search username…" />
+            <div className="mt-2 rounded-md overflow-y-auto"
+              style={{ border: "1px solid var(--border)", maxHeight: 240 }}>
+              {candidates.length === 0 ? (
+                <div className="px-3 py-4 text-xs text-center" style={{ color: "var(--muted)" }}>
+                  {(wl?.accounts.length ?? 0) === 0 ? "No accounts have logged in yet" : "No matching accounts"}
+                </div>
+              ) : candidates.map(a => {
+                const on = picked.includes(a.username);
+                return (
+                  <button key={a.user_id} type="button"
+                    onClick={() => setPicked(p => on ? p.filter(x => x !== a.username) : [...p, a.username])}
+                    className="w-full flex items-center justify-between px-3 py-2 text-sm text-left"
+                    style={{ background: on ? "var(--surface2)" : "transparent", borderBottom: "1px solid var(--border)" }}>
+                    <span style={{ fontWeight: on ? 500 : 400 }}>{a.username}</span>
+                    <span className="text-xs" style={{ color: "var(--muted)" }}>
+                      {a.platform ?? "unknown"}{on ? "  ✓" : ""}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
           </Field>
           <Field label="…or type a username">
             <input className={inputCls} style={inputStyle} value={manual}
-              onChange={e => { setManual(e.target.value); if (e.target.value) setSelUser(""); }}
+              onChange={e => setManual(e.target.value)}
               placeholder="Exact in-game username" />
           </Field>
           <div className="flex gap-2 justify-end mt-2">
             <Btn variant="ghost" onClick={() => setAdding(false)}>Cancel</Btn>
-            <Btn onClick={add} disabled={saving || !(selUser || manual.trim())}>Add</Btn>
+            <Btn onClick={addPicked} disabled={saving || (picked.length === 0 && !manual.trim())}>
+              Add{picked.length > 1 ? ` ${picked.length}` : ""}
+            </Btn>
           </div>
         </Modal>
       )}
@@ -1033,31 +1081,28 @@ function WhitelistTab({ stationId }: { stationId: string }) {
             </tr>
           </thead>
           <tbody>
-            {names === null ? (
+            {wl === null ? (
               <tr><td colSpan={3} className="px-4 py-10 text-center text-sm" style={{ color: "var(--muted)" }}>Loading…</td></tr>
-            ) : names.length === 0 ? (
+            ) : wl.entries.length === 0 ? (
               <tr><td colSpan={3} className="px-4 py-10 text-center text-sm" style={{ color: "var(--muted)" }}>
                 Whitelist empty — station is public
               </td></tr>
-            ) : names.map((n, i) => {
-              const known = users.some(u => u.username?.toLowerCase() === n.toLowerCase());
-              return (
-                <tr key={n}
-                  style={{ background: i % 2 === 0 ? "var(--surface)" : "var(--surface2)", borderBottom: "1px solid var(--border)" }}>
-                  <td className="px-4 py-3 font-medium">{n}</td>
-                  <td className="px-4 py-3 text-xs" style={{ color: known ? "var(--green)" : "var(--muted)" }}>
-                    {known ? "yes" : "not seen yet"}
-                  </td>
-                  <td className="px-4 py-3 text-right">
-                    <button onClick={() => remove(n)} disabled={saving}
-                      className="text-xs px-2 py-1 rounded"
-                      style={{ color: "var(--red)", border: "1px solid var(--border)" }}>
-                      Remove
-                    </button>
-                  </td>
-                </tr>
-              );
-            })}
+            ) : wl.entries.map((e, i) => (
+              <tr key={e.username}
+                style={{ background: i % 2 === 0 ? "var(--surface)" : "var(--surface2)", borderBottom: "1px solid var(--border)" }}>
+                <td className="px-4 py-3 font-medium">{e.username}</td>
+                <td className="px-4 py-3 text-xs" style={{ color: e.known ? "var(--green)" : "var(--yellow)" }}>
+                  {e.known ? "yes" : "not seen yet — check the spelling"}
+                </td>
+                <td className="px-4 py-3 text-right">
+                  <button onClick={() => remove(e.username)} disabled={saving}
+                    className="text-xs px-2 py-1 rounded"
+                    style={{ color: "var(--red)", border: "1px solid var(--border)" }}>
+                    Remove
+                  </button>
+                </td>
+              </tr>
+            ))}
           </tbody>
         </table>
       </div>

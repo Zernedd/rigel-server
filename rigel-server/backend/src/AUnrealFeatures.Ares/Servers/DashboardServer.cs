@@ -355,6 +355,102 @@ public sealed class AresDashboardServer : AstraHttpServer, IAresDashboardServer
         return Task.FromResult<IHttpActionResult>(Results.Ok(station.Config));
     }
 
+    // ── STATION WHITELIST ────────────────────────────────────────────────────────────────────
+    // The whitelist already lives in the station Config under "acl.whitelist" as a comma-separated
+    // list of usernames, and PatchStationConfig can already write it. These two endpoints exist so the
+    // dashboard can treat it as what it actually is -- a LIST OF ACCOUNTS -- instead of making someone
+    // hand-edit a comma-separated string in a generic config box, where one stray comma silently
+    // changes who can see the station.
+    //
+    // Returned alongside the list: every known Oculus account, so the UI can offer a picker rather than
+    // relying on somebody typing a username exactly right. A username that does not match an account is
+    // kept (it may be someone who has not logged in yet) but flagged so the UI can warn.
+
+    // GET /api/stations/{station_id}/whitelist
+    [HttpGet("/api/stations/{station_id}/whitelist")]
+    public Task<IHttpActionResult> GetStationWhitelist(IHttpRequest request, IHttpResponse response, string station_id)
+    {
+        var stations = Program.Database.GetCollection<StationDbObject>(true);
+        var station = stations?.FindOne(s => s.StationId == station_id);
+        if (station == null) return Task.FromResult<IHttpActionResult>(Results.NotFound(new { error = "no such station", station_id }));
+
+        string? raw = null;
+        station.Config?.TryGetValue(StationAcl.WhitelistKey, out raw);
+        var listed = StationAcl.Parse(raw).ToList();
+
+        // Every account, not the 50 most recent that /api/users returns -- a picker that silently omits
+        // the person you are looking for is worse than no picker. Same guard as GetUsers: half-written
+        // login rows with no id or no username are unactionable here too.
+        var users = Program.Database.GetCollection<UserDataResponse>(true)?.FindAll()
+                        .Where(u => !string.IsNullOrWhiteSpace(u.UserId) && !string.IsNullOrWhiteSpace(u.Username))
+                        .Select(u => new
+                        {
+                            user_id    = u.UserId!,
+                            username   = u.Username!,
+                            platform   = u.Platform,
+                            last_login = u.LastLogin,
+                        })
+                        .OrderBy(u => u.username, StringComparer.OrdinalIgnoreCase)
+                        .ToList()
+                    ?? new();
+
+        var known = new HashSet<string>(users.Select(u => u.username), StringComparer.OrdinalIgnoreCase);
+        return Task.FromResult<IHttpActionResult>(Results.Ok(new
+        {
+            station_id,
+            // An empty list is not "nobody" -- it is the default, "visible to everyone". The UI must
+            // say so plainly, because an allowlist that reads as empty-means-locked is how you
+            // accidentally hide a station from every player.
+            enabled  = listed.Count > 0,
+            entries  = listed.Select(n => new { username = n, known = known.Contains(n) }).ToList(),
+            accounts = users,
+        }));
+    }
+
+    // PUT /api/stations/{station_id}/whitelist  body: { "usernames": ["a","b"] }
+    [HttpPut("/api/stations/{station_id}/whitelist")]
+    public Task<IHttpActionResult> PutStationWhitelist(IHttpRequest request, IHttpResponse response, string station_id)
+    {
+        WhitelistBody? body;
+        try { body = System.Text.Json.JsonSerializer.Deserialize<WhitelistBody>(request.Body); }
+        catch { body = null; }
+        if (body == null) return Task.FromResult<IHttpActionResult>(Results.BadRequest(new { error = "body must be {\"usernames\": [..]}" }));
+
+        var stations = Program.Database.GetCollection<StationDbObject>(true);
+        var station = stations?.FindOne(s => s.StationId == station_id);
+        if (station == null) return Task.FromResult<IHttpActionResult>(Results.NotFound(new { error = "no such station", station_id }));
+
+        // Normalise here rather than trusting the caller: trim, drop blanks, de-duplicate
+        // case-insensitively. A duplicate is harmless but makes the stored value confusing to read.
+        var clean = new List<string>();
+        foreach (var n in body.Usernames ?? new List<string>())
+        {
+            var t = (n ?? "").Trim();
+            if (t.Length == 0 || t.Contains(',')) continue;          // a comma would split into two entries
+            if (!clean.Any(e => string.Equals(e, t, StringComparison.OrdinalIgnoreCase))) clean.Add(t);
+        }
+
+        station.Config ??= new Dictionary<string, string>();
+        if (clean.Count == 0) station.Config.Remove(StationAcl.WhitelistKey);   // back to visible-to-everyone
+        else station.Config[StationAcl.WhitelistKey] = string.Join(", ", clean);
+        stations!.Update(station);
+
+        NetvarOverridesFile.OnStationConfigChanged(station_id);
+        StationAcl.Push(station_id);            // takes effect immediately; no restart, no redeploy
+        Console.WriteLine($"[ACL] {station_id} whitelist set to {clean.Count} account(s)");
+
+        return Task.FromResult<IHttpActionResult>(Results.Ok(new
+        {
+            success = true, station_id, enabled = clean.Count > 0, usernames = clean,
+        }));
+    }
+
+    private sealed class WhitelistBody
+    {
+        [System.Text.Json.Serialization.JsonPropertyName("usernames")]
+        public List<string>? Usernames { get; set; }
+    }
+
     // DELETE /api/stations/{station_id}/config?key=<name> -- remove one key (falls back to the default).
     [HttpDelete("/api/stations/{station_id}/config")]
     public Task<IHttpActionResult> DeleteStationConfigKey(IHttpRequest request, IHttpResponse response, string station_id)

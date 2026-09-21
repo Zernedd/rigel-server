@@ -18,6 +18,28 @@ export type User = {
   is_admin: boolean;
 };
 
+export type WhitelistEntry = {
+  username: string;
+  /** false when no account with this username has ever logged in - likely a typo. */
+  known: boolean;
+};
+
+export type WhitelistAccount = {
+  user_id: string;
+  username: string;
+  platform: string | null;
+  last_login: string;
+};
+
+export type Whitelist = {
+  station_id: string;
+  /** false means the list is empty, which is the default: the station is visible to EVERYONE. */
+  enabled: boolean;
+  entries: WhitelistEntry[];
+  /** every known account, for the picker - not just the 50 most recent. */
+  accounts: WhitelistAccount[];
+};
+
 export type Station = {
   station_id: string;
   station_name: string;
@@ -177,6 +199,16 @@ async function patch<T>(path: string, body?: unknown): Promise<T> {
   return res.json();
 }
 
+async function put<T>(path: string, body?: unknown): Promise<T> {
+  const res = await fetch(`/api/${path}`, {
+    method: "PUT",
+    headers: body ? { "Content-Type": "application/json" } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  check(res);
+  return res.json();
+}
+
 async function del<T>(path: string): Promise<T> {
   const res = await fetch(`/api/${path}`, { method: "DELETE" });
   check(res);
@@ -321,4 +353,10 @@ export const api = {
     patch<Record<string, string>>(`stations/${stationId}/config`, kv),
   deleteStationConfigKey: (stationId: string, key: string) =>
     del<{ success: boolean; key: string }>(`stations/${stationId}/config?key=${encodeURIComponent(key)}`),
+
+  // Station whitelist: which accounts may SEE the station in the browser.
+  stationWhitelist: (stationId: string) => get<Whitelist>(`stations/${stationId}/whitelist`),
+  setStationWhitelist: (stationId: string, usernames: string[]) =>
+    put<{ success: boolean; station_id: string; enabled: boolean; usernames: string[] }>(
+      `stations/${stationId}/whitelist`, { usernames }),
 };
