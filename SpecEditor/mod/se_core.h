@@ -206,6 +206,14 @@ public:
             if (dst[i].handle == objs[i].handle)
             { dst[i].location = objs[i].location; dst[i].rotation = objs[i].rotation; dst[i].scale = objs[i].scale; }
     }
+    // Per-frame camera pose: the overlay projects with it, so it must be as fresh as the frame it is
+    // drawn over (the 4 Hz publish made the gizmo and outlines trail every camera move).
+    void ApplyCamera(const Vec3& pos, const Rot& rot, float fov)
+    {
+        std::lock_guard<std::mutex> lk(m_snapMx);
+        m_snapshot.cameraPos = pos; m_snapshot.cameraRot = rot;
+        if (fov > 1.0f) m_snapshot.cameraFov = fov;
+    }
     std::vector<Command> Drain()
     {
         std::lock_guard<std::mutex> lk(m_cmdMx);

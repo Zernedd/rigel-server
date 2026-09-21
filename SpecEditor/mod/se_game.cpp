@@ -816,6 +816,31 @@ void PredictTransform(const std::string& handle, const Vec3& loc, const Rot& rot
     CallNative(a, "Actor", "SetActorScale3D", s);
 }
 
+// The render view, every frame. While the editor camera flies, use its own pose -- set this frame, so
+// exactly what is about to be drawn; otherwise the camera manager's cached POV.
+void PublishCamera()
+{
+    float fov = 0.0f;
+    Vec3 pos; Rot rot;
+    bool have = false;
+    if (g_pc)
+        if (void* pcm = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(g_pc) + 0x350))
+        {
+            const uintptr_t pov = reinterpret_cast<uintptr_t>(pcm) + 0x13A0 + 0x10;
+            const double* l = reinterpret_cast<const double*>(pov + 0x00);
+            const double* r = reinterpret_cast<const double*>(pov + 0x18);
+            pos = { l[0], l[1], l[2] }; rot = { r[0], r[1], r[2] };
+            fov = *reinterpret_cast<const float*>(pov + 0x30);
+            have = true;
+        }
+    if (Cam().active && ObjectAlive(g_cam.actor))
+    {
+        pos = { g_cam.x, g_cam.y, g_cam.z }; rot = { g_cam.pitch, g_cam.yaw, 0.0 };
+        have = true;
+    }
+    if (have) State().ApplyCamera(pos, rot, fov);
+}
+
 void RefreshTransforms()
 {
     for (SceneObject& o : g_lastObjects)
@@ -1577,17 +1602,6 @@ void __fastcall PE_Hook(void* ctx, void* fn, void* parms)
         }
     }
 
-    // Positions of known objects every frame (~60 Hz) between the 4 Hz full rebuilds.
-    {
-        static ULONGLONG s_lastXf = 0;
-        const ULONGLONG t = GetTickCount64();
-        if (t - s_lastXf >= 16 && g_uiVisible)
-        {
-            s_lastXf = t;
-            __try { RefreshTransforms(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
-        }
-    }
-
     // Drags and queued commands every frame, not at the pump's 4 Hz -- that wait was most of the lag.
     // The guard stops re-entry: both call ProcessEvent, which lands back here.
     {
@@ -1601,6 +1615,11 @@ void __fastcall PE_Hook(void* ctx, void* fn, void* parms)
             s_in = true;
             s_lastD = t;
             __try { SimDragTick(); } __except (EXCEPTION_EXECUTE_HANDLER) { g_sim.on = false; }
+            if (g_uiVisible)
+            {
+                __try { RefreshTransforms(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+                __try { PublishCamera(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            }
             static ULONGLONG s_lastPick = 0;
             if (GetTickCount64() - s_lastPick >= 16)
             {
