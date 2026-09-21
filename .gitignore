@@ -75,3 +75,16 @@ RigelRift/A2/
 RiftPublish/
 RigelRift/eosredirect/build/
 robocopy_rift.log
+
+# --- Spec Editor: tooling is tracked, builds and vendored deps are not -------
+# ThirdParty/imgui is a CLONE with its own .git (a gitlink would break the repo);
+# mod/build.ps1 documents how to fetch it. SpecEditorBuild/ is a whole game copy.
+SpecEditor/ThirdParty/
+SpecEditor/mod/build/
+SpecEditorBuild/
+
+# --- asset tooling and extraction output (re-derivable, ~2 GB) ---------------
+Output/
+FModel.exe
+HalcyonA2/tools/FModel/
+HalcyonA2/tools/retoc/
