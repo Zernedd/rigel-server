@@ -1,0 +1,39 @@
+# End-to-end Spec Editor test. Run with:
+#   A2-Win64-Shipping.exe -SpecEditConnect=127.0.0.1:7778 -SpecEditScript=<this file>
+# against a local server started with tools\server.specedit.psd1.
+#
+# Every command goes through the same queue the UI uses, so this exercises the real path:
+# client game thread -> RPC -> server -> spawn -> Iris replication -> back into this client's object list.
+# Check %TEMP%\spec_editor.log for [script] PASS/FAIL and [repl] lines; the server's HalcyonA2.log for
+# [SPECEDIT] lines.
+
+log e2e start
+enter
+wait 3
+
+# 1. SPAWN: the server spawns it replicated, so it must show up in THIS client's object list.
+#    A red coin is deliberately NOT one of the classes the station preloads, so this also proves the
+#    server's load-on-demand path (specedit.h SeResolveEditorClass).
+spawn LE_BP_RedCoin_C
+wait 6
+expect 1
+
+# 2. MOVE: addressed by class+position, not name (names are not replicated).
+move 0 0 150
+wait 4
+
+# 3. ROTATE: rotation must survive a move, and be settable on its own.
+rotate 90
+wait 4
+
+# 4. QUEST: author a one-step quest from the placed object and publish it.
+quest PKR_E2E_Test E2E Test Quest
+wait 3
+
+# 5. DELETE: it must disappear from this client too.
+delete
+wait 6
+expect 0
+
+exit
+log e2e done

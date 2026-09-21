@@ -1,0 +1,29 @@
+# End-to-end: text editing (local, server broadcast, Luau-string mirror), a render property, a gizmo drag
+# through the real LiveDrag path, and screen positions for the mouse-driven UI test.
+log full test start
+enter
+wait 3
+spawn LE_BP_Text_C
+wait 6
+expect 1
+prop TextRender.Text Hello Rigel
+wait 2
+expectprop TextRender.Text Hello Rigel
+sprop TextRender.Text From the server
+wait 3
+expectprop TextRender.Text From the server
+sprop Text.Text Mirror test
+wait 3
+expectprop Text.Text Mirror test
+expectprop TextRender.Text Mirror test
+sprop TextRender.WorldSize 60
+wait 3
+expectprop TextRender.WorldSize 60
+drag 300 0 0 1
+wait 3
+expectat 5
+drag 0 0 150 0.5
+wait 3
+expectat 5
+screenpos
+log full test done

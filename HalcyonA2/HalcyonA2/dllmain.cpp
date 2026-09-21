@@ -10908,6 +10908,11 @@ static void PublishMissingQuests(void* comp, void* realBundle)
     }
 }
 
+// Spec Editor (specedit.h, included further down): remembers each player's quest component, captures a
+// quest template, and follows up with the editor-authored quests. Only when -SpecEdit is on.
+static void SeOnQuestsSent(void* comp, void* bundle);
+static bool g_specEditOn();
+
 static __int64 __fastcall QSendSet_Hook(void* comp, void* bundle, char removing)
 {
     DumpQuestDefsOnce(bundle);
@@ -10919,6 +10924,8 @@ static __int64 __fastcall QSendSet_Hook(void* comp, void* bundle, char removing)
     // Follow the real bundle with the parkour glyph quests it is missing (unless it already has them).
     if (g_pkrQuests && !removing && bundle != reinterpret_cast<void*>(g_pkrBundle))
         PublishMissingQuests(comp, bundle);
+    if (g_specEditOn() && !removing && bundle != reinterpret_cast<void*>(g_pkrBundle))
+        SeOnQuestsSent(comp, bundle);
     return r;
 }
 
@@ -10932,6 +10939,12 @@ static __int64 __fastcall StreamThunk_Hook(__int64 a1)
     if (!a1 || *reinterpret_cast<void**>(a1 + 0x890) == nullptr) return 0;
     return StreamThunk_Orig(a1);
 }
+
+// Spec Editor, server side. Included HERE because it uses the [PKRQUESTS] publisher above it
+// (g_pubIds / g_pubCount) to get an authored quest into the bundle every client receives, plus
+// HxLog / FStringToNarrow / FindClassFast. Read the SECURITY block at the top of that file before
+// changing it: it does nothing unless -SpecEdit is passed AND the caller is in spec_editors.txt.
+#include "specedit.h"
 
 // [PORT 22284] Boot-spine gate: when true, ProcessEvent_Hook is a pure pass-through so NONE of the
 // ballsim pumps / subsystem one-shots / tickers run (they use offsets not yet runtime-verified for
@@ -12138,6 +12151,22 @@ static void ProcessEvent_Hook(SDK::UObject* Context, SDK::UFunction* Function, v
     // SafeProcessEventOrig SEH net below still stops any stray dispatch AV from killing the server.
 
     if (g_bootSpineOnly) { SafeProcessEventOrig(Context, Function, Parms); return; }
+
+    // [SPECEDIT] The Spec Editor tunnels its commands through ALevelEditorPawn::Server_AttemptLockObject,
+    // which the build already replicates and which takes a free-form FString. A string that does not
+    // begin "SE|" is a genuine lock request and falls straight through, so the stock multi-user object
+    // locking is untouched. Cheap integer compare on a cached FName index -- resolving the name here
+    // would mean a per-dispatch string build, which is exactly what must never happen in this function.
+    if (g_specEdit)
+    {
+        if (!g_seLockIdxDone) { __try { ResolveSpecEditIndex(); } __except (EXCEPTION_EXECUTE_HANDLER) { g_seLockIdxDone = true; } }
+        if (Function && Context && Parms &&
+            ((g_seLockIdx  && Function->Name.ComparisonIndex == g_seLockIdx) ||
+             (g_seVivoxIdx && Function->Name.ComparisonIndex == g_seVivoxIdx)))
+        {
+            if (SafeSpecEditDispatch(Context, Parms)) return;   // ours: swallow, the lock RPC must not run
+        }
+    }
 
     QuestRpcTrace(Context, Function);   // [2026-09-11 QRPC] (helper: this function has SEH, so no C++ temporaries here)
 
@@ -13870,22 +13899,15 @@ static void ClientInstallTeamHooks(uintptr_t base)
     HxLog("[HalcyonA2][TEAMHOOK] installed join=%d colour=%d clear=%d enable=%d (0 = ok)\n", a, b, c, e);
 }
 
+static bool PatchEntitlementExit(uintptr_t base, const char* when);   // defined just above Main
+
 static void ClientMain(uintptr_t base)
 {
     HxLog("[HalcyonA2][CLIENT] mock client mode, base=0x%llX\n", (unsigned long long)base);
 
     // Entitlement self-exit: same signature-guarded patch the server uses (this host has no Oculus
     // entitlement, so without it the client process quits ~30s after boot too).
-    {
-        static const uint8_t entSig[] = { 0x40, 0x84, 0xED, 0x75, 0x59, 0x80, 0x3D };
-        const uint8_t* ep = reinterpret_cast<const uint8_t*>(base + 0x5429424);
-        if (memcmp(ep, entSig, sizeof(entSig)) == 0)
-        {
-            WriteByte(base + 0x5429427, 0xEB);
-            HxLog("[HalcyonA2][CLIENT] entitlement self-exit patched\n");
-        }
-        else HxLog("[HalcyonA2][CLIENT] WARNING: entitlement signature mismatch - NOT patched\n");
-    }
+    PatchEntitlementExit(base, "client start");   // normally already done at load (see Main); a no-op then
 
     SDK::UWorld* world = nullptr;
     while (true)
@@ -13915,8 +13937,34 @@ static void ClientMain(uintptr_t base)
     }
 }
 
+// Entitlement self-exit: when the Oculus entitlement check fails on the host, LogA2MothershipAuthStateMachine
+// requests an engine exit ("Could not verify entitlement status ... A Shipping build would exit"). Flip the
+// jne at 0x5429427 (20996: 0x53DFCC7) to jmp -- same patch as the A2EntitlementPatch UE4SS mod.
+// Signature-guarded, and idempotent: an already-flipped byte counts as success, not as a mismatch.
+static bool PatchEntitlementExit(uintptr_t base, const char* when)
+{
+    static const uint8_t entSig[] = { 0x40, 0x84, 0xED, 0x75, 0x59, 0x80, 0x3D };
+    const uint8_t* ep = reinterpret_cast<const uint8_t*>(base + 0x5429424);
+    if (ep[3] == 0xEB && memcmp(ep, entSig, 3) == 0 && ep[4] == 0x59) return true;   // already done
+    if (memcmp(ep, entSig, sizeof(entSig)) == 0 && ep[11] == 0x02 && ep[12] == 0x72 && ep[13] == 0x25 &&
+        ep[14] == 0x83 && ep[15] == 0x7F)
+    {
+        WriteByte(base + 0x5429427, 0xEB);
+        HxLog("[HalcyonA2] entitlement self-exit patched at %s (0x5429427 jne->jmp)\n", when);
+        return true;
+    }
+    HxLog("[HalcyonA2] WARNING: entitlement patch signature mismatch @0x5429424 - NOT patched\n");
+    return false;
+}
+
 static void Main(HMODULE)
 {
+    // FIRST, before waiting on anything. It used to be applied only once a world existed, and the verdict
+    // it guards against used to arrive ~30s after boot, so that was fine -- until the host's Oculus sign-in
+    // changed and the verdict started landing right after engine init, before the patch: the process then
+    // exited during startup, every time. It is a pure code-byte flip with no dependencies, so do it now.
+    PatchEntitlementExit(GetBase(), "load");
+
     if (wcsstr(GetCommandLineW(), L"-HalcyonClient"))
     {
         wcscpy_s(g_hxLogSuffix, L"client");
@@ -14041,17 +14089,7 @@ static void Main(HMODULE)
     // requests an engine exit ("Could not verify entitlement status ... Closing by request") ~30s after boot and the
     // process dies (exit code 3, crash in the object-teardown loop). Same patch as the A2EntitlementPatch UE4SS mod:
     // flip the jne at 0x5429427 (20996: 0x53DFCC7) to jmp. Signature-guarded.
-    {
-        static const uint8_t entSig[] = { 0x40, 0x84, 0xED, 0x75, 0x59, 0x80, 0x3D };
-        const uint8_t* ep = reinterpret_cast<const uint8_t*>(base + 0x5429424);
-        if (memcmp(ep, entSig, sizeof(entSig)) == 0 && ep[11] == 0x02 && ep[12] == 0x72 && ep[13] == 0x25 && ep[14] == 0x83 && ep[15] == 0x7F)
-        {
-            WriteByte(base + 0x5429427, 0xEB);
-            printf("[HalcyonA2] entitlement self-exit patched (0x5429427 jne->jmp)\n");
-            HxLog("[HalcyonA2] entitlement self-exit patched (0x5429427 jne->jmp)\n");
-        }
-        else { printf("[HalcyonA2] WARNING: entitlement patch signature mismatch @0x5429424 - NOT patched\n"); HxLog("[HalcyonA2] WARNING: entitlement patch signature mismatch @0x5429424 - NOT patched\n"); }
-    }
+    PatchEntitlementExit(base, "server start");   // normally already done at load (see Main); a no-op then
 
     // [PORT 22284] CRASH GUARD #1: render/RHI vtable thunk sub_550F130 null-derefs on -nullrhi headless
     // (mov rcx,[rcx+0x890]; mov rax,[rcx]; jmp [rax+0x600]) — render subobject @this+0x890 is NULL, so
@@ -14249,6 +14287,20 @@ static void Main(HMODULE)
         if (wcsstr(GetCommandLineW(), L"-NoTeamClearGuard")) { g_teamClearGuard = false; HxLog("[HalcyonA2] -NoTeamClearGuard: ScrapRun team-clear suppression OFF (a death will take the runner off the team again)\n"); }
         if (wcsstr(GetCommandLineW(), L"-SeatRound")) { g_seatRound = true; HxLog("[HalcyonA2] -SeatRound: round-start team seating back ON\n"); }
         if (wcsstr(GetCommandLineW(), L"-PkrGlyphs")) { g_pkrGlyphs = true; HxLog("[HalcyonA2] -PkrGlyphs: streaming the missing parkour glyph level (server-side only -- clients do NOT get it)\n"); }
+        // Spec Editor: OFF unless asked for, and even then only for ids listed in spec_editors.txt
+        // next to the exe. With no such file nobody is authorised, so -SpecEdit alone does nothing.
+        if (wcsstr(GetCommandLineW(), L"-SpecEdit"))
+        {
+            g_specEdit = true;
+            HxLog("[HalcyonA2][SPECEDIT] -SpecEdit: editor commands ENABLED for %zu allowlisted id(s) "
+                  "(spec_editors.txt next to the exe; empty or missing = nobody)\n", SeEditors().size());
+        }
+        if (wcsstr(GetCommandLineW(), L"-SpecEditLocalTest"))
+        {
+            g_seLocalTest = true;
+            HxLog("[HalcyonA2][SPECEDIT] -SpecEditLocalTest: org-less callers ADMITTED -- LOCAL TESTING ONLY, "
+                  "never on a server real players can reach\n");
+        }
         if (wcsstr(GetCommandLineW(), L"-TeamOverlap")) { g_teamOverlap = true; HxLog("[HalcyonA2] -TeamOverlap: geometrically fire the runner team-changer overlap so ScrapRun rosters fill\n"); }
         if (wcsstr(GetCommandLineW(), L"-NoNetScale")) { g_netScale = false; HxLog("[HalcyonA2] -NoNetScale: player relevancy/rate stays maxed regardless of population\n"); }
         if (const wchar_t* a = wcsstr(GetCommandLineW(), L"-NetCrowd="))    { int v = _wtoi(a + 11); if (v >  0 && v < 200)  g_netCrowd    = v; }

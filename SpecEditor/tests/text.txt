@@ -1,0 +1,13 @@
+# Text probe: place the game's text prefab and list everything editable on it and its parts.
+log text test start
+enter
+wait 3
+spawn LE_BP_Text_C
+wait 6
+expect 1
+dump
+dump TextRender
+dump Text
+dump LuauScript
+dump Prefab
+log text test done

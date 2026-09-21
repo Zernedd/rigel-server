@@ -1,0 +1,21 @@
+# Mouse-driven UI test: the script only places the object and reports; an external driver clicks and drags.
+log ui test start
+enter
+wait 3
+spawn LE_BP_Text_C
+wait 6
+expect 1
+prop TextRender.Text UI TEST
+prop TextRender.WorldSize 80
+move 0 0 120
+wait 3
+where
+screenpos
+log READY FOR MOUSE
+wait 35
+where
+screenpos
+log READY FOR ROTATE
+wait 35
+where
+log ui test done

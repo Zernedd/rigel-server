@@ -1,0 +1,14 @@
+# Quest authoring test: place a progression button, publish a quest bound to it, and confirm the quest
+# reaches THIS client mid-session (not only on join). Check %TEMP%\spec_editor.log for a
+# "[quests] Client_SetQuests arrived: bundle 'SpecEditorQuests'" line after the publish, and the server's
+# HalcyonA2.log for "progress component(s) bound".
+
+log quest test start
+enter
+wait 3
+spawn LE_BP_ProgressionButton_C
+wait 6
+expect 1
+quest PKR_Mid_Session Mid Session Quest
+wait 8
+log quest test done

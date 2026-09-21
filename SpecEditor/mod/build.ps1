@@ -18,6 +18,7 @@ $imgui  = (Resolve-Path (Join-Path $root 'ThirdParty\imgui')).Path
 $sdk    = (Resolve-Path (Join-Path $here '..\..\HalcyonA2\HalcyonA2\gamesdk\22284')).Path
 
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+if (-not (Test-Path -LiteralPath $vswhere)) { throw "vswhere.exe not found at $vswhere" }
 $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 if (-not $vs) { throw 'No VS C++ toolset found' }
 $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
@@ -43,7 +44,17 @@ $cmds = @(
   "echo BUILD_OK"
 ) -join ' && '
 
-$log = & cmd.exe /c $cmds 2>&1
+# $ErrorActionPreference is 'Stop' for this script, and with `2>&1` PowerShell turns ANY stderr line
+# from a native command into a terminating NativeCommandError. vcvars64.bat harmlessly prints
+# "'vswhere.exe' is not recognized" on this machine and still initialises correctly (it goes on to
+# print its banner and put cl.exe on PATH) -- but that one warning was enough to kill the script at
+# this line, before a single file was compiled, while blaming vswhere. Let stderr be data here; the
+# BUILD_OK marker below is what actually decides success.
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try   { $log = & cmd.exe /c $cmds 2>&1 }
+finally { $ErrorActionPreference = $prevEap }
+
 $log | ForEach-Object { Write-Host $_ }
 if ($LASTEXITCODE -or -not ($log -match 'BUILD_OK')) { throw "build failed (exit $LASTEXITCODE)" }
 

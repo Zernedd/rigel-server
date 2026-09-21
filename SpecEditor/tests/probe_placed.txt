@@ -1,0 +1,14 @@
+# Compare a prefab the station placed itself (Luau running) with one we spawn.
+log probe start
+enter
+wait 3
+classes
+pick RedCoin
+dump
+dump RedCoinTimedQuest
+spawn LE_BP_Text_C
+wait 6
+dump
+dump Text
+dump Prefab
+log probe done

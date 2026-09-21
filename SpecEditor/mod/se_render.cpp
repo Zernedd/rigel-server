@@ -77,49 +77,189 @@ void ApplyUnrealStyle()
     s.FrameBorderSize   = 1.0f;
     s.WindowMenuButtonPosition = ImGuiDir_None;
 
+    // UE5's stock dark palette (FStyleColors): Background #151515, Panel #242424, Header #2F2F2F,
+    // Recessed #1A1A1A, Input #0F0F0F, InputOutline/Dropdown #383838, Hover #575757, Foreground #C0C0C0,
+    // Primary/Select #0070E0. Panels are #242424 with #151515 gutters between them, inputs are recessed
+    // near-black wells, and the one saturated colour is the selection blue.
+    auto hex = [](unsigned v, float a = 1.0f) {
+        return ImVec4(((v >> 16) & 0xFF) / 255.0f, ((v >> 8) & 0xFF) / 255.0f, (v & 0xFF) / 255.0f, a);
+    };
     ImVec4* c = s.Colors;
-    const ImVec4 bg0(0.055f, 0.055f, 0.055f, 1.00f);   // window
-    const ImVec4 bg1(0.086f, 0.086f, 0.086f, 1.00f);   // child / frame
-    const ImVec4 bg2(0.133f, 0.133f, 0.133f, 1.00f);   // hovered
-    const ImVec4 accent(0.157f, 0.471f, 0.784f, 1.00f);
-    const ImVec4 text(0.851f, 0.851f, 0.851f, 1.00f);
+    const ImVec4 background = hex(0x151515), panel = hex(0x242424), header = hex(0x2F2F2F);
+    const ImVec4 recessed = hex(0x1A1A1A), input = hex(0x0F0F0F), outline = hex(0x383838);
+    const ImVec4 hover = hex(0x575757), fg = hex(0xC0C0C0), primary = hex(0x0070E0);
 
-    c[ImGuiCol_Text]            = text;
-    c[ImGuiCol_TextDisabled]    = ImVec4(0.45f, 0.45f, 0.45f, 1.00f);
-    c[ImGuiCol_WindowBg]        = bg0;
-    c[ImGuiCol_ChildBg]         = bg0;
-    c[ImGuiCol_PopupBg]         = ImVec4(0.07f, 0.07f, 0.07f, 0.98f);
-    c[ImGuiCol_Border]          = ImVec4(0.02f, 0.02f, 0.02f, 1.00f);
-    c[ImGuiCol_FrameBg]         = bg1;
-    c[ImGuiCol_FrameBgHovered]  = bg2;
-    c[ImGuiCol_FrameBgActive]   = ImVec4(0.18f, 0.18f, 0.18f, 1.00f);
-    c[ImGuiCol_TitleBg]         = ImVec4(0.04f, 0.04f, 0.04f, 1.00f);
-    c[ImGuiCol_TitleBgActive]   = ImVec4(0.06f, 0.06f, 0.06f, 1.00f);
-    c[ImGuiCol_MenuBarBg]       = ImVec4(0.07f, 0.07f, 0.07f, 1.00f);
-    c[ImGuiCol_ScrollbarBg]     = bg0;
-    c[ImGuiCol_ScrollbarGrab]   = ImVec4(0.22f, 0.22f, 0.22f, 1.00f);
-    c[ImGuiCol_CheckMark]       = accent;
-    c[ImGuiCol_SliderGrab]      = accent;
-    c[ImGuiCol_SliderGrabActive]= ImVec4(0.21f, 0.55f, 0.88f, 1.00f);
-    c[ImGuiCol_Button]          = ImVec4(0.15f, 0.15f, 0.15f, 1.00f);
-    c[ImGuiCol_ButtonHovered]   = ImVec4(0.21f, 0.21f, 0.21f, 1.00f);
-    c[ImGuiCol_ButtonActive]    = accent;
-    c[ImGuiCol_Header]          = ImVec4(0.14f, 0.14f, 0.14f, 1.00f);
-    c[ImGuiCol_HeaderHovered]   = ImVec4(0.19f, 0.19f, 0.19f, 1.00f);
-    c[ImGuiCol_HeaderActive]    = accent;
-    c[ImGuiCol_Separator]       = ImVec4(0.16f, 0.16f, 0.16f, 1.00f);
-    c[ImGuiCol_Tab]             = ImVec4(0.09f, 0.09f, 0.09f, 1.00f);
-    c[ImGuiCol_TabHovered]      = ImVec4(0.16f, 0.16f, 0.16f, 1.00f);
-    c[ImGuiCol_TabSelected]     = ImVec4(0.13f, 0.13f, 0.13f, 1.00f);
-    c[ImGuiCol_TableHeaderBg]   = ImVec4(0.10f, 0.10f, 0.10f, 1.00f);
-    c[ImGuiCol_TableBorderLight]= ImVec4(0.16f, 0.16f, 0.16f, 1.00f);
-    c[ImGuiCol_TableRowBgAlt]   = ImVec4(0.075f, 0.075f, 0.075f, 1.00f);
+    c[ImGuiCol_Text]                 = fg;
+    c[ImGuiCol_TextDisabled]         = hex(0x808080);
+    c[ImGuiCol_WindowBg]             = panel;
+    c[ImGuiCol_ChildBg]              = panel;
+    c[ImGuiCol_PopupBg]              = hex(0x1A1A1A, 0.98f);
+    c[ImGuiCol_Border]               = background;
+    c[ImGuiCol_BorderShadow]         = ImVec4(0, 0, 0, 0);
+    c[ImGuiCol_FrameBg]              = input;
+    c[ImGuiCol_FrameBgHovered]       = recessed;
+    c[ImGuiCol_FrameBgActive]        = input;
+    c[ImGuiCol_TitleBg]              = background;
+    c[ImGuiCol_TitleBgActive]        = background;
+    c[ImGuiCol_TitleBgCollapsed]     = background;
+    c[ImGuiCol_MenuBarBg]            = background;
+    c[ImGuiCol_ScrollbarBg]          = panel;
+    c[ImGuiCol_ScrollbarGrab]        = outline;
+    c[ImGuiCol_ScrollbarGrabHovered] = hover;
+    c[ImGuiCol_ScrollbarGrabActive]  = hex(0x808080);
+    c[ImGuiCol_CheckMark]            = primary;
+    c[ImGuiCol_SliderGrab]           = primary;
+    c[ImGuiCol_SliderGrabActive]     = hex(0x1C8AFF);
+    c[ImGuiCol_Button]               = outline;
+    c[ImGuiCol_ButtonHovered]        = hover;
+    c[ImGuiCol_ButtonActive]         = primary;
+    c[ImGuiCol_Header]               = header;           // collapsible category bars
+    c[ImGuiCol_HeaderHovered]        = hex(0x3A3A3A);
+    c[ImGuiCol_HeaderActive]         = primary;
+    c[ImGuiCol_Separator]            = background;
+    c[ImGuiCol_SeparatorHovered]     = primary;
+    c[ImGuiCol_ResizeGrip]           = ImVec4(0, 0, 0, 0);
+    c[ImGuiCol_Tab]                  = background;       // inactive tab blends into the gutter
+    c[ImGuiCol_TabHovered]           = header;
+    c[ImGuiCol_TabSelected]          = panel;            // active tab is the panel colour, as in UE5
+    c[ImGuiCol_TabSelectedOverline]  = primary;
+    c[ImGuiCol_TabDimmed]            = background;
+    c[ImGuiCol_TabDimmedSelected]    = panel;
+    c[ImGuiCol_TableHeaderBg]        = header;
+    c[ImGuiCol_TableBorderLight]     = background;
+    c[ImGuiCol_TableBorderStrong]    = background;
+    c[ImGuiCol_TableRowBg]           = panel;
+    c[ImGuiCol_TableRowBgAlt]        = hex(0x282828);
+    c[ImGuiCol_TextSelectedBg]       = hex(0x0070E0, 0.45f);
+    c[ImGuiCol_NavCursor]            = primary;
+
+    s.WindowRounding = 0.0f;       // UE5 panels are square; only small controls are rounded
+    s.WindowBorderSize = 0.0f;
+    s.FrameBorderSize  = 0.0f;
+    s.TabRounding      = 3.0f;
+    s.TabBorderSize    = 0.0f;
+    s.TabBarOverlineSize = 2.0f;
 }
+
+// ── who owns the mouse ────────────────────────────────────────────────────────────────────────
+// A2 is a mouse-look game: it hides the cursor, clips it to the window, re-centres it every frame and
+// reads raw mouse deltas. With the overlay passing everything through, the cursor vanished the moment it
+// entered the window and the editor could not be clicked. So the editor now behaves like Unreal's own
+// viewport: while the UI is up the mouse and keyboard are the EDITOR's -- cursor visible and free --
+// and holding RIGHT mouse hands both back to the game, so RMB + drag looks and RMB + WASD flies.
+typedef BOOL(WINAPI* ClipCursor_t)(const RECT*);
+typedef BOOL(WINAPI* SetCursorPos_t)(int, int);
+typedef int(WINAPI* ShowCursor_t)(BOOL);
+typedef HCURSOR(WINAPI* SetCursor_t)(HCURSOR);
+ClipCursor_t   g_clipOrig   = nullptr;
+SetCursorPos_t g_setPosOrig = nullptr;
+ShowCursor_t   g_showOrig   = nullptr;
+SetCursor_t    g_setCurOrig = nullptr;
+
+bool EditorOwnsInput()
+{
+    // With the editor camera flying the view, the editor owns everything, right mouse included (it is the
+    // camera's look button). Otherwise holding RMB hands input to the game, as before.
+    return g_uiVisible && g_imguiReady && (Cam().active || !(GetAsyncKeyState(VK_RBUTTON) & 0x8000));
+}
+
+POINT g_lockPt{};   // where the cursor is pinned while looking
+
+void BeginLook(HWND hwnd)
+{
+    GetCursorPos(&g_lockPt);
+    SetCapture(hwnd);
+    if (g_showOrig) while (g_showOrig(FALSE) >= 0) {}
+    Cam().looking = true;
+}
+void EndLook()
+{
+    Cam().looking = false;
+    ReleaseCapture();
+    if (g_setPosOrig) g_setPosOrig(g_lockPt.x, g_lockPt.y);
+    if (g_showOrig) while (g_showOrig(TRUE) < 0) {}
+}
+
+// While the editor owns input, the game may not confine, re-centre or hide the cursor.
+BOOL WINAPI Hook_ClipCursor(const RECT* r)       { return g_clipOrig(EditorOwnsInput() ? nullptr : r); }
+BOOL WINAPI Hook_SetCursorPos(int x, int y)      { return EditorOwnsInput() ? TRUE : g_setPosOrig(x, y); }
+int  WINAPI Hook_ShowCursor(BOOL show)           { return (EditorOwnsInput() && !show) ? 0 : g_showOrig(show); }
+HCURSOR WINAPI Hook_SetCursor(HCURSOR c)
+{
+    if (EditorOwnsInput() && !c) c = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
+    return g_setCurOrig(c);
+}
+
+bool IsMouseMsg(UINT m)
+{
+    return m == WM_INPUT || (m >= WM_MOUSEFIRST && m <= WM_MOUSELAST) || m == WM_MOUSEHOVER || m == WM_MOUSELEAVE;
+}
+bool IsKeyDownMsg(UINT m) { return m == WM_KEYDOWN || m == WM_SYSKEYDOWN || m == WM_CHAR || m == WM_SYSCHAR; }
 
 LRESULT __stdcall WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
-    if (msg == WM_KEYDOWN && wp == VK_INSERT) g_uiVisible = !g_uiVisible;
-    if (g_uiVisible && g_imguiReady && ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp)) return 1;
+    if (msg == WM_KEYDOWN && wp == VK_INSERT) { g_uiVisible = !g_uiVisible; return 0; }
+    if (!g_uiVisible || !g_imguiReady)
+    {
+        if (Cam().looking) EndLook();
+        return CallWindowProc(g_wndProcOrig, hwnd, msg, wp, lp);
+    }
+
+    // Unreal-style viewport camera. RMB over the bare viewport starts looking: the cursor is hidden and
+    // pinned, and its movement becomes look deltas for the game thread, which also reads WASD/QE/Shift
+    // directly. While looking nothing reaches ImGui or the game.
+    CameraInput& cam = Cam();
+    if (cam.active)
+    {
+        if (msg == WM_RBUTTONDOWN && !ImGui::GetIO().WantCaptureMouse) { BeginLook(hwnd); return 0; }
+        if (cam.looking)
+        {
+            if (msg == WM_RBUTTONUP || msg == WM_CAPTURECHANGED || msg == WM_KILLFOCUS)
+            {
+                EndLook();
+                return msg == WM_KILLFOCUS ? CallWindowProc(g_wndProcOrig, hwnd, msg, wp, lp) : 0;
+            }
+            if (msg == WM_MOUSEMOVE)
+            {
+                POINT p;
+                GetCursorPos(&p);
+                if (p.x != g_lockPt.x || p.y != g_lockPt.y)
+                {
+                    cam.dx = cam.dx + static_cast<float>(p.x - g_lockPt.x);
+                    cam.dy = cam.dy + static_cast<float>(p.y - g_lockPt.y);
+                    if (g_setPosOrig) g_setPosOrig(g_lockPt.x, g_lockPt.y);
+                }
+                return 0;
+            }
+            if (msg == WM_MOUSEWHEEL) { cam.wheel += GET_WHEEL_DELTA_WPARAM(wp) > 0 ? 1 : -1; return 0; }
+            if (msg == WM_SETCURSOR)  { if (g_setCurOrig) g_setCurOrig(nullptr); return TRUE; }
+            if (msg == WM_INPUT)      return DefWindowProcW(hwnd, msg, wp, lp);
+            if (IsMouseMsg(msg) || IsKeyDownMsg(msg) || msg == WM_KEYUP || msg == WM_SYSKEYUP) return 0;
+        }
+    }
+
+    ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp);   // ImGui always sees input while it is up
+
+    if (!EditorOwnsInput())                              // RMB held: the game drives (look / fly)
+        return CallWindowProc(g_wndProcOrig, hwnd, msg, wp, lp);
+
+    if (msg == WM_SETCURSOR && LOWORD(lp) == HTCLIENT)
+    {
+        // Undo whatever hiding the game already did (the display counter can sit below zero), and show
+        // an arrow unless ImGui has asked for a resize or text cursor this frame.
+        if (g_showOrig) while (g_showOrig(TRUE) < 0) {}
+        if (ImGui::GetMouseCursor() == ImGuiMouseCursor_Arrow) SetCursor(LoadCursorW(nullptr, MAKEINTRESOURCEW(32512)));
+        return TRUE;
+    }
+    if (IsMouseMsg(msg))
+    {
+        if (g_clipOrig) g_clipOrig(nullptr);
+        // WM_INPUT must still be completed through DefWindowProc, or the raw-input queue backs up.
+        return msg == WM_INPUT ? DefWindowProcW(hwnd, msg, wp, lp) : 0;
+    }
+    // Keys go to the editor (W/E/R switch the gizmo, typing goes into search boxes) instead of moving
+    // the player. Key-UPs still pass, so nothing held from before RMB was released gets stuck down.
+    if (IsKeyDownMsg(msg)) return 0;
     return CallWindowProc(g_wndProcOrig, hwnd, msg, wp, lp);
 }
 
@@ -290,6 +430,23 @@ bool InstallRenderHook()
         MH_EnableHook(exec) != MH_OK) { Log("[render] ExecuteCommandLists hook failed"); return false; }
 
     Log("[render] hooks installed (Present=%p ExecuteCommandLists=%p)", present, exec);
+
+    // Cursor ownership (see EditorOwnsInput). Failing any of these only costs cursor behaviour, not the UI.
+    HMODULE u32 = GetModuleHandleW(L"user32.dll");
+    struct { const char* name; void* hook; void** orig; } cur[] = {
+        { "ClipCursor",   reinterpret_cast<void*>(&Hook_ClipCursor),   reinterpret_cast<void**>(&g_clipOrig) },
+        { "SetCursorPos", reinterpret_cast<void*>(&Hook_SetCursorPos), reinterpret_cast<void**>(&g_setPosOrig) },
+        { "ShowCursor",   reinterpret_cast<void*>(&Hook_ShowCursor),   reinterpret_cast<void**>(&g_showOrig) },
+        { "SetCursor",    reinterpret_cast<void*>(&Hook_SetCursor),    reinterpret_cast<void**>(&g_setCurOrig) },
+    };
+    int ok = 0;
+    for (auto& h : cur)
+    {
+        void* target = u32 ? reinterpret_cast<void*>(GetProcAddress(u32, h.name)) : nullptr;
+        if (target && MH_CreateHook(target, h.hook, h.orig) == MH_OK && MH_EnableHook(target) == MH_OK) ++ok;
+        else Log("[render] cursor hook %s failed", h.name);
+    }
+    Log("[render] cursor ownership hooks: %d/4 (RMB hands the mouse to the game)", ok);
     return true;
 }
 

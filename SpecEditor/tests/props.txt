@@ -1,0 +1,18 @@
+# Property editor test: place a red-coin timed quest, change its run time limit (the actor's Duration --
+# the inner Luau component's Duration is never read), locally and from the server, and check this
+# client's copy each time. Client: %TEMP%\spec_editor.log. Server: HalcyonA2.log ("[SPECEDIT] set/broadcast").
+
+log props test start
+enter
+wait 3
+spawn LE_BP_New_RedCoinTimedQuest_C
+wait 6
+expect 1
+props
+prop Duration 45
+wait 2
+expectprop Duration 45
+sprop DoubleTickSoundDuration 30
+wait 3
+expectprop DoubleTickSoundDuration 30
+log props test done
