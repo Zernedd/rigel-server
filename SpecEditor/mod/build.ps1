@@ -8,8 +8,12 @@
   with a BUILD_OK marker. Do NOT add `if errorlevel` steps to that chain - cmd folds the next command
   into the if's body and silently skips the compile, which once shipped a stale DLL that looked fine.
 .EXAMPLE
-  .\build.ps1
+  .\build.ps1          # dev build -> mod\dsound.dll
+  .\build.ps1 -Rift    # published RigelRift build -> mod\rift\dsound.dll: the editor PLUS the EOS
+                       # station-browser redirect, RiftAppId config and parkour glyph fix
+                       # (RigelRift\eosredirect) -- that is also a dsound.dll, and only one can load.
 #>
+param([switch] $Rift)
 $ErrorActionPreference = 'Stop'
 $here   = $PSScriptRoot
 $root   = Resolve-Path (Join-Path $here '..')
@@ -24,13 +28,19 @@ if (-not $vs) { throw 'No VS C++ toolset found' }
 $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
 if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
 
-$out = Join-Path $here 'build'
+$out = Join-Path $here $(if ($Rift) { 'build-rift' } else { 'build' })
 New-Item -ItemType Directory -Force -Path $out | Out-Null
+$eos  = (Resolve-Path (Join-Path $here '..\..\RigelRift\eosredirect')).Path
+$defs = if ($Rift) { '/DRIGEL_EOS /DRIGEL_EMBEDDED /DRIGEL_SHARED_PE ' } else { '' }
+$eosCl = if ($Rift) {
+  "cl /nologo /c /O2 /MT /EHsc /GS- $defs/I`"$mh\include`" /Fo:eos_dllmain.obj `"$eos\dllmain.cpp`" && " +
+  "cl /nologo /c /O2 /MT /EHsc /GS- $defs/I`"$mh\include`" /Fo:eos_glyphfix.obj `"$eos\glyphfix.cpp`""
+} else { 'echo dev build' }
 
 # The generated SDK is enormous; /bigobj and a large /Zm are both required or cl runs out of heap.
 $cl = "cl /nologo /c /O2 /MT /EHsc /GS- /std:c++20 /bigobj /Zm400 " +
       "/I`"$mh\include`" /I`"$imgui`" /I`"$imgui\backends`" /I`"$sdk`" " +
-      "/DIMGUI_DISABLE_OBSOLETE_FUNCTIONS "
+      "/DIMGUI_DISABLE_OBSOLETE_FUNCTIONS " + $defs
 
 $cmds = @(
   "call `"$vcvars`"",
@@ -39,8 +49,9 @@ $cmds = @(
   "$cl `"$here\dllmain.cpp`" `"$here\se_render.cpp`" `"$here\se_ui.cpp`" `"$here\se_game.cpp`" `"$here\se_sdk_glue.cpp`"",
   "$cl `"$sdk\SDK\Basic.cpp`" `"$sdk\SDK\CoreUObject_functions.cpp`"",
   "$cl `"$imgui\imgui.cpp`" `"$imgui\imgui_draw.cpp`" `"$imgui\imgui_tables.cpp`" `"$imgui\imgui_widgets.cpp`" `"$imgui\backends\imgui_impl_dx12.cpp`" `"$imgui\backends\imgui_impl_win32.cpp`"",
+  $eosCl,
   "cl /nologo /c /O2 /MT `"$mh\src\buffer.c`" `"$mh\src\hook.c`" `"$mh\src\trampoline.c`" `"$mh\src\hde\hde64.c`"",
-  "cl /nologo /LD /Fe:dsound.dll *.obj /link /DEF:`"$here\exports.def`" kernel32.lib user32.lib d3d12.lib dxgi.lib",
+  "cl /nologo /LD /Fe:dsound.dll *.obj /link /DEF:`"$here\exports.def`" kernel32.lib user32.lib d3d12.lib dxgi.lib psapi.lib",
   "echo BUILD_OK"
 ) -join ' && '
 
@@ -58,6 +69,11 @@ finally { $ErrorActionPreference = $prevEap }
 $log | ForEach-Object { Write-Host $_ }
 if ($LASTEXITCODE -or -not ($log -match 'BUILD_OK')) { throw "build failed (exit $LASTEXITCODE)" }
 
-Copy-Item (Join-Path $out 'dsound.dll') (Join-Path $here 'dsound.dll') -Force
-$sz = (Get-Item (Join-Path $here 'dsound.dll')).Length
-Write-Host "[spec-editor] -> $(Join-Path $here 'dsound.dll')  ($sz bytes)"
+$dest = Join-Path $here 'dsound.dll'
+if ($Rift) {
+  New-Item -ItemType Directory -Force -Path (Join-Path $here 'rift') | Out-Null
+  $dest = Join-Path $here 'rift\dsound.dll'
+}
+Copy-Item (Join-Path $out 'dsound.dll') $dest -Force
+$sz = (Get-Item $dest).Length
+Write-Host "[spec-editor] -> $dest  ($sz bytes)"

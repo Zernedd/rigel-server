@@ -372,6 +372,15 @@ DWORD WINAPI Worker(LPVOID)
 
 } // namespace
 
+#ifdef RIGEL_EMBEDDED
+// Embedded in the Spec Editor's dsound.dll (SpecEditor\mod\build.ps1 -Rift): the host owns DllMain and
+// the dsound proxy, and calls this from its DLL_PROCESS_ATTACH -- same timing as below.
+void RigelEos_Attach()
+{
+    WriteAppIdConfig();                      // BEFORE UE reads config: point RiftAppId at our own app
+    CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr);
+}
+#else
 BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_ATTACH)
@@ -383,3 +392,4 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID)
     }
     return TRUE;
 }
+#endif

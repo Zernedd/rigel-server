@@ -29,7 +29,11 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM,
 
 namespace se {
 
+#ifdef RIGEL_EOS
+bool g_uiVisible = false;   // published Rift build: hidden until INSERT, so ordinary spectators never see it
+#else
 bool g_uiVisible = true;
+#endif
 
 namespace {
 

@@ -35,7 +35,12 @@ $cmds = @(
   "echo BUILD_OK"
 ) -join ' && '
 
-$log = & cmd.exe /c $cmds 2>&1
+# With $ErrorActionPreference 'Stop', `2>&1` turns vcvars64's harmless "'vswhere.exe' is not recognized"
+# stderr line into a terminating error before anything compiles. Let stderr be data; BUILD_OK decides.
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try   { $log = & cmd.exe /c $cmds 2>&1 }
+finally { $ErrorActionPreference = $prevEap }
 $log | ForEach-Object { Write-Host $_ }
 if ($LASTEXITCODE -or -not ($log -match 'BUILD_OK')) { throw "build failed (exit $LASTEXITCODE)" }
 

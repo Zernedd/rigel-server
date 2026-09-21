@@ -1568,6 +1568,14 @@ void HandleServerMessage(const wchar_t* w)
     if (msg.rfind("SE|PROP|", 0) == 0) ApplyRemoteProp(msg);
 }
 
+#ifdef RIGEL_EOS
+}  // namespace
+}  // namespace se
+void GlyphFix_PeTick();
+namespace se {
+namespace {
+#endif
+
 void __fastcall PE_Hook(void* ctx, void* fn, void* parms)
 {
     if (fn && fn == g_setQuestsFn && parms && GetCurrentThreadId() == g_mainThread)
@@ -1587,6 +1595,9 @@ void __fastcall PE_Hook(void* ctx, void* fn, void* parms)
     // ProcessEvent also runs on loader/worker threads. Everything here touches UObjects and the camera,
     // so it only runs on the game thread -- UE's main thread, recorded in DllMain.
     if (GetCurrentThreadId() != g_mainThread) { g_peOrig(ctx, fn, parms); return; }
+#ifdef RIGEL_EOS
+    GlyphFix_PeTick();   // the Rift build's parkour glyph fix shares this hook (see glyphfix.cpp)
+#endif
 
     // The editor camera moves every frame (well, at most 240 times a second), not at the pump's 4 Hz.
     if (Cam().active)

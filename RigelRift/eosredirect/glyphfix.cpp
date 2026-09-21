@@ -647,6 +647,20 @@ void __fastcall PE_Hook(void* ctx, void* fn, void* parms)
 
 } // namespace
 
+// The gated per-call work of PE_Hook, for a host that owns the ProcessEvent hook itself (the Spec Editor
+// build, RIGEL_SHARED_PE): MinHook cannot hook one address twice, so there the host calls this instead.
+void GlyphFix_PeTick()
+{
+    if (g_enabled && GetTickCount64() >= g_nextCheck &&
+        InterlockedCompareExchange(&g_busy, 1, 0) == 0)
+    {
+        g_nextCheck = GetTickCount64() + 10000;
+        GlyphTick();
+        VerifyTick();
+        InterlockedExchange(&g_busy, 0);
+    }
+}
+
 // Called once from the worker thread, i.e. after the loader lock is released (MH_EnableHook suspends
 // threads, which is not safe under it).
 void GlyphFix_Start()
@@ -661,16 +675,25 @@ void GlyphFix_Start()
 
     if (MH_Initialize() != MH_OK && MH_Initialize() != MH_ERROR_ALREADY_INITIALIZED) return;
     void* pe = reinterpret_cast<void*>(g_base + kOffProcessEvent);
+#ifdef RIGEL_SHARED_PE
+    // The host hooks ProcessEvent and calls GlyphFix_PeTick. Our one direct call goes through the host's
+    // hook and back; g_busy keeps that from re-entering the glyph pass.
+    g_peOrig = reinterpret_cast<ProcessEvent_t>(pe);
+    if (false)
+#else
     if (MH_CreateHook(pe, reinterpret_cast<void*>(&PE_Hook), reinterpret_cast<void**>(&g_peOrig)) != MH_OK)
+#endif
     {
         GLog("ProcessEvent hook create failed - glyph fix off");
         return;
     }
+#ifndef RIGEL_SHARED_PE
     if (MH_EnableHook(pe) != MH_OK)
     {
         GLog("ProcessEvent hook enable failed - glyph fix off");
         return;
     }
+#endif
     if (g_diag)
     {
         void* gq = reinterpret_cast<void*>(g_base + kOffGlyphQuestUpd);

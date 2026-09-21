@@ -131,7 +131,9 @@ void PatchEntitlementExit()
 DWORD WINAPI Worker(LPVOID)
 {
     se::Log("=== Spec Editor starting (pid=%lu) ===", GetCurrentProcessId());
-    PatchEntitlementExit();
+#ifndef RIGEL_EOS
+    PatchEntitlementExit();   // not in the published Rift build: there entitlement passes for real (RiftAppId)
+#endif
 
     // Do NOT probe D3D12 yet. This thread starts from dsound's DllMain, i.e. at process start, and
     // building our throwaway device + swapchain then races the game's own device creation inside the GPU
@@ -168,6 +170,10 @@ DWORD WINAPI Worker(LPVOID)
 
 }  // namespace
 
+#ifdef RIGEL_EOS
+void RigelEos_Attach();   // RigelRift\eosredirect\dllmain.cpp: app-id config + EOS redirect + glyph fix
+#endif
+
 BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_ATTACH)
@@ -177,6 +183,9 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID)
         // UE is the game thread. Everything UObject in the mod is gated on it.
         se::g_mainThread = GetCurrentThreadId();
         ResolveRealDsound();
+#ifdef RIGEL_EOS
+        RigelEos_Attach();   // the published Rift build: it is ALSO the station-browser redirect
+#endif
         CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr);
     }
     return TRUE;
