@@ -2752,7 +2752,18 @@ void HandleServerMessage(const wchar_t* w)
     {
         // SE|SBDATA|<ident>|<path>\x1F<kind>\x1F<value>\x1E...
         const size_t bar = msg.find('|', 10);
-        if (bar == std::string::npos || msg.substr(10, bar - 10) != g_dataIdent) return;   // an older request
+        if (bar == std::string::npos) return;
+        const std::string ident = msg.substr(10, bar - 10);
+        if (ident != g_dataIdent)
+        {
+            // Not something we asked for: the server pushes an object's data after it rebuilds it (a script
+            // attached / removed / wired comes back as a new actor). Take it if we can match the object.
+            std::string handle;
+            for (const SceneObject& so : g_lastObjects) if (IdentFor(so.handle) == ident) { handle = so.handle; break; }
+            if (handle.empty()) return;
+            g_dataIdent = ident;
+            g_dataHandle = handle;
+        }
         g_data.clear();
         const std::string body = msg.substr(bar + 1);
         for (size_t b = 0; b < body.size();)

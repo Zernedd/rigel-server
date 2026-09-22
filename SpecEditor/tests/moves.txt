@@ -1,0 +1,38 @@
+log MV start
+enter
+wait 3
+spawnat SM_JBC_NewBridge -600 -2600 -27000 0
+wait 8
+move 0 60 0
+wait 3
+move 0 120 0
+wait 3
+move 0 180 0
+wait 3
+move 0 240 0
+wait 3
+move 0 300 0
+wait 3
+move 0 360 0
+wait 3
+spawnat SM_JBC_MiddleBridge -900 -2600 -27000 0
+wait 8
+move 0 60 0
+wait 3
+move 0 120 0
+wait 3
+move 0 180 0
+wait 3
+move 0 240 0
+wait 3
+spawnat LE_BP_LightSwitch_C -300 -2600 -27000 0
+wait 8
+luaufile LightSwitch
+wait 10
+spawnat BP_DebugCube_C 0 -2600 -27000 0
+wait 6
+spawnat BP_DebugCube_C 120 -2600 -27000 0
+wait 6
+log MV alive
+wait 6
+log MV done

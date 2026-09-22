@@ -1,0 +1,16 @@
+log NM start
+enter
+wait 3
+spawnat DefaultMeshObject -600 -2400 -27000 0
+wait 8
+move 0 60 0
+wait 4
+move 0 120 0
+wait 4
+move 0 180 0
+wait 4
+spawnat BP_DebugCube_C 300 -2400 -27000 0
+wait 6
+log NM alive
+wait 5
+log NM done

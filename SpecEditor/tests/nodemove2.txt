@@ -1,0 +1,16 @@
+log NM2 start
+enter
+wait 3
+spawnat LE_SM_JBC_NewBridge_C -600 -2400 -27000 0
+wait 8
+raw SE|NODEMOVE|LE_SM_JBC_NewBridge_C@-600.0,-2400.0,-27000.0|-600.0,-2300.0,-27000.0
+wait 6
+raw SE|NODEMOVE|LE_SM_JBC_NewBridge_C@-600.0,-2300.0,-27000.0|-600.0,-2200.0,-27000.0
+wait 6
+spawnat BP_DebugCube_C 300 -2400 -27000 0
+wait 6
+spawnat BP_DebugCube_C 420 -2400 -27000 0
+wait 6
+log NM2 alive
+wait 6
+log NM2 done

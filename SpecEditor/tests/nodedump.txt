@@ -1,0 +1,12 @@
+log ND start
+enter
+wait 3
+raw SE|LUAUDUMP|TKBGolf
+wait 3
+spawnat LE_BP_LightSwitch_C -300 -2600 -27000 0
+wait 8
+luaufile LightSwitch
+wait 10
+raw SE|LUAUDUMP|
+wait 4
+log ND done

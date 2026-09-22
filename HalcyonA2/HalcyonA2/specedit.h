@@ -275,6 +275,9 @@ static bool SbOwnedXform(const std::string& ident, const std::string& locs, cons
 static bool SbOwnedDelete(const std::string& ident);   // below
 static void SeError(SDK::UObject* caller, const std::string& title, const std::string& text);   // below
 static void SbOwnedForget(const std::string& idx);     // below
+struct SbOwned;
+static std::string SbRespawnKeep(SDK::AActor* a, const SbOwned& keep, const char* why);   // below
+static SDK::AActor* SbActorForIdx(const std::string& idx);                                  // below
 static std::string g_sbSpawnCls;   // the editor class of the sandbox spawn in flight (for SbOwned)
 static std::string g_sbSpawnPath;  // ...and the palette path it was asked for (saved levels reload by it)
 static std::vector<std::string> g_sbPendingScripts;   // custom Luau script names for the spawn in flight
@@ -1670,14 +1673,23 @@ static bool SbOwnedApply(SbOwned& o, bool remove)
         const SDK::FRotator rr = SDK::UKismetMathLibrary::InverseTransformRotation(sx, SDK::FRotator{ r3[0], r3[1], r3[2] });
         pos[0] = rl.X; pos[1] = rl.Y; pos[2] = rl.Z; r3[0] = rr.Pitch; r3[1] = rr.Yaw; r3[2] = rr.Roll;
     }
+    if (!remove)
+    {
+        // Move an object the server has no actor for (static meshes, some prefabs): take the node out and
+        // build it again at the new place, with its id, Game data, scripts and slot wiring -- the same path a
+        // script change uses. (It used to merge a copy of the node's own descriptor back into it and then free
+        // that copy, which left the node holding freed data; the server crashed later inside the netvar walk.)
+        const SbOwned keep = o;
+        const std::string idx = SbRespawnKeep(SbActorForIdx(keep.idx), keep, "move (no server actor)");
+        return !idx.empty();
+    }
     alignas(16) static uint8_t buf[0x400];
     memset(buf, 0, sizeof(buf));
     const int r = SbOwnedNodeCore(reinterpret_cast<uint8_t*>(o.lgm) + 0x218, NvNameBits(NvName("objects")),
                                   NvNameBits(NvName(o.idx)), remove, buf, pos, r3, o.scl);
-    const bool ok = remove ? r == 1 : r == 5;
+    const bool ok = r == 1;
     if (ok && slot) static_cast<SDK::AModuleSlot*>(slot)->PushNetVars();
-    HxLog("[HalcyonA2][SPECEDIT] node %s %s (no server actor): %s (%d)\n", remove ? "delete" : "move", o.idx.c_str(),
-          ok ? "ok" : "FAILED", r);
+    HxLog("[HalcyonA2][SPECEDIT] node delete %s (no server actor): %s (%d)\n", o.idx.c_str(), ok ? "ok" : "FAILED", r);
     return ok;
 }
 
@@ -2072,6 +2084,67 @@ static void SbLgmTreeCore(std::string* out)
 {
     __try { SbLgmTreeImpl(out); } __except (EXCEPTION_EXECUTE_HANDLER) { out->append("(fault)"); }
 }
+// SE|LUAUDUMP|<slot name> (local test): the first bytes of every node in that gamemode's Scripts container.
+// The game's own script nodes vs the ones we build: any field we don't set shows up as a difference, and a
+// malformed node is exactly what makes the replication walk recurse or fault.
+static void SbScriptNodesImpl(const std::string& slot, std::string* out)
+{
+    auto* cls = SDK::UObject::FindClassFast("LoadedGameMode");
+    const int32_t n = SDK::UObject::GObjects->Num();
+    for (int32_t i = 0; cls && i < n; ++i)
+    {
+        SDK::UObject* l = SDK::UObject::GObjects->GetByIndex(i);
+        if (!l || l->IsDefaultObject() || !l->IsA(cls)) continue;
+        uint8_t* root = reinterpret_cast<uint8_t*>(SbNodeOf(reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(l) + 0x218)));
+        if (!root) continue;
+        const std::string thisSlot = reinterpret_cast<SDK::FName*>(root + 48)->ToString();
+        if (!slot.empty() && thisSlot != slot) continue;
+        uint8_t* scripts = nullptr;
+        if (SbFindChildRaw(root, NvNameBits(NvName("Scripts")), &scripts) < 0) continue;
+        uint8_t** arr = *reinterpret_cast<uint8_t***>(scripts + 136);
+        const int cnt = *reinterpret_cast<int32_t*>(scripts + 144);
+        char b[400];
+        snprintf(b, sizeof(b), "slot %s: Scripts container %p, %d node(s)\n", thisSlot.c_str(), static_cast<void*>(scripts), cnt);
+        *out += b;
+        for (int k = 0; arr && k < cnt && k < 12; ++k)
+        {
+            uint8_t* nd = arr[k];
+            if (!nd) continue;
+            snprintf(b, sizeof(b), "  [%d] %s (t%d) node=%p\n     ", k, reinterpret_cast<SDK::FName*>(nd + 48)->ToString().c_str(), nd[24], static_cast<void*>(nd));
+            *out += b;
+            for (int off = 0; off < 128; ++off)
+            {
+                snprintf(b, sizeof(b), "%02X ", nd[off]);
+                *out += b;
+                if (off % 16 == 15) { snprintf(b, sizeof(b), "\n     [+%02X] ", off + 1); *out += b; }
+            }
+            *out += "\n";
+        }
+    }
+}
+static void SbScriptNodesCore(const std::string* slot, std::string* out)
+{
+    __try { SbScriptNodesImpl(*slot, out); } __except (EXCEPTION_EXECUTE_HANDLER) { out->append("(fault)\n"); }
+}
+// SE|NODEMOVE|<ident>|<x,y,z> (local test): move through the no-server-actor path on purpose.
+static void SeTestNodeMove(const std::string& ident, const std::string& locs)
+{
+    if (!g_seLocalTest) return;
+    SbOwned* o = SbOwnedFind(ident);
+    if (!o) { HxLog("[HalcyonA2][SPECEDIT] NODEMOVE: %s is not one of ours\n", ident.c_str()); return; }
+    SeVec(locs, o->loc);
+    const bool ok = SbOwnedApply(*o, false);
+    HxLog("[HalcyonA2][SPECEDIT] NODEMOVE %s -> %s: %s\n", ident.c_str(), locs.c_str(), ok ? "ok" : "FAILED");
+}
+
+static void SeLuauDump(const std::string& slot)
+{
+    if (!g_seLocalTest) return;
+    std::string out;
+    SbScriptNodesCore(&slot, &out);
+    HxLog("[HalcyonA2][SPECEDIT] LUAUDUMP %s:\n%s", slot.c_str(), out.c_str());
+}
+
 // SE|LGMDESC|<slot name> (local test): the component/script entries of every object in that gamemode.
 static void SbTreeWalk(uint8_t* n, int depth, std::string& out);   // below
 static void SbLgmDescImpl(const std::string& slot0, std::string* out)
@@ -3518,6 +3591,7 @@ static void SeLuauRemove(SDK::UObject* ctx, const std::string& ident, const std:
     HxLog("[HalcyonA2][SPECEDIT] luau %s removed from %s: %s\n", name.c_str(), keep.idx.c_str(), idx.empty() ? "FAILED" : "ok");
     if (caller) SeBroadcast(idx.empty() ? "SE|NOTE|Removing " + name + " failed - see the server log."
                                         : "SE|NOTE|Removed " + name + " (the object was rebuilt without it).", caller);
+    if (!idx.empty()) if (SDK::AActor* na = SbActorForIdx(idx)) SeSbData(ctx, SeLvIdent(na));
 }
 static void SeLuauPart(const std::string& rawName, const std::string& hex)
 {
@@ -3577,9 +3651,11 @@ static void SeLuau(SDK::UObject* ctx, const std::string& ident, const std::strin
                                       "SE|NOTE|Updating " + name + " FAILED - see the server log.", caller);
         return;
     }
-    const bool ok = SeLuauPutSource(lgm, name, src) && !SeLuauAttach(a, name, src).empty();
+    std::string newIdx;
+    const bool ok = SeLuauPutSource(lgm, name, src) && !(newIdx = SeLuauAttach(a, name, src)).empty();
     if (caller) SeBroadcast(ok ? "SE|NOTE|Script " + name + " is running on the object for everyone (it was rebuilt to pick it up)." :
                                  "SE|NOTE|Attaching " + name + " FAILED - see the server log.", caller);
+    if (ok) if (SDK::AActor* na = SbActorForIdx(newIdx)) SeSbData(ctx, SeLvIdent(na));   // fields, straight away
 }
 
 
@@ -3765,6 +3841,7 @@ static void SeLuauRef(SDK::UObject* ctx, const std::string& ident, const std::st
     HxLog("[HalcyonA2][SPECEDIT] script slot %s.%s (%s) -> %s: %s\n", sname.c_str(), slot.c_str(), type.c_str(), targetName.c_str(),
           idx.empty() ? "FAILED" : idx.c_str());
     note(idx.empty() ? "Wiring " + slot + " failed - see the server log." : slot + " -> " + targetName + " (the scripted object was rebuilt to pick it up).");
+    if (!idx.empty()) if (SDK::AActor* na = SbActorForIdx(idx)) SeSbData(ctx, SeLvIdent(na));
 }
 
 // Saved levels. What the editor builds -- sandbox objects, speed pads and coins, their Game data,
@@ -4300,6 +4377,8 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
     else if (op == "LUAUREF" && p.size() >= 7) SeLuauRef(pawn, p[2], p[3], p[4], p[5], p[6]);
     else if (op == "LGMTREE") SeLgmTree();
     else if (op == "LGMDESC" && p.size() >= 3) SeLgmDesc(p[2]);
+    else if (op == "LUAUDUMP") SeLuauDump(p.size() >= 3 ? p[2] : std::string());
+    else if (op == "NODEMOVE" && p.size() >= 4) SeTestNodeMove(p[2], p[3]);
     else if (op == "ACTORS" && p.size() >= 3) SeActorClasses(p[2]);
     else if (op == "SBDATA" && p.size() >= 3) SeSbData(pawn, p[2]);
     else if (op == "SBSET"  && p.size() >= 6) SeSbSet(pawn, p[2], p[3], p[4], p[5]);

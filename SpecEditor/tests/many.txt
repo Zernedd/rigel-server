@@ -1,0 +1,311 @@
+log MANY start
+enter
+wait 3
+spawnat BP_DebugCube_C -1200 -2600 -27000 0
+wait 1
+spawnat BP_DebugCube_C -1080 -2600 -27000 0
+wait 1
+spawnat BP_DebugCube_C -960 -2600 -27000 0
+wait 1
+spawnat BP_DebugCube_C -840 -2600 -27000 0
+wait 1
+spawnat BP_DebugCube_C -720 -2600 -27000 0
+wait 1
+spawnat BP_DebugCube_C -600 -2600 -27000 0
+wait 1
+spawnat BP_DebugCube_C -480 -2600 -27000 0
+wait 1
+spawnat BP_DebugCube_C -360 -2600 -27000 0
+wait 1
+spawnat BP_DebugCube_C -240 -2600 -27000 0
+wait 1
+spawnat BP_DebugCube_C -120 -2600 -27000 0
+wait 1
+spawnat BP_DebugCube_C 0 -2600 -27000 0
+wait 1
+spawnat BP_DebugCube_C 120 -2600 -27000 0
+wait 1
+spawnat BP_DebugCube_C 240 -2600 -27000 0
+wait 1
+spawnat BP_DebugCube_C 360 -2600 -27000 0
+wait 1
+spawnat BP_DebugCube_C 480 -2600 -27000 0
+wait 1
+spawnat BP_DebugCube_C -1200 -2480 -27000 0
+wait 1
+spawnat BP_DebugCube_C -1080 -2480 -27000 0
+wait 1
+spawnat BP_DebugCube_C -960 -2480 -27000 0
+wait 1
+spawnat BP_DebugCube_C -840 -2480 -27000 0
+wait 1
+spawnat BP_DebugCube_C -720 -2480 -27000 0
+wait 1
+spawnat BP_DebugCube_C -600 -2480 -27000 0
+wait 1
+spawnat BP_DebugCube_C -480 -2480 -27000 0
+wait 1
+spawnat BP_DebugCube_C -360 -2480 -27000 0
+wait 1
+spawnat BP_DebugCube_C -240 -2480 -27000 0
+wait 1
+spawnat BP_DebugCube_C -120 -2480 -27000 0
+wait 1
+log MANY 25 placed
+spawnat BP_DebugCube_C 0 -2480 -27000 0
+wait 1
+spawnat BP_DebugCube_C 120 -2480 -27000 0
+wait 1
+spawnat BP_DebugCube_C 240 -2480 -27000 0
+wait 1
+spawnat BP_DebugCube_C 360 -2480 -27000 0
+wait 1
+spawnat BP_DebugCube_C 480 -2480 -27000 0
+wait 1
+spawnat BP_DebugCube_C -1200 -2360 -27000 0
+wait 1
+spawnat BP_DebugCube_C -1080 -2360 -27000 0
+wait 1
+spawnat BP_DebugCube_C -960 -2360 -27000 0
+wait 1
+spawnat BP_DebugCube_C -840 -2360 -27000 0
+wait 1
+spawnat BP_DebugCube_C -720 -2360 -27000 0
+wait 1
+spawnat BP_DebugCube_C -600 -2360 -27000 0
+wait 1
+spawnat BP_DebugCube_C -480 -2360 -27000 0
+wait 1
+spawnat BP_DebugCube_C -360 -2360 -27000 0
+wait 1
+spawnat BP_DebugCube_C -240 -2360 -27000 0
+wait 1
+spawnat BP_DebugCube_C -120 -2360 -27000 0
+wait 1
+spawnat BP_DebugCube_C 0 -2360 -27000 0
+wait 1
+spawnat BP_DebugCube_C 120 -2360 -27000 0
+wait 1
+spawnat BP_DebugCube_C 240 -2360 -27000 0
+wait 1
+spawnat BP_DebugCube_C 360 -2360 -27000 0
+wait 1
+spawnat BP_DebugCube_C 480 -2360 -27000 0
+wait 1
+spawnat BP_DebugCube_C -1200 -2240 -27000 0
+wait 1
+spawnat BP_DebugCube_C -1080 -2240 -27000 0
+wait 1
+spawnat BP_DebugCube_C -960 -2240 -27000 0
+wait 1
+spawnat BP_DebugCube_C -840 -2240 -27000 0
+wait 1
+spawnat BP_DebugCube_C -720 -2240 -27000 0
+wait 1
+log MANY 50 placed
+spawnat BP_DebugCube_C -600 -2240 -27000 0
+wait 1
+spawnat BP_DebugCube_C -480 -2240 -27000 0
+wait 1
+spawnat BP_DebugCube_C -360 -2240 -27000 0
+wait 1
+spawnat BP_DebugCube_C -240 -2240 -27000 0
+wait 1
+spawnat BP_DebugCube_C -120 -2240 -27000 0
+wait 1
+spawnat BP_DebugCube_C 0 -2240 -27000 0
+wait 1
+spawnat BP_DebugCube_C 120 -2240 -27000 0
+wait 1
+spawnat BP_DebugCube_C 240 -2240 -27000 0
+wait 1
+spawnat BP_DebugCube_C 360 -2240 -27000 0
+wait 1
+spawnat BP_DebugCube_C 480 -2240 -27000 0
+wait 1
+spawnat BP_DebugCube_C -1200 -2120 -27000 0
+wait 1
+spawnat BP_DebugCube_C -1080 -2120 -27000 0
+wait 1
+spawnat BP_DebugCube_C -960 -2120 -27000 0
+wait 1
+spawnat BP_DebugCube_C -840 -2120 -27000 0
+wait 1
+spawnat BP_DebugCube_C -720 -2120 -27000 0
+wait 1
+spawnat BP_DebugCube_C -600 -2120 -27000 0
+wait 1
+spawnat BP_DebugCube_C -480 -2120 -27000 0
+wait 1
+spawnat BP_DebugCube_C -360 -2120 -27000 0
+wait 1
+spawnat BP_DebugCube_C -240 -2120 -27000 0
+wait 1
+spawnat BP_DebugCube_C -120 -2120 -27000 0
+wait 1
+spawnat BP_DebugCube_C 0 -2120 -27000 0
+wait 1
+spawnat BP_DebugCube_C 120 -2120 -27000 0
+wait 1
+spawnat BP_DebugCube_C 240 -2120 -27000 0
+wait 1
+spawnat BP_DebugCube_C 360 -2120 -27000 0
+wait 1
+spawnat BP_DebugCube_C 480 -2120 -27000 0
+wait 1
+log MANY 75 placed
+spawnat BP_DebugCube_C -1200 -2000 -27000 0
+wait 1
+spawnat BP_DebugCube_C -1080 -2000 -27000 0
+wait 1
+spawnat BP_DebugCube_C -960 -2000 -27000 0
+wait 1
+spawnat BP_DebugCube_C -840 -2000 -27000 0
+wait 1
+spawnat BP_DebugCube_C -720 -2000 -27000 0
+wait 1
+spawnat BP_DebugCube_C -600 -2000 -27000 0
+wait 1
+spawnat BP_DebugCube_C -480 -2000 -27000 0
+wait 1
+spawnat BP_DebugCube_C -360 -2000 -27000 0
+wait 1
+spawnat BP_DebugCube_C -240 -2000 -27000 0
+wait 1
+spawnat BP_DebugCube_C -120 -2000 -27000 0
+wait 1
+spawnat BP_DebugCube_C 0 -2000 -27000 0
+wait 1
+spawnat BP_DebugCube_C 120 -2000 -27000 0
+wait 1
+spawnat BP_DebugCube_C 240 -2000 -27000 0
+wait 1
+spawnat BP_DebugCube_C 360 -2000 -27000 0
+wait 1
+spawnat BP_DebugCube_C 480 -2000 -27000 0
+wait 1
+spawnat BP_DebugCube_C -1200 -1880 -27000 0
+wait 1
+spawnat BP_DebugCube_C -1080 -1880 -27000 0
+wait 1
+spawnat BP_DebugCube_C -960 -1880 -27000 0
+wait 1
+spawnat BP_DebugCube_C -840 -1880 -27000 0
+wait 1
+spawnat BP_DebugCube_C -720 -1880 -27000 0
+wait 1
+spawnat BP_DebugCube_C -600 -1880 -27000 0
+wait 1
+spawnat BP_DebugCube_C -480 -1880 -27000 0
+wait 1
+spawnat BP_DebugCube_C -360 -1880 -27000 0
+wait 1
+spawnat BP_DebugCube_C -240 -1880 -27000 0
+wait 1
+spawnat BP_DebugCube_C -120 -1880 -27000 0
+wait 1
+log MANY 100 placed
+spawnat BP_DebugCube_C 0 -1880 -27000 0
+wait 1
+spawnat BP_DebugCube_C 120 -1880 -27000 0
+wait 1
+spawnat BP_DebugCube_C 240 -1880 -27000 0
+wait 1
+spawnat BP_DebugCube_C 360 -1880 -27000 0
+wait 1
+spawnat BP_DebugCube_C 480 -1880 -27000 0
+wait 1
+spawnat BP_DebugCube_C -1200 -1760 -27000 0
+wait 1
+spawnat BP_DebugCube_C -1080 -1760 -27000 0
+wait 1
+spawnat BP_DebugCube_C -960 -1760 -27000 0
+wait 1
+spawnat BP_DebugCube_C -840 -1760 -27000 0
+wait 1
+spawnat BP_DebugCube_C -720 -1760 -27000 0
+wait 1
+spawnat BP_DebugCube_C -600 -1760 -27000 0
+wait 1
+spawnat BP_DebugCube_C -480 -1760 -27000 0
+wait 1
+spawnat BP_DebugCube_C -360 -1760 -27000 0
+wait 1
+spawnat BP_DebugCube_C -240 -1760 -27000 0
+wait 1
+spawnat BP_DebugCube_C -120 -1760 -27000 0
+wait 1
+spawnat BP_DebugCube_C 0 -1760 -27000 0
+wait 1
+spawnat BP_DebugCube_C 120 -1760 -27000 0
+wait 1
+spawnat BP_DebugCube_C 240 -1760 -27000 0
+wait 1
+spawnat BP_DebugCube_C 360 -1760 -27000 0
+wait 1
+spawnat BP_DebugCube_C 480 -1760 -27000 0
+wait 1
+spawnat BP_DebugCube_C -1200 -1640 -27000 0
+wait 1
+spawnat BP_DebugCube_C -1080 -1640 -27000 0
+wait 1
+spawnat BP_DebugCube_C -960 -1640 -27000 0
+wait 1
+spawnat BP_DebugCube_C -840 -1640 -27000 0
+wait 1
+spawnat BP_DebugCube_C -720 -1640 -27000 0
+wait 1
+log MANY 125 placed
+spawnat BP_DebugCube_C -600 -1640 -27000 0
+wait 1
+spawnat BP_DebugCube_C -480 -1640 -27000 0
+wait 1
+spawnat BP_DebugCube_C -360 -1640 -27000 0
+wait 1
+spawnat BP_DebugCube_C -240 -1640 -27000 0
+wait 1
+spawnat BP_DebugCube_C -120 -1640 -27000 0
+wait 1
+spawnat BP_DebugCube_C 0 -1640 -27000 0
+wait 1
+spawnat BP_DebugCube_C 120 -1640 -27000 0
+wait 1
+spawnat BP_DebugCube_C 240 -1640 -27000 0
+wait 1
+spawnat BP_DebugCube_C 360 -1640 -27000 0
+wait 1
+spawnat BP_DebugCube_C 480 -1640 -27000 0
+wait 1
+spawnat BP_DebugCube_C -1200 -1520 -27000 0
+wait 1
+spawnat BP_DebugCube_C -1080 -1520 -27000 0
+wait 1
+spawnat BP_DebugCube_C -960 -1520 -27000 0
+wait 1
+spawnat BP_DebugCube_C -840 -1520 -27000 0
+wait 1
+spawnat BP_DebugCube_C -720 -1520 -27000 0
+wait 1
+spawnat BP_DebugCube_C -600 -1520 -27000 0
+wait 1
+spawnat BP_DebugCube_C -480 -1520 -27000 0
+wait 1
+spawnat BP_DebugCube_C -360 -1520 -27000 0
+wait 1
+spawnat BP_DebugCube_C -240 -1520 -27000 0
+wait 1
+spawnat BP_DebugCube_C -120 -1520 -27000 0
+wait 1
+spawnat BP_DebugCube_C 0 -1520 -27000 0
+wait 1
+spawnat BP_DebugCube_C 120 -1520 -27000 0
+wait 1
+spawnat BP_DebugCube_C 240 -1520 -27000 0
+wait 1
+spawnat BP_DebugCube_C 360 -1520 -27000 0
+wait 1
+spawnat BP_DebugCube_C 480 -1520 -27000 0
+wait 1
+log MANY 150 placed
+wait 5
+log MANY done
