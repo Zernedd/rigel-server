@@ -1650,9 +1650,9 @@ static void SeLvRecordData(SDK::UObject* prefab, const std::string& path, const 
 }
 
 // POD core: resolve <lgm>/objects/<idx> to an iterator (a valid node handle) and merge or remove it.
-// Remove one of our object nodes by id (no server actor needed). Moves go through SbRespawnKeep instead:
-// merging a descriptor into a live node corrupted the tree (see SbOwnedApply).
-static int SbOwnedNodeCore(void* lgmHandle, uint64_t objectsBits, uint64_t idxBits)
+// Move or remove one of our object nodes by id, for objects the server has no actor for.
+static int SbOwnedNodeCore(void* lgmHandle, uint64_t objectsBits, uint64_t idxBits, bool remove, uint8_t* buf,
+                           const double* pos, const double* rot, const double* scl)
 {
     uint8_t itO[0x100] = {}, itN[0x100] = {};
     int r = -1;
@@ -1664,7 +1664,7 @@ static int SbOwnedNodeCore(void* lgmHandle, uint64_t objectsBits, uint64_t idxBi
         if (!itO[0x48]) { NvReleaseIter(base, itO); return -10; }
         find(itO, itN, idxBits, 0);
         if (!itN[0x48]) { NvReleaseIter(base, itN); NvReleaseIter(base, itO); return -11; }
-        r = SbRemoveCore(itN);
+        r = remove ? SbRemoveCore(itN) : SbMergeCore(itN, buf, pos, rot, scl);
         // The node iterator is NOT released: NodeRemove consumes it, and a merge rebuilds the node, so a
         // release afterwards could touch a replaced entry. At worst one reference is kept.
         NvReleaseIter(base, itO);
@@ -1689,23 +1689,14 @@ static bool SbOwnedApply(SbOwned& o, bool remove)
         const SDK::FRotator rr = SDK::UKismetMathLibrary::InverseTransformRotation(sx, SDK::FRotator{ r3[0], r3[1], r3[2] });
         pos[0] = rl.X; pos[1] = rl.Y; pos[2] = rl.Z; r3[0] = rr.Pitch; r3[1] = rr.Yaw; r3[2] = rr.Roll;
     }
-    if (!remove)
-    {
-        // Move an object the server has no actor for (static meshes, some prefabs): take the node out and
-        // build it again at the new place, with its id, Game data, scripts and slot wiring -- the same path a
-        // script change uses. (It used to merge a copy of the node's own descriptor back into it and then free
-        // that copy, which left the node holding freed data; the server crashed later inside the netvar walk.)
-        const SbOwned keep = o;
-        const std::string idx = SbRespawnKeep(SbActorForIdx(keep.idx), keep, "move (no server actor)");
-        return !idx.empty();
-    }
     alignas(16) static uint8_t buf[0x400];
     memset(buf, 0, sizeof(buf));
     const int r = SbOwnedNodeCore(reinterpret_cast<uint8_t*>(o.lgm) + 0x218, NvNameBits(NvName("objects")),
-                                  NvNameBits(NvName(o.idx)));
-    const bool ok = r == 1;
+                                  NvNameBits(NvName(o.idx)), remove, buf, pos, r3, o.scl);
+    const bool ok = remove ? r == 1 : r == 5;
     if (ok && slot) static_cast<SDK::AModuleSlot*>(slot)->PushNetVars();
-    HxLog("[HalcyonA2][SPECEDIT] node delete %s (no server actor): %s (%d)\n", o.idx.c_str(), ok ? "ok" : "FAILED", r);
+    HxLog("[HalcyonA2][SPECEDIT] node %s %s (no server actor): %s (%d)\n", remove ? "delete" : "move", o.idx.c_str(),
+          ok ? "ok" : "FAILED", r);
     return ok;
 }
 
@@ -3913,7 +3904,17 @@ static void SeLuauRef(SDK::UObject* ctx, const std::string& ident, const std::st
         }
         std::string tidx = to->idx;
         uint32_t b, c, d;
-        if (to->lgm != o->lgm || !SbGuidParts(tidx, &b, &c, &d)) tidx = SbRehost(*to, o->lgm);   // same slot, GUID id
+        // Never move the target into another game area: an object only draws inside its own, so wiring one
+        // from somewhere else made it vanish where it was placed. Same area is required; within it, an object
+        // with an older-style id is re-created so it can be referenced at all.
+        if (to->lgm != o->lgm)
+        {
+            SeError(caller, "Those are in different game areas",
+                    "Slot '" + slot + "' can only point at an object in the same game area as the scripted object. "
+                    "Place " + tname + " next to the scripted object (same area) and wire it again.");
+            return;
+        }
+        if (!SbGuidParts(tidx, &b, &c, &d)) tidx = SbRehost(*to, o->lgm);   // same area, older id: re-create it
         // SbRehost may have reallocated g_sbOwned: look the scripted object up again
         o = SbOwnedByIdx(myIdx);
         if (!o || tidx.empty())

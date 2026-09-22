@@ -1,0 +1,15 @@
+log XA2 start
+enter
+wait 3
+spawnat BP_GolfTee_C -5400 7100 -28900 0
+wait 8
+expect 1
+spawnat LE_BP_LightSwitch_C -300 -2600 -27000 0
+wait 8
+luaufile LightSwitch
+wait 10
+luauref LightSwitch Target PhysicalComponent BP_GolfTee_C -5400 7100 -28900
+wait 8
+pickat BP_GolfTee_C -5400 7100 -28900
+expect 1
+log XA2 done
