@@ -1546,6 +1546,9 @@ static const char* g_sbMergeIdx = nullptr;     // set around a merge that should
 static void SbFillComponentsSafe(uint8_t* buf, const char* idx) { SbFillComponents(buf, std::string(idx)); }
 
 // POD-only cores (SEH).
+// Merge a descriptor into a live node (the move path for objects that DO have a server actor).
+// The probe logs whether the node ends up pointing AT the descriptor we passed: if it does, the buffer is
+// owned by the node and must be neither reused nor freed.
 static int SbMergeCore(uint8_t* handle, uint8_t* buf, const double* pos, const double* rot, const double* scl)
 {
     int step = 0;
@@ -1566,11 +1569,23 @@ static int SbMergeCore(uint8_t* handle, uint8_t* buf, const double* pos, const d
         if (scl) memcpy(buf + 96, scl, 3 * sizeof(double));
         reinterpret_cast<void(__fastcall*)(uint8_t*, uint8_t*)>(base + SeSb::NodeMerge)(handle, buf);
         step = 4;
-        reinterpret_cast<void(__fastcall*)(uint8_t*)>(base + SeSb::DescFree)(buf);
+        uint8_t* after = reinterpret_cast<uint8_t*>(reinterpret_cast<void*(__fastcall*)(uintptr_t)>(base + SeSb::NodeDesc)(SbNodeOf(handle)));
+        // Does the node now point INTO the copy we made? (idx FString data @+16, components array @+160.)
+        void* bufIdx = *reinterpret_cast<void**>(buf + 16);
+        void* nodeIdx = after ? *reinterpret_cast<void**>(after + 16) : nullptr;
+        void* bufComp = *reinterpret_cast<void**>(buf + 160);
+        void* nodeComp = after ? *reinterpret_cast<void**>(after + 160) : nullptr;
+        if (bufIdx == nodeIdx || after == buf)        // would mean the node kept our copy: never free it then
+        {
+            HxLog("[HalcyonA2][SPECEDIT] merge: the node kept our descriptor (idx %p, desc %p) -- not freeing it\n", bufIdx, static_cast<void*>(after));
+            return 5;
+        }
+        reinterpret_cast<void(__fastcall*)(uint8_t*)>(base + SeSb::DescFree)(buf);   // our copy, deep-copied by the merge
         return 5;
     }
     __except (EXCEPTION_EXECUTE_HANDLER) { return -step; }
 }
+
 static int SbRemoveCore(uint8_t* handle)
 {
     __try
@@ -1635,8 +1650,9 @@ static void SeLvRecordData(SDK::UObject* prefab, const std::string& path, const 
 }
 
 // POD core: resolve <lgm>/objects/<idx> to an iterator (a valid node handle) and merge or remove it.
-static int SbOwnedNodeCore(void* lgmHandle, uint64_t objectsBits, uint64_t idxBits, bool remove, uint8_t* buf,
-                           const double* pos, const double* rot, const double* scl)
+// Remove one of our object nodes by id (no server actor needed). Moves go through SbRespawnKeep instead:
+// merging a descriptor into a live node corrupted the tree (see SbOwnedApply).
+static int SbOwnedNodeCore(void* lgmHandle, uint64_t objectsBits, uint64_t idxBits)
 {
     uint8_t itO[0x100] = {}, itN[0x100] = {};
     int r = -1;
@@ -1648,7 +1664,7 @@ static int SbOwnedNodeCore(void* lgmHandle, uint64_t objectsBits, uint64_t idxBi
         if (!itO[0x48]) { NvReleaseIter(base, itO); return -10; }
         find(itO, itN, idxBits, 0);
         if (!itN[0x48]) { NvReleaseIter(base, itN); NvReleaseIter(base, itO); return -11; }
-        r = remove ? SbRemoveCore(itN) : SbMergeCore(itN, buf, pos, rot, scl);
+        r = SbRemoveCore(itN);
         // The node iterator is NOT released: NodeRemove consumes it, and a merge rebuilds the node, so a
         // release afterwards could touch a replaced entry. At worst one reference is kept.
         NvReleaseIter(base, itO);
@@ -1686,7 +1702,7 @@ static bool SbOwnedApply(SbOwned& o, bool remove)
     alignas(16) static uint8_t buf[0x400];
     memset(buf, 0, sizeof(buf));
     const int r = SbOwnedNodeCore(reinterpret_cast<uint8_t*>(o.lgm) + 0x218, NvNameBits(NvName("objects")),
-                                  NvNameBits(NvName(o.idx)), remove, buf, pos, r3, o.scl);
+                                  NvNameBits(NvName(o.idx)));
     const bool ok = r == 1;
     if (ok && slot) static_cast<SDK::AModuleSlot*>(slot)->PushNetVars();
     HxLog("[HalcyonA2][SPECEDIT] node delete %s (no server actor): %s (%d)\n", o.idx.c_str(), ok ? "ok" : "FAILED", r);
@@ -2084,6 +2100,79 @@ static void SbLgmTreeCore(std::string* out)
 {
     __try { SbLgmTreeImpl(out); } __except (EXCEPTION_EXECUTE_HANDLER) { out->append("(fault)"); }
 }
+// Is the replicated tree still sane? A node that appears twice (or points at itself) makes the game's own
+// walk recurse until the stack runs out, which takes the server with it. This walks our gamemode trees with a
+// depth cap and a seen-set after every edit, names the first bad node, and says which operation produced it.
+static bool SbTreeCheckNode(uint8_t* n, int depth, std::unordered_set<void*>* seen, std::string* bad, int* nodes)
+{
+    if (!n || depth > 24) { if (bad->empty()) *bad = "deeper than 24 levels"; return false; }
+    if (++*nodes > 20000) return true;                       // big but finite: stop walking, not an error
+    if (!seen->insert(n).second)
+    {
+        char b[160];
+        snprintf(b, sizeof(b), "node %p (%s) is in the tree twice", static_cast<void*>(n), reinterpret_cast<SDK::FName*>(n + 48)->ToString().c_str());
+        *bad = b;
+        return false;
+    }
+    const int type = n[24];
+    if (type == 9)
+    {
+        for (int off : { 552, 560, 608, 616 })
+        {
+            uint8_t* c = *reinterpret_cast<uint8_t**>(n + off);
+            if (!c || IsBadReadPtr(c, 160) || c[24] > 12) continue;
+            if (!SbTreeCheckNode(c, depth + 1, seen, bad, nodes)) return false;
+        }
+        return true;
+    }
+    if (type != 1) return true;
+    uint8_t** arr = *reinterpret_cast<uint8_t***>(n + 136);
+    const int cnt = *reinterpret_cast<int32_t*>(n + 144);
+    if (cnt < 0 || cnt > 20000 || (cnt > 0 && (!arr || IsBadReadPtr(arr, sizeof(void*) * cnt))))
+    {
+        char b[160];
+        snprintf(b, sizeof(b), "container %s has a bad child list (%d)", reinterpret_cast<SDK::FName*>(n + 48)->ToString().c_str(), cnt);
+        *bad = b;
+        return false;
+    }
+    for (int i = 0; i < cnt; ++i)
+        if (!SbTreeCheckNode(arr[i], depth + 1, seen, bad, nodes)) return false;
+    return true;
+}
+static void SbTreeCheckImpl(std::string* bad, int* nodes)
+{
+    static SDK::UClass* cls = nullptr;
+    if (!cls) cls = SDK::UObject::FindClassFast("LoadedGameMode");
+    std::unordered_set<void*> seen;
+    const int32_t n = SDK::UObject::GObjects->Num();
+    for (int32_t i = 0; cls && i < n && bad->empty(); ++i)
+    {
+        SDK::UObject* l = SDK::UObject::GObjects->GetByIndex(i);
+        if (!l || l->IsDefaultObject() || !l->IsA(cls)) continue;
+        uint8_t* root = reinterpret_cast<uint8_t*>(SbNodeOf(reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(l) + 0x218)));
+        if (root) SbTreeCheckNode(root, 0, &seen, bad, nodes);
+    }
+}
+static void SbTreeCheckCore(std::string* bad, int* nodes)
+{
+    __try { SbTreeCheckImpl(bad, nodes); } __except (EXCEPTION_EXECUTE_HANDLER) { if (bad->empty()) *bad = "faulted while walking"; }
+}
+// Called after every edit: the first failure is logged once (and repeated at most every 30 s).
+static void SeTreeCheck(const char* after)
+{
+    if (!g_specEdit) return;
+    std::string bad;
+    int nodes = 0;
+    const ULONGLONG t0 = GetTickCount64();
+    SbTreeCheckCore(&bad, &nodes);
+    static ULONGLONG s_lastLog = 0;
+    if (bad.empty()) return;
+    if (s_lastLog && GetTickCount64() - s_lastLog < 30000) return;
+    s_lastLog = GetTickCount64();
+    HxLog("[HalcyonA2][SPECEDIT] TREE BROKEN after %s: %s (%d node(s) walked, %llu ms)\n",
+          after, bad.c_str(), nodes, GetTickCount64() - t0);
+}
+
 // SE|LUAUDUMP|<slot name> (local test): the first bytes of every node in that gamemode's Scripts container.
 // The game's own script nodes vs the ones we build: any field we don't set shows up as a difference, and a
 // malformed node is exactly what makes the replication walk recurse or fault.
@@ -4402,6 +4491,7 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
         }
     }
     else HxLog("[HalcyonA2][SPECEDIT] unknown command\n");
+    SeTreeCheck(op.c_str());          // after every edit: is the replicated tree still walkable?
     return true;
 }
 
