@@ -39,6 +39,10 @@ namespace {
 
 typedef HRESULT(__stdcall* Present_t)(IDXGISwapChain3*, UINT, UINT);
 typedef void(__stdcall* ExecuteCommandLists_t)(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*);
+typedef HRESULT(__stdcall* ResizeBuffers_t)(IDXGISwapChain3*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
+typedef HRESULT(__stdcall* ResizeBuffers1_t)(IDXGISwapChain3*, UINT, UINT, UINT, DXGI_FORMAT, UINT, const UINT*, IUnknown* const*);
+ResizeBuffers_t        g_resizeOrig  = nullptr;
+ResizeBuffers1_t       g_resize1Orig = nullptr;
 
 Present_t              g_presentOrig = nullptr;
 ExecuteCommandLists_t  g_execOrig    = nullptr;
@@ -275,6 +279,62 @@ void __stdcall Hook_ExecuteCommandLists(ID3D12CommandQueue* q, UINT n, ID3D12Com
     g_execOrig(q, n, lists);
 }
 
+// The overlay holds a reference to every swapchain back buffer (GetBuffer). DXGI requires ALL of them to be
+// released before ResizeBuffers -- holding them made the game's resize fail the moment the window was
+// resized, which crashed the client. Release before the resize, rebuild after.
+void ReleaseRenderTargets()
+{
+    for (auto& f : g_frames)
+        if (f.backbuffer) { f.backbuffer->Release(); f.backbuffer = nullptr; }
+}
+
+void CreateRenderTargets(IDXGISwapChain3* sc)
+{
+    DXGI_SWAP_CHAIN_DESC desc{};
+    sc->GetDesc(&desc);
+    const UINT count = desc.BufferCount;
+    if (count != g_frames.size() || !g_rtvHeap)
+    {
+        // Buffer count changed: new RTV heap sized for it, and an allocator per buffer.
+        for (auto& f : g_frames) if (f.allocator) { f.allocator->Release(); f.allocator = nullptr; }
+        if (g_rtvHeap) { g_rtvHeap->Release(); g_rtvHeap = nullptr; }
+        D3D12_DESCRIPTOR_HEAP_DESC rtv{};
+        rtv.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+        rtv.NumDescriptors = count;
+        if (FAILED(g_device->CreateDescriptorHeap(&rtv, IID_PPV_ARGS(&g_rtvHeap)))) { g_frames.clear(); return; }
+        g_frames.assign(count, FrameCtx{});
+        for (auto& f : g_frames) g_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&f.allocator));
+    }
+    const UINT rtvSize = g_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    D3D12_CPU_DESCRIPTOR_HANDLE h = g_rtvHeap->GetCPUDescriptorHandleForHeapStart();
+    for (UINT i = 0; i < count; ++i)
+    {
+        g_frames[i].rtv = h;
+        if (SUCCEEDED(sc->GetBuffer(i, IID_PPV_ARGS(&g_frames[i].backbuffer))) && g_frames[i].backbuffer)
+            g_device->CreateRenderTargetView(g_frames[i].backbuffer, nullptr, h);
+        h.ptr += rtvSize;
+    }
+}
+
+HRESULT __stdcall Hook_ResizeBuffers(IDXGISwapChain3* sc, UINT n, UINT w, UINT h, DXGI_FORMAT fmt, UINT flags)
+{
+    if (g_imguiReady) ReleaseRenderTargets();
+    const HRESULT hr = g_resizeOrig(sc, n, w, h, fmt, flags);
+    if (g_imguiReady) CreateRenderTargets(sc);
+    Log("[render] ResizeBuffers %ux%u buffers=%u -> 0x%08X", w, h, n, static_cast<unsigned>(hr));
+    return hr;
+}
+
+HRESULT __stdcall Hook_ResizeBuffers1(IDXGISwapChain3* sc, UINT n, UINT w, UINT h, DXGI_FORMAT fmt, UINT flags,
+                                      const UINT* masks, IUnknown* const* queues)
+{
+    if (g_imguiReady) ReleaseRenderTargets();
+    const HRESULT hr = g_resize1Orig(sc, n, w, h, fmt, flags, masks, queues);
+    if (g_imguiReady) CreateRenderTargets(sc);
+    Log("[render] ResizeBuffers1 %ux%u buffers=%u -> 0x%08X", w, h, n, static_cast<unsigned>(hr));
+    return hr;
+}
+
 bool InitImGui(IDXGISwapChain3* sc)
 {
     if (FAILED(sc->GetDevice(IID_PPV_ARGS(&g_device)))) { Log("[render] GetDevice failed"); return false; }
@@ -371,6 +431,8 @@ HRESULT __stdcall Hook_Present(IDXGISwapChain3* sc, UINT interval, UINT flags)
 
 // Build a throwaway device + swapchain purely to read the vtable layout. Nothing the game owns is
 // touched; the objects are released immediately.
+void* g_resizeSlot = nullptr;
+void* g_resize1Slot = nullptr;
 bool GrabVTables(void** presentSlot, void** execSlot)
 {
     WNDCLASSEXW wc{ sizeof(wc) };
@@ -405,6 +467,13 @@ bool GrabVTables(void** presentSlot, void** execSlot)
             if (SUCCEEDED(factory->CreateSwapChainForHwnd(queue, wnd, &sd, nullptr, nullptr, &sc1)))
             {
                 *presentSlot = (*reinterpret_cast<void***>(sc1))[8];    // IDXGISwapChain::Present
+                g_resizeSlot = (*reinterpret_cast<void***>(sc1))[13];   // IDXGISwapChain::ResizeBuffers
+                IDXGISwapChain3* sc3 = nullptr;
+                if (SUCCEEDED(sc1->QueryInterface(IID_PPV_ARGS(&sc3))) && sc3)
+                {
+                    g_resize1Slot = (*reinterpret_cast<void***>(sc3))[39];  // IDXGISwapChain3::ResizeBuffers1
+                    sc3->Release();
+                }
                 *execSlot    = (*reinterpret_cast<void***>(queue))[10]; // ExecuteCommandLists
                 ok = true;
             }
@@ -433,7 +502,13 @@ bool InstallRenderHook()
     if (MH_CreateHook(exec, &Hook_ExecuteCommandLists, reinterpret_cast<void**>(&g_execOrig)) != MH_OK ||
         MH_EnableHook(exec) != MH_OK) { Log("[render] ExecuteCommandLists hook failed"); return false; }
 
-    Log("[render] hooks installed (Present=%p ExecuteCommandLists=%p)", present, exec);
+    if (g_resizeSlot && MH_CreateHook(g_resizeSlot, &Hook_ResizeBuffers, reinterpret_cast<void**>(&g_resizeOrig)) == MH_OK)
+        MH_EnableHook(g_resizeSlot);
+    else Log("[render] ResizeBuffers hook failed -- resizing the window may crash");
+    if (g_resize1Slot && MH_CreateHook(g_resize1Slot, &Hook_ResizeBuffers1, reinterpret_cast<void**>(&g_resize1Orig)) == MH_OK)
+        MH_EnableHook(g_resize1Slot);
+    Log("[render] hooks installed (Present=%p ExecuteCommandLists=%p ResizeBuffers=%p ResizeBuffers1=%p)", present, exec,
+        g_resizeSlot, g_resize1Slot);
 
     // Cursor ownership (see EditorOwnsInput). Failing any of these only costs cursor behaviour, not the UI.
     HMODULE u32 = GetModuleHandleW(L"user32.dll");

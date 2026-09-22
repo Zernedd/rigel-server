@@ -1,0 +1,13 @@
+# PROTOTYPE (local server only): place a Text prefab through the sandbox's own NetVar object system, then
+# check this client's copy -- a real sandbox object has Prefab.NetworkGUID set and its Luau bound.
+log SBADD start
+enter
+wait 3
+classes
+sbadd aa_se_LE_BP_Text
+wait 8
+classes
+pick LE_BP_Text_C
+dump Prefab
+dump Text
+log SBADD done

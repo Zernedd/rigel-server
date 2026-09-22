@@ -14302,6 +14302,11 @@ static void Main(HMODULE)
             HxLog("[HalcyonA2][SPECEDIT] -SpecEditLocalTest: org-less callers ADMITTED -- LOCAL TESTING ONLY, "
                   "never on a server real players can reach\n");
         }
+        if (wcsstr(GetCommandLineW(), L"-SpecEditSandbox"))
+        {
+            g_seSandbox = true;
+            HxLog("[HalcyonA2][SPECEDIT] -SpecEditSandbox: placements go through the sandbox's own object system\n");
+        }
         if (wcsstr(GetCommandLineW(), L"-TeamOverlap")) { g_teamOverlap = true; HxLog("[HalcyonA2] -TeamOverlap: geometrically fire the runner team-changer overlap so ScrapRun rosters fill\n"); }
         if (wcsstr(GetCommandLineW(), L"-NoNetScale")) { g_netScale = false; HxLog("[HalcyonA2] -NoNetScale: player relevancy/rate stays maxed regardless of population\n"); }
         if (const wchar_t* a = wcsstr(GetCommandLineW(), L"-NetCrowd="))    { int v = _wtoi(a + 11); if (v >  0 && v < 200)  g_netCrowd    = v; }

@@ -1,0 +1,4 @@
+log SBJ start
+wait 10
+classes Text
+log SBJ done

@@ -1,0 +1,10 @@
+# The Quest Editor's red coin run publish path, end to end: quest row + run + start button, then republish.
+log QCR start
+enter
+wait 3
+qcoinrun 40 5 Station Coin Dash
+wait 10
+qcoinrun 50 6 Station Coin Dash
+wait 10
+classes RedCoin
+log QCR done

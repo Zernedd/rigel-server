@@ -130,8 +130,10 @@ for ($i = 0; $i -lt $Instances; $i++) {
                           -PassThru -RedirectStandardOutput $outLog -RedirectStandardError $errLog
     Info "  pid $($proc.Id)  log $outLog"
 
-    Info "  waiting $($cfg.InitWaitSeconds)s for engine init"
-    for ($s = 0; $s -lt $cfg.InitWaitSeconds; $s++) {
+    # InitWaitMs (optional) overrides InitWaitSeconds when the entitlement verdict lands sooner than 1s.
+    if ($cfg.InitWaitMs) { Info "  waiting $($cfg.InitWaitMs)ms for engine init"; Start-Sleep -Milliseconds $cfg.InitWaitMs }
+    else { Info "  waiting $($cfg.InitWaitSeconds)s for engine init" }
+    for ($s = 0; -not $cfg.InitWaitMs -and $s -lt $cfg.InitWaitSeconds; $s++) {
         Start-Sleep -Seconds 1
         if ($proc.HasExited) { throw "Instance exited during init (code $($proc.ExitCode)). See $outLog" }
     }

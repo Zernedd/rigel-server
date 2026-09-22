@@ -1,0 +1,18 @@
+# Light switch through the sandbox WITH component defaults, in front of the player; dump its tree and the
+# station's red-coin quest tree. Stays connected so a second player can join afterwards.
+log SW3 start
+enter
+wait 3
+spawnat LE_BP_LightSwitch_C 324 -2950 -27740 270
+wait 10
+expect 1
+sbtree
+spawnat LE_BP_Text_C 324 -2850 -27600 270
+wait 6
+prop Text.Text SWITCH BELOW
+wait 4
+sbtree
+pick LE_BP_New_RedCoinTimedQuest_C
+sbtree
+wait 240
+log SW3 done

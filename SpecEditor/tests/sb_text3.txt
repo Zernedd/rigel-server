@@ -1,0 +1,17 @@
+# Live edit of all four texts around the player (each to a distinct value).
+log SBT3 start
+enter
+wait 3
+pickat LE_BP_Text_C 324 -2851 -27652
+prop Text.Text EDIT ONE
+wait 2
+pickat LE_BP_Text_C -76 -3251 -27652
+prop Text.Text EDIT TWO
+wait 2
+pickat LE_BP_Text_C 324 -3651 -27652
+prop Text.Text EDIT THREE
+wait 2
+pickat LE_BP_Text_C 724 -3251 -27652
+prop Text.Text EDIT FOUR
+wait 15
+log SBT3 done

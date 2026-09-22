@@ -1,0 +1,7 @@
+log CID start
+enter
+wait 3
+pick LE_BP_Text_C
+compids
+dump Text
+log CID done

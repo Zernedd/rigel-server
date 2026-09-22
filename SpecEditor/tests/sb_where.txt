@@ -1,0 +1,6 @@
+log WH start
+enter
+wait 3
+sbtexts FIND ME
+wait 5
+log WH done

@@ -1,0 +1,29 @@
+# EDITOR half: sandbox-system objects (server started with -SpecEditSandbox). Pair with sb_observer.txt.
+log SBE start
+enter
+wait 3
+pick LE_BP_TableScoreboard_C
+sbdesc
+pick LE_BP_HandHold_Platform_C
+sbdesc
+pick LE_BP_LightSwitch_C
+sbdesc
+spawn LE_BP_Text_C
+wait 8
+expect 1
+sbdesc
+move 200 0 0
+wait 5
+where
+expectat 5
+scale 2 2 2
+wait 5
+where
+spawn LE_BP_LightSwitch_C
+wait 8
+expect 1
+sbdesc
+pick LE_BP_Text_C
+delete
+wait 6
+log SBE done

@@ -1,0 +1,8 @@
+log SW4 start
+enter
+wait 3
+spawnat LE_BP_LightSwitch_C -100 -2980 -27720 270
+wait 10
+expect 1
+log SW4 done
+wait 600

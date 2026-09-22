@@ -1,0 +1,7 @@
+log RC start
+enter
+wait 3
+pick LE_BP_New_RedCoinTimedQuest_C
+dump
+sbtree
+log RC done

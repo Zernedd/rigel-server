@@ -1,0 +1,5 @@
+log SCR start
+enter
+wait 3
+scripts
+log SCR done

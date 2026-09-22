@@ -1,0 +1,11 @@
+# OBSERVER half: never edits; reports what an ordinary client sees of the sandbox Text object.
+log SBO start
+wait 22
+pick LE_BP_Text_C
+where
+dump Prefab
+wait 10
+where
+wait 20
+classes
+log SBO done

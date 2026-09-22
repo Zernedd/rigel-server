@@ -49,6 +49,13 @@ struct QuestDraft
     bool        timed = false;
     int         timeLimit = 60;      // seconds from the first checkpoint
     std::vector<QuestStep> steps;
+    // Red coin run (kind 1): the game's own TKB-style run. A start button activates the quest; the player
+    // then has runSeconds to collect every coin, and the game completes the quest on their machine.
+    int         kind = 0;            // 0 = checkpoint run, 1 = red coin run
+    bool        hasButton = false;
+    Vec3        buttonAt;
+    std::vector<Vec3> coins;
+    int         runSeconds = 60;
     bool        published = false;
     bool        dirty = true;        // changed since it was last published
 };
@@ -1122,9 +1129,42 @@ const SceneObject* FindObject(const Snapshot& snap, const std::string& handle)
     return nullptr;
 }
 
+// A point in front of the camera: where "place ... here" puts things.
+Vec3 InFront(const Snapshot& snap, double dist)
+{
+    Vec3 fwd, rgt, up;
+    RotAxes(snap.cameraRot, fwd, rgt, up);
+    return Add(snap.cameraPos, Mul(fwd, dist));
+}
+
 void PublishQuest(QuestDraft& q)
 {
     if (q.id.empty()) q.id = QuestIdFrom(q.title);
+    if (q.kind == 1)
+    {
+        // The quest row first (no checkpoints: the game itself completes a coin run), then the run. The run
+        // is anchored at its start button; coins are stored relative to it.
+        Command c{ CmdType::QuestCompile };
+        c.str = q.id; c.str2 = q.title; c.str3 = q.glyph; c.num = q.repetition;
+        c.str4 = q.desc[0] ? q.desc : q.title;
+        State().Push(c);
+        std::string msg;
+        char b[160];
+        snprintf(b, sizeof(b), "SE|COINRUN|new|%.1f,%.1f,%.1f|%d|%s|", q.buttonAt.x, q.buttonAt.y, q.buttonAt.z, q.runSeconds, q.id.c_str());
+        msg = b;
+        for (size_t i = 0; i < q.coins.size(); ++i)
+        {
+            snprintf(b, sizeof(b), "%s%.1f,%.1f,%.1f", i ? ";" : "", q.coins[i].x, q.coins[i].y, q.coins[i].z);
+            msg += b;
+        }
+        snprintf(b, sizeof(b), "|%.1f,%.1f,%.1f", q.buttonAt.x, q.buttonAt.y, q.buttonAt.z);
+        msg += b;
+        Command r{ CmdType::SendRaw }; r.str = msg; State().Push(r);
+        q.published = true;
+        q.dirty = false;
+        Notes().Set(std::string("Published '") + q.title + "' - players press the start button, then collect every coin before time runs out.");
+        return;
+    }
     for (const auto& st : q.steps)
     {
         Command c{ CmdType::QuestAddStep }; c.str = st.objectHandle; c.str2 = "0"; State().Push(c);
@@ -1139,6 +1179,114 @@ void PublishQuest(QuestDraft& q)
     q.published = true;
     q.dirty = false;
     Notes().Set(std::string("Published '") + q.title + "' - players online get it now; it completes when they reach every checkpoint in order.");
+}
+
+// The red coin run half of the quest editor: where it starts, the coins, the clock, publish.
+void DrawCoinRun(const Snapshot& snap, QuestDraft& q, float lw)
+{
+    auto goBtn = [&](const Vec3& at) { Command c{ CmdType::FocusCamera }; c.loc = at; State().Push(c); };
+    auto dist = [&](const Vec3& at) { const Vec3 d = Sub(at, snap.cameraPos); return std::sqrt(Dot(d, d)) / 100.0; };
+
+    ImGui::SeparatorText("1. Start button");
+    if (q.hasButton)
+    {
+        ImGui::AlignTextToFramePadding();
+        ImGui::Text("Placed  (%.0f m away)", dist(q.buttonAt));
+        ImGui::SameLine(ImGui::GetWindowWidth() - 132);
+        if (ImGui::SmallButton("Go##btn")) goBtn(q.buttonAt);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Move here")) { q.buttonAt = InFront(snap, 250.0); q.dirty = true; }
+    }
+    else
+    {
+        ImGui::TextWrapped("Players press this to start the run - the same button the TKB runs use.");
+        if (ImGui::Button("Place start button here", ImVec2(-1, 0))) { q.buttonAt = InFront(snap, 250.0); q.hasButton = true; q.dirty = true; }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("2.5 m in front of the camera.");
+    }
+
+    ImGui::SeparatorText("2. Coins (collect all of them)");
+    int remove = -1;
+    for (int i = 0; i < (int)q.coins.size(); ++i)
+    {
+        ImGui::PushID(i);
+        ImGui::AlignTextToFramePadding();
+        ImGui::Text("Coin %d", i + 1);
+        ImGui::SameLine();
+        ImGui::TextDisabled("%.0f m away", dist(q.coins[i]));
+        ImGui::SameLine(ImGui::GetWindowWidth() - 132);
+        if (ImGui::SmallButton("Go")) goBtn(q.coins[i]);
+        ImGui::SameLine(); if (ImGui::SmallButton("Move here")) { q.coins[i] = InFront(snap, 250.0); q.dirty = true; }
+        ImGui::SameLine(); if (ImGui::SmallButton("X")) remove = i;
+        ImGui::PopID();
+    }
+    if (remove >= 0) { q.coins.erase(q.coins.begin() + remove); q.dirty = true; }
+    if (q.coins.empty()) ImGui::TextDisabled("No coins yet. Fly to a spot and add one.");
+    ImGui::BeginDisabled(q.coins.size() >= 30);
+    if (ImGui::Button("Add coin here", ImVec2(-1, 0))) { q.coins.push_back(InFront(snap, 250.0)); q.dirty = true; }
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip(q.coins.size() >= 30 ? "30 coins is the most one run can hold." : "Adds a coin 2.5 m in front of the camera. Coins show as gold markers until you publish.");
+
+    ImGui::SeparatorText("3. Time limit");
+    ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted("Seconds"); ImGui::SameLine(lw); ImGui::SetNextItemWidth(-1);
+    if (ImGui::InputInt("##qrs", &q.runSeconds, 5, 30)) q.dirty = true;
+    q.runSeconds = (std::max)(10, (std::min)(600, q.runSeconds));
+    ImGui::TextDisabled("%d:%02d from pressing the button. Miss it and the run resets.", q.runSeconds / 60, q.runSeconds % 60);
+
+    // Unpublished coins and the button, drawn in the viewport so you can see the course you are building.
+    {
+        const View v = MakeView(snap);
+        ImDrawList* dl = ImGui::GetBackgroundDrawList();
+        ImVec2 sp;
+        for (size_t i = 0; v.valid && i < q.coins.size(); ++i)
+            if (W2S(v, q.coins[i], sp))
+            {
+                dl->AddCircleFilled(sp, 9.0f, IM_COL32(235, 60, 50, 230));
+                dl->AddCircle(sp, 9.0f, IM_COL32(255, 220, 120, 255), 0, 2.0f);
+                char n[8]; snprintf(n, sizeof(n), "%d", (int)i + 1);
+                dl->AddText(ImVec2(sp.x + 11, sp.y - 8), IM_COL32(255, 255, 255, 230), n);
+            }
+        if (v.valid && q.hasButton && W2S(v, q.buttonAt, sp))
+        {
+            dl->AddRectFilled(ImVec2(sp.x - 8, sp.y - 8), ImVec2(sp.x + 8, sp.y + 8), IM_COL32(60, 150, 255, 230), 3.0f);
+            dl->AddText(ImVec2(sp.x + 11, sp.y - 8), IM_COL32(255, 255, 255, 230), "Start");
+        }
+    }
+
+    ImGui::Spacing();
+    const char* problem = !q.title[0] ? "Give the quest a name." :
+                          !q.hasButton ? "Place the start button." :
+                          q.coins.empty() ? "Add at least one coin." :
+                          !snap.inEditor ? "Click Start Editing first." : nullptr;
+    ImGui::BeginDisabled(problem != nullptr);
+    ImGui::PushStyleColor(ImGuiCol_Button, kSelBlue);
+    if (ImGui::Button(q.published ? "Update run" : "Publish run", ImVec2(-1, 30))) PublishQuest(q);
+    ImGui::PopStyleColor();
+    ImGui::EndDisabled();
+    if (problem) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "%s", problem);
+    else if (q.published && !q.dirty) ImGui::TextDisabled("Live. Updating rebuilds the run and its button.");
+    ImGui::Spacing();
+    ImGui::TextDisabled("Runs live until the server restarts.");
+}
+
+// Test scripts: build a red coin run quest as the UI would (button 2.5 m ahead, coins in a ring) and publish
+// it through the same PublishQuest the Publish button uses.
+void ScriptPublishCoinRun(const Snapshot& snap, const std::string& title, int seconds, int coins)
+{
+    g_quests.emplace_back();
+    QuestDraft& q = g_quests.back();
+    strncpy_s(q.title, title.c_str(), _TRUNCATE);
+    q.kind = 1;
+    q.runSeconds = seconds;
+    q.buttonAt = InFront(snap, 250.0);
+    q.hasButton = true;
+    for (int i = 0; i < coins; ++i)
+    {
+        const double a = 6.2831853 * i / (coins > 0 ? coins : 1);
+        q.coins.push_back({ q.buttonAt.x + std::cos(a) * 400.0, q.buttonAt.y + std::sin(a) * 400.0, q.buttonAt.z + 80.0 });
+    }
+    g_questSel = (int)g_quests.size() - 1;
+    PublishQuest(q);
 }
 
 void DrawQuestEditor(const Snapshot& snap, const SceneObject* sel)
@@ -1170,9 +1318,9 @@ void DrawQuestEditor(const Snapshot& snap, const SceneObject* sel)
     if (g_quests.empty())
     {
         ImGui::Spacing();
-        ImGui::TextWrapped("Make a quest from objects you have placed. Players complete it by reaching each "
-                           "checkpoint in order - optionally against the clock. The server watches where they are, "
-                           "so it works for everyone, Quest players included.");
+        ImGui::TextWrapped("Two kinds of quest, both working for everyone (Quest players included):");
+        ImGui::BulletText("Red coin run - like the TKB runs: a start button, then collect\nevery coin before the timer runs out.");
+        ImGui::BulletText("Checkpoint run - reach objects you placed, in order,\noptionally against the clock.");
         ImGui::Spacing();
         ImGui::TextDisabled("Click  + New quest  to start.");
         return;
@@ -1183,8 +1331,9 @@ void DrawQuestEditor(const Snapshot& snap, const SceneObject* sel)
         {
             const QuestDraft& q = g_quests[i];
             char label[160];
-            snprintf(label, sizeof(label), "%s  -  %d checkpoint%s  %s##q%d", q.title[0] ? q.title : "(untitled)",
-                     (int)q.steps.size(), q.steps.size() == 1 ? "" : "s",
+            const int n = q.kind == 1 ? (int)q.coins.size() : (int)q.steps.size();
+            snprintf(label, sizeof(label), "%s  -  %d %s%s  %s##q%d", q.title[0] ? q.title : "(untitled)", n,
+                     q.kind == 1 ? "coin" : "checkpoint", n == 1 ? "" : "s",
                      !q.published ? "(not published)" : q.dirty ? "(changed)" : "(live)", i);
             if (ImGui::Selectable(label, g_questSel == i)) g_questSel = i;
         }
@@ -1212,6 +1361,15 @@ void DrawQuestEditor(const Snapshot& snap, const SceneObject* sel)
         const char* reps[] = { "Once", "Every day", "Every week", "Every month" };
         if (ImGui::Combo("##qr", &q.repetition, reps, IM_ARRAYSIZE(reps))) q.dirty = true;
     }
+
+    label("Type");
+    {
+        const char* kinds[] = { "Checkpoint run - reach points in order", "Red coin run - start button + coins (like TKB)" };
+        ImGui::BeginDisabled(q.published);                   // a published quest keeps its type
+        if (ImGui::Combo("##qk", &q.kind, kinds, IM_ARRAYSIZE(kinds))) q.dirty = true;
+        ImGui::EndDisabled();
+    }
+    if (q.kind == 1) { DrawCoinRun(snap, q, lw); return; }
 
     // ── checkpoints ──
     ImGui::SeparatorText("Checkpoints (reached in this order)");
@@ -1769,6 +1927,12 @@ void DrawEditorUI()
     DrawGizmoOverlay(snap, sel);   // first: a handle click must win over a marker click
     DrawViewportMarkers(snap);
     HandleAssetDrag(snap);
+}
+
+// Test-script entry (se_game.cpp): the red coin run publish, through the UI's own path.
+void ScriptCoinRun(const Snapshot& snap, const std::string& title, int seconds, int coins)
+{
+    ScriptPublishCoinRun(snap, title, seconds, coins);
 }
 
 }  // namespace se

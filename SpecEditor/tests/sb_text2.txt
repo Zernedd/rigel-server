@@ -1,0 +1,10 @@
+# Real-player proof of the Properties binding: texts spawned with a value, then one edited live.
+log SBT start
+enter
+wait 3
+sbtexts HELLO FROM RIGEL
+wait 20
+pick LE_BP_Text_C
+prop Text.Text CHANGED LIVE
+wait 20
+log SBT done

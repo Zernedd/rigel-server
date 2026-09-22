@@ -1,0 +1,13 @@
+log RCP start
+enter
+wait 3
+pick LE_BP_New_RedCoinTimedQuest_C
+comps
+dump
+dump RedCoinTimedQuest
+sbdesc
+pick LE_BP_RedCoin_C
+dump
+pick LE_BP_ProgressionButton_C
+dump
+log RCP done

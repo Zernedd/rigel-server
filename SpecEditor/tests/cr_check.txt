@@ -1,0 +1,11 @@
+log CC start
+enter
+wait 3
+pickat LE_BP_New_RedCoinTimedQuest_C 0 -2600 -27080
+dump
+pickat LE_BP_ProgressionButton_C -150 -2600 -27080
+press
+wait 3
+pickat LE_BP_New_RedCoinTimedQuest_C 0 -2600 -27080
+dump
+log CC done

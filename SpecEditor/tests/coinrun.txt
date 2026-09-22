@@ -1,0 +1,15 @@
+# TKB-style red-coin run: place run + button in front of the editor, dump both, press the button here.
+log CR start
+enter
+wait 3
+coinrun 45 E68BAC0C44131D9D8355739D79D153D0
+wait 10
+expect 1
+sbtree
+pick LE_BP_ProgressionButton_C
+sbtree
+press
+wait 5
+classes RedCoin
+log CR done
+wait 600

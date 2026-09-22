@@ -1,0 +1,9 @@
+log SBA start
+enter
+wait 3
+spawnat LE_BP_Text_C 250 -2980 -27700 270
+wait 6
+pick LE_BP_Text_C
+prop Text.Text JOIN TEST
+wait 120
+log SBA done

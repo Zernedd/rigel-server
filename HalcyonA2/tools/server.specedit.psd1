@@ -31,9 +31,12 @@
 
     ExtraArgs = @(
         '-NoAuthGate'
+        '-LanMode'                          # skips the entitlement-failure QuitGame lambda (0x544CBA0), which on
+                                            # this PC can fire before the payload is injected (seen 2026-09-21)
         '-TeamOverlap'
         '-SpecEdit'                         # arm the Spec Editor command handler (allowlist still applies)
-        '-SpecEditLocalTest'                # no dashboard here, so no player ever gets an org id -- admit
+        '-SpecEditLocalTest'
+        '-SpecEditSandbox'   # place through the sandbox's own object system (prototype)                # no dashboard here, so no player ever gets an org id -- admit
                                             # org-less callers. LOCAL ONLY: never on a reachable server.
         '-QuestTestNoOrg'                   # without these a no-auth local server never sends players their
         '-QuestTestSeed'                    # quests, so authored quests would have no template and no one to go to

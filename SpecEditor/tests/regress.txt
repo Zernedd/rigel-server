@@ -90,7 +90,13 @@ scale 2 2 1
 wait 6
 where
 tracedown
+# Sandbox mode (-SpecEditSandbox): a light switch is built through the game's own object system, with its
+# component defaults, so it spawns on every client and pressing it is safe.
 spawn LE_BP_LightSwitch_C
-wait 6
-expect 0
+wait 8
+expect 1
+toggle on
+wait 2
+toggle off
+wait 2
 log REGRESSION done

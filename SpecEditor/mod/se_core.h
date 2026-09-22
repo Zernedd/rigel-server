@@ -115,6 +115,7 @@ enum class CmdType
     FocusCamera,      // loc = point to frame (F)
     Inspect,          // str = handle, str2 = sub-object path ("" = the actor) -- what Details shows
     SetProperty,      // str = handle, str2 = property path, str3 = value (wire encoding)
+    SendRaw,          // str = a complete SE| line (the red-coin run publish)
 };
 
 struct Command
@@ -254,6 +255,7 @@ bool InstallRenderHook();     // D3D12 swapchain Present -> ImGui
 bool InstallGameHook();       // UObject::ProcessEvent -> game-thread pump
 void DrawEditorUI();          // render thread; the whole UE-styled editor
 void GameThreadPump();        // game thread; drains commands, republishes the snapshot
+void ScriptCoinRun(const Snapshot& snap, const std::string& title, int seconds, int coins);   // test scripts: the red coin run publish
 
 extern bool g_uiVisible;      // INSERT toggles
 extern DWORD g_mainThread;    // UE's game thread = the process main thread (recorded in DllMain)

@@ -1,0 +1,10 @@
+log SBS2 start
+enter
+wait 3
+classes LightSwitch
+pick LE_BP_LightSwitch_C
+sbprobe
+spawnat LE_BP_LightSwitch_C 250 -2980 -27700 270
+wait 12
+classes LightSwitch
+log SBS2 done

@@ -1,0 +1,10 @@
+# Real-player proof: four sandbox texts appear around the (unmodded) player client, then one is edited.
+log SBP start
+enter
+wait 3
+sbtexts HELLO FROM RIGEL
+wait 25
+pick LE_BP_Text_C
+prop Text.Text CHANGED TEXT
+wait 25
+log SBP done

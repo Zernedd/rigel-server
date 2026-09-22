@@ -172,9 +172,11 @@ void ClassifyPrefab(PaletteItem& it)
     static const char* limited[] = { "LE_BP_ArenaModerationPanel_C", "LE_BP_TableScoreboard_C", "LE_BP_ScoreboardA_Sideboard_C",
                                      "LE_BP_VFX_TackleBallGoal01a_C", "LE_BP_QuestDisplayKiosk_C", "LE_BP_RockWallQuestManager_C",
                                      "LE_BP_DiscGolfHole_C" };
+    // No longer refused here: the server places these through the game's own sandbox system when it runs
+    // with -SpecEditSandbox, and otherwise refuses them itself and says why (SE|NOTE).
     for (const char* b : blocked)
-        if (it.name == b) it.blocked = "Can't be placed by the editor: it runs on the game's sandbox scripts, which only start for "
-                                       "objects the game itself placed. Placed this way it is broken and crashed players who touched it.";
+        if (it.name == b) it.limited = "Scripted by the game's sandbox. It works when the server places it through the sandbox "
+                                       "system; a server without that refuses it (it used to crash players who touched it).";
     for (const char* l : limited)
         if (it.name == l) it.limited = "Places and displays fine, but its behaviour (scores, panels, quest logic) comes from the "
                                        "game's sandbox scripts, which don't run for editor-placed objects.";
@@ -552,6 +554,10 @@ void HandleCommands()
 
         case CmdType::DeselectObject:
             SendLock(c.str, false);
+            break;
+
+        case CmdType::SendRaw:
+            SendToServer(c.str);
             break;
 
         case CmdType::QuestAddStep:
@@ -1189,11 +1195,21 @@ void RunScript(const Snapshot& snap)
     if (!strcmp(op, "enter"))      { State().Push({ CmdType::EnterEditor }); return; }
     if (!strcmp(op, "exit"))       { State().Push({ CmdType::ExitEditor }); return; }
 
-    if (!strcmp(op, "spawn"))
+    if (!strcmp(op, "spawn") || !strcmp(op, "spawnat"))   // spawnat <Class> x y z yaw -- at a fixed spot
     {
+        std::string what = rest;
+        double fx = 0, fy = 0, fz = 0, fyaw = 0;
+        const bool fixed = !strcmp(op, "spawnat");
+        if (fixed)
+        {
+            char name[128] = {};
+            if (sscanf_s(rest.c_str(), "%127s %lf %lf %lf %lf", name, (unsigned)sizeof(name), &fx, &fy, &fz, &fyaw) < 4)
+            { Log("[script] FAIL spawnat: want <Class> x y z [yaw]"); return; }
+            what = name;
+        }
         const PaletteItem* pick = nullptr;
-        for (const auto& it : g_palette) if (it.name.find(rest) != std::string::npos) { pick = &it; break; }
-        if (!pick) { Log("[script] FAIL spawn: nothing in the %d-item palette matches '%s'", (int)g_palette.size(), rest.c_str()); return; }
+        for (const auto& it : g_palette) if (it.name.find(what) != std::string::npos) { pick = &it; break; }
+        if (!pick) { Log("[script] FAIL spawn: nothing in the %d-item palette matches '%s'", (int)g_palette.size(), what.c_str()); return; }
         const double d2r = 3.14159265358979 / 180.0;
         const double cp = std::cos(snap.cameraRot.pitch * d2r), sp = std::sin(snap.cameraRot.pitch * d2r);
         const double cy = std::cos(snap.cameraRot.yaw * d2r),   sy = std::sin(snap.cameraRot.yaw * d2r);
@@ -1201,6 +1217,7 @@ void RunScript(const Snapshot& snap)
         c.str = pick->path;
         c.loc = { snap.cameraPos.x + cp * cy * 400.0, snap.cameraPos.y + cp * sy * 400.0, snap.cameraPos.z + sp * 400.0 };
         c.rot = { 0.0, snap.cameraRot.yaw + 180.0, 0.0 };   // facing the camera, as the UI places things
+        if (fixed) { c.loc = { fx, fy, fz }; c.rot = { 0.0, fyaw, 0.0 }; }
         g_lastSpawnClass = pick->name;
         g_lastSpawnLoc = c.loc;
         g_lastRot = c.rot;
@@ -1255,6 +1272,28 @@ void RunScript(const Snapshot& snap)
         Log("[script] spawnatplayer %s at (%.0f,%.0f,%.0f) next to %s", pick->name.c_str(), c.loc.x, c.loc.y, c.loc.z, other->GetName().c_str());
         return;
     }
+    if (!strcmp(op, "coinrun"))               // coinrun <sec> <questHex32> -- a red-coin run 4 m ahead: 3 coins + a start button
+    {
+        char q[64] = {};
+        double sec = 30;
+        if (sscanf_s(rest.c_str(), "%lf %63s", &sec, q, (unsigned)sizeof(q)) != 2) { Log("[script] FAIL coinrun: want <sec> <questHex32>"); return; }
+        const double d2r = 3.14159265358979 / 180.0;
+        const double cy = std::cos(snap.cameraRot.yaw * d2r), sy = std::sin(snap.cameraRot.yaw * d2r);
+        const double bx = snap.cameraPos.x + cy * 400.0, by = snap.cameraPos.y + sy * 400.0, bz = snap.cameraPos.z - 80.0;
+        char msg[600];
+        snprintf(msg, sizeof(msg), "SE|COINRUN|new|%.1f,%.1f,%.1f|%.0f|%s|%.1f,%.1f,%.1f;%.1f,%.1f,%.1f;%.1f,%.1f,%.1f|%.1f,%.1f,%.1f",
+                 bx, by, bz, sec, q,
+                 bx + cy * 300.0, by + sy * 300.0, bz + 60.0,
+                 bx - sy * 300.0, by + cy * 300.0, bz + 60.0,
+                 bx + sy * 300.0, by - cy * 300.0, bz + 60.0,
+                 bx - sy * 150.0, by + cy * 150.0, bz);
+        SendToServer(msg);
+        g_lastSpawnClass = "LE_BP_New_RedCoinTimedQuest_C";
+        g_lastSpawnLoc = { bx, by, bz };
+        g_lastHandle.clear();
+        Log("[script] coinrun at (%.0f,%.0f,%.0f) %0.fs quest %s", bx, by, bz, sec, q);
+        return;
+    }
     if (!strcmp(op, "sbadd"))                 // sbadd <UniqueID> -- LOCAL TEST: sandbox-system placement in front of us
     {
         const double d2r = 3.14159265358979 / 180.0;
@@ -1267,6 +1306,52 @@ void RunScript(const Snapshot& snap)
         Log("[script] sbadd %s at %s", rest.c_str(), loc);
         return;
     }
+    if (!strcmp(op, "scripts"))               // scripts [filter] -- Luau scripts each loaded gamemode carries (LGM+720)
+    {
+        auto* cls = SDK::UObject::FindClassFast("LoadedGameMode");
+        const int32_t n = SDK::UObject::GObjects->Num();
+        auto readable = [](const void* p, size_t len) { return p && !IsBadReadPtr(p, len); };
+        auto wstr = [&](const void* elem, std::string& out) -> bool {
+            if (!readable(elem, 16)) return false;
+            const wchar_t* w = *reinterpret_cast<wchar_t* const*>(elem);
+            const int len = *reinterpret_cast<const int32_t*>(reinterpret_cast<const uint8_t*>(elem) + 8);
+            if (len <= 1 || len > 200 || !readable(w, len * 2)) return false;
+            out.clear();
+            for (int i = 0; i < len - 1; ++i) { if (w[i] < 32 || w[i] > 126) return false; out.push_back(static_cast<char>(w[i])); }
+            return true;
+        };
+        for (int32_t i = 0; cls && i < n; ++i)
+        {
+            SDK::UObject* l = SDK::UObject::GObjects->GetByIndex(i);
+            if (!l || l->IsDefaultObject() || !l->IsA(cls)) continue;
+            const uintptr_t map = reinterpret_cast<uintptr_t>(l) + 720;
+            const uint8_t* data = *reinterpret_cast<uint8_t* const*>(map);
+            const int num = *reinterpret_cast<const int32_t*>(map + 8);
+            size_t stride = 0;
+            for (size_t st : { (size_t)0x20, (size_t)0x28, (size_t)0x30, (size_t)0x38, (size_t)0x40 })
+            {
+                std::string t0, t1;
+                if (num >= 2 && wstr(data, t0) && wstr(data + st, t1)) { stride = st; break; }
+            }
+            std::string slotId = "?";
+            if (void* slotActor = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(l) + 0x320))
+                wstr(reinterpret_cast<uint8_t*>(slotActor) + 0x390, slotId);
+            Log("[script] SCRIPTS %s slot='%s' entries=%d stride=0x%zX", l->GetName().c_str(), slotId.c_str(), num, stride);
+            for (int k = 0; stride && k < num && k < 400; ++k)
+            {
+                std::string key;
+                if (!wstr(data + k * stride, key)) continue;
+                if (!rest.empty() && key.find(rest) == std::string::npos) continue;
+                Log("[script]   script '%s'", key.c_str());
+            }
+        }
+        return;
+    }
+    if (!strcmp(op, "sbtexts"))               // sbtexts <text> -- LOCAL TEST: four sandbox texts around a real player
+    {
+        SendToServer("SE|SBTEXTS|" + rest);
+        return;
+    }
     if (!strcmp(op, "sandbox"))               // sandbox -- LOCAL TEST: server logs the sandbox object system
     {
         SendToServer("SE|SANDBOX");
@@ -1275,6 +1360,14 @@ void RunScript(const Snapshot& snap)
     if (!strcmp(op, "testquest"))             // testquest <id> -- LOCAL TEST: server builds a quest at a real player
     {
         SendToServer("SE|TESTQUEST|" + rest);
+        return;
+    }
+    if (!strcmp(op, "qcoinrun"))              // qcoinrun <seconds> <coins> <title...> -- publish a red coin run via the UI path
+    {
+        int secs = 60, n = 4, used = 0;
+        sscanf_s(rest.c_str(), "%d %d %n", &secs, &n, &used);
+        ScriptCoinRun(snap, rest.substr(used), secs, n);
+        Log("[script] qcoinrun '%s' %ds %d coins", rest.substr(used).c_str(), secs, n);
         return;
     }
     if (!strcmp(op, "qpub"))                  // qpub <id> <radiusCm> <timeLimitS> <title...> -- publish the qstep list
@@ -1309,14 +1402,23 @@ void RunScript(const Snapshot& snap)
             (unsigned long long)(exec ? exec - base : 0), f ? (unsigned)f->FunctionFlags : 0);
         return;
     }
-    if (!strcmp(op, "pick"))                  // pick <Class> -- target the existing instance nearest the camera
-    {
+    if (!strcmp(op, "pick") || !strcmp(op, "pickat"))   // pick <Class> -- the instance nearest the camera
+    {                                                     // pickat <Class> x y z -- the instance nearest a point
+        std::string cls = rest;
+        Vec3 at = snap.cameraPos;
+        if (!strcmp(op, "pickat"))
+        {
+            char name[128] = {};
+            if (sscanf_s(rest.c_str(), "%127s %lf %lf %lf", name, (unsigned)sizeof(name), &at.x, &at.y, &at.z) != 4)
+            { Log("[script] FAIL pickat: want <Class> x y z"); return; }
+            cls = name;
+        }
         const SceneObject* best = nullptr;
         double bestD = 1e30;
         for (const SceneObject& s : g_lastObjects)
         {
-            if (s.className.find(rest) == std::string::npos) continue;
-            const double dx = s.location.x - snap.cameraPos.x, dy = s.location.y - snap.cameraPos.y, dz = s.location.z - snap.cameraPos.z;
+            if (s.className.find(cls) == std::string::npos) continue;
+            const double dx = s.location.x - at.x, dy = s.location.y - at.y, dz = s.location.z - at.z;
             const double d = dx * dx + dy * dy + dz * dz;
             if (d < bestD) { bestD = d; best = &s; }
         }
@@ -1408,6 +1510,43 @@ void RunScript(const Snapshot& snap)
         Log("[script] callfn %s returned (client alive)", rest.c_str());
         return;
     }
+    if (!strcmp(op, "compids"))               // compids -- the prefab's component tables: ID/name -> component
+    {
+        SDK::UObject* pc = sereflect::Hop(static_cast<SDK::UObject*>(o->ptr), "Prefab");
+        if (!pc) pc = sereflect::Hop(static_cast<SDK::UObject*>(o->ptr), "ObjectPrefab");
+        if (!pc) { Log("[script] compids: no prefab component"); return; }
+        for (int t = 0; t < 2; ++t)
+        {
+            const uintptr_t map = reinterpret_cast<uintptr_t>(pc) + (t == 0 ? 0x2F0 : 0x340);
+            const uint8_t* data = *reinterpret_cast<uint8_t* const*>(map);
+            const int num = *reinterpret_cast<const int32_t*>(map + 8);
+            for (int i = 0; data && i < num && i < 32; ++i)
+            {
+                const uint8_t* e = data + i * 0x20;
+                const wchar_t* k = *reinterpret_cast<wchar_t* const*>(e);
+                auto* v = *reinterpret_cast<SDK::UObject* const*>(e + 0x10);
+                if (!k) continue;
+                Log("[script] COMPID %s '%ls' -> %s (%s)", t == 0 ? "id  " : "name", k, v ? v->GetName().c_str() : "-",
+                    v && v->Class ? v->Class->GetName().c_str() : "-");
+            }
+        }
+        return;
+    }
+    if (!strcmp(op, "sbtree"))                // sbtree -- LOCAL TEST: server dumps this object's NetVar subtree
+    {
+        SendToServer("SE|SBTREE|" + IdentFor(o->handle));
+        return;
+    }
+    if (!strcmp(op, "sbprobe"))               // sbprobe -- LOCAL TEST: server probes this object's NetVar subtree
+    {
+        SendToServer("SE|SBPROBE|" + IdentFor(o->handle));
+        return;
+    }
+    if (!strcmp(op, "sbdesc"))                // sbdesc -- LOCAL TEST: server prints this object's sandbox Desc
+    {
+        SendToServer("SE|SBDESC|" + IdentFor(o->handle));
+        return;
+    }
     if (!strcmp(op, "qstep"))                 // qstep -- the last spawned object becomes the next checkpoint
     {
         Command s2{ CmdType::QuestAddStep }; s2.str = o->handle; s2.str2 = "0"; State().Push(s2);
@@ -1435,6 +1574,46 @@ void RunScript(const Snapshot& snap)
             what = b;
         }
         Log("[script] TRACEDOWN over %s: hit %s", o->className.c_str(), what.c_str());
+        return;
+    }
+    if (!strcmp(op, "press"))                 // press -- LOCAL TEST: press a ProgressionButton on THIS client (OnPressed)
+    {
+        auto* root = static_cast<SDK::UObject*>(o->ptr);
+        auto* bcls = SDK::UObject::FindClassFast("ProgressionButtonComponent");
+        const int32_t n = SDK::UObject::GObjects->Num();
+        SDK::UObject* comp = nullptr;
+        for (int32_t i = 0; bcls && i < n && !comp; ++i)
+        {
+            SDK::UObject* c = SDK::UObject::GObjects->GetByIndex(i);
+            if (c && c->Outer == root && c->IsA(bcls)) comp = c;
+        }
+        if (!comp) { Log("[script] FAIL press: %s has no ProgressionButtonComponent", root->GetName().c_str()); return; }
+        SDK::UFunction* fn = sereflect::FindFn(comp, "OnPressed");
+        if (!fn) { Log("[script] FAIL press: no OnPressed"); return; }
+        static uint8_t zeroArgs[256] = {};
+        sereflect::CallFn(comp, fn, zeroArgs);
+        Log("[script] pressed %s", comp->GetName().c_str());
+        return;
+    }
+    if (!strcmp(op, "toggle"))                // toggle on|off -- LOCAL TEST: flip a switch the way a player's press does
+    {                                         // (UToggleableComponent enable/disable writer, on THIS client)
+        auto* root = static_cast<SDK::UObject*>(o->ptr);
+        auto* tcls = SDK::UObject::FindClassFast("ToggleableComponent");
+        const int32_t n = SDK::UObject::GObjects->Num();
+        SDK::UObject* comp = nullptr;
+        for (int32_t i = 0; tcls && i < n && !comp; ++i)
+        {
+            SDK::UObject* c = SDK::UObject::GObjects->GetByIndex(i);
+            if (c && c->Outer == root && c->IsA(tcls)) comp = c;
+        }
+        if (!comp) { Log("[script] FAIL toggle: %s has no ToggleableComponent", root->GetName().c_str()); return; }
+        const bool on = rest != "off";
+        const uintptr_t fn = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)) + (on ? 0x53A8DC0 : 0x53A8C90);
+        const uintptr_t gd = *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(comp) + 0x288);
+        Log("[script] toggle %s on %s (gameData handle %s)", on ? "ON" : "OFF", comp->GetName().c_str(), gd ? "bound" : "UNBOUND");
+        reinterpret_cast<void(__fastcall*)(void*)>(fn)(comp);
+        const uint8_t now = *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(comp) + 0x479);
+        Log("[script] toggle done: IsEnabled=%d", now);
         return;
     }
     if (!strcmp(op, "comps"))                 // comps -- every component this actor owns, with collision (probing)
@@ -1512,7 +1691,9 @@ void RunScript(const Snapshot& snap)
                 Log("[script]   %-30s %-18s flags=%016llx off=0x%X  [%s]%s%s", f->Name.ToString().c_str(),
                     sereflect::FieldClassName(f).c_str(), (unsigned long long)fp->PropertyFlags, fp->Offset, owner.c_str(),
                     t != sereflect::PType::Unsupported ? "  = " : "",
-                    t != sereflect::PType::Unsupported ? sereflect::Read(obj, fp, t).c_str() : "");
+                    t != sereflect::PType::Unsupported ? sereflect::Read(obj, fp, t).c_str()
+                    : (sereflect::FieldClassName(f) == "ArrayProperty" || sereflect::FieldClassName(f) == "MapProperty")
+                        ? ("  num=" + std::to_string(*reinterpret_cast<int32_t*>(sereflect::Addr(obj, fp) + 8))).c_str() : "");
             }
         }
         return;

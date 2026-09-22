@@ -1,0 +1,14 @@
+log PRB start
+enter
+wait 3
+spawn LE_BP_LightSwitch_C
+wait 8
+classes
+comps
+sbdesc
+pick LE_BP_New_RedCoinTimedQuest_C
+sbprobe
+spawn LE_BP_Text_C
+wait 8
+sbprobe
+log PRB done
