@@ -1,0 +1,65 @@
+# FINAL (observer half): the wall's visibility, every 2 s.
+log FIN-OBS start
+enter
+wait 40
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+wait 2
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+wait 2
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+wait 2
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+wait 2
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+wait 2
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+wait 2
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+wait 2
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+wait 2
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+wait 2
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+wait 2
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+wait 2
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+wait 2
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+wait 2
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+wait 2
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+wait 2
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+wait 2
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+wait 2
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+wait 2
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+wait 2
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+wait 2
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+wait 2
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+wait 2
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+wait 2
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+wait 2
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+wait 2
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+wait 2
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+wait 2
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+wait 2
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+wait 2
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+wait 2
+log FIN-OBS done

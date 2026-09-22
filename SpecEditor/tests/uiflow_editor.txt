@@ -1,0 +1,31 @@
+# UI flow (editor half; pair with uiflow_observer.txt). 1) What the Game data panel shows for a selected
+# switch after LightSwitch is attached and wired ([ui] lines). 2) DiagSwitch on a second pair: which
+# visibility / toggle calls take effect, logged on every machine, watched by the observer.
+log UIF-ED start
+enter
+wait 3
+spawnat BP_GolfTee_C -300 -2300 -27000 0
+wait 5
+spawnat LE_BP_LightSwitch_C -300 -2450 -27000 0
+wait 5
+select
+wait 3
+luaufile LightSwitch
+wait 12
+luauref LightSwitch Switch ToggleableComponent self
+wait 8
+luauref LightSwitch Target PhysicalComponent BP_GolfTee_C -300 -2300 -27000
+wait 10
+log UIF-ED shot
+wait 4
+spawnat BP_GolfTee_C -700 -2300 -27000 0
+wait 5
+spawnat LE_BP_LightSwitch_C -700 -2450 -27000 0
+wait 5
+luaufile DiagSwitch
+wait 10
+luauref DiagSwitch Switch ToggleableComponent self
+wait 8
+luauref DiagSwitch Target PhysicalComponent BP_GolfTee_C -700 -2300 -27000
+wait 35
+log UIF-ED done

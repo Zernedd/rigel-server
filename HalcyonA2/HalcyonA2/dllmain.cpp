@@ -1437,6 +1437,32 @@ static LONG CALLBACK CrashReporterVeh(EXCEPTION_POINTERS* ep)
         }
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
+    // The frames nearest the fault are all the same function in a stack overflow (runaway recursion), so
+    // also list the OUTERMOST ones, scanning up from the bottom of this thread's stack: they name the
+    // operation that started it.
+    __try
+    {
+        const uintptr_t stackBase = reinterpret_cast<uintptr_t>(reinterpret_cast<NT_TIB*>(NtCurrentTeb())->StackBase);
+        const uintptr_t sp = c->Rsp;
+        int printed = 0;
+        for (uintptr_t a = stackBase - 8; a > sp && a > stackBase - 0x6000 && printed < 40; a -= 8)
+        {
+            const uintptr_t v = *reinterpret_cast<uintptr_t*>(a);
+            if (v > base && v < base + 0x0C000000)
+            {
+                HxLog("[HalcyonA2][CRASH]   outer[-0x%04llX] GAME +0x%llX\n", (unsigned long long)(stackBase - a),
+                      (unsigned long long)(v - base));
+                ++printed;
+            }
+            else if (self && v > self && v < self + 0x00400000)
+            {
+                HxLog("[HalcyonA2][CRASH]   outer[-0x%04llX] SELF +0x%llX\n", (unsigned long long)(stackBase - a),
+                      (unsigned long long)(v - self));
+                ++printed;
+            }
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
     HxLog("[HalcyonA2][CRASH] ***** end (GAME rvas -> IDA; SELF rvas -> HalcyonA2.map) *****\n\n");
     return EXCEPTION_CONTINUE_SEARCH;
 }

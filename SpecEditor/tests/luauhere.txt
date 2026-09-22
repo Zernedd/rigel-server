@@ -1,0 +1,16 @@
+# The live crash: a script attached to an object in the area the EDITOR is standing in (so the
+# new source node is replicated to a subscribed player straight away).
+log LUAUHERE start
+enter
+wait 3
+where
+spawn LE_BP_LightSwitch_C
+wait 8
+where
+luaufile LightSwitch
+wait 15
+spawnat LE_BP_LightSwitch_C -450 2060 -28625 0
+wait 8
+luaufile LightSwitch
+wait 15
+log LUAUHERE done

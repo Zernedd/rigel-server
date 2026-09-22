@@ -1,0 +1,64 @@
+log UIF-OBS start
+enter
+wait 30
+vis BP_GolfTee_C -700 -2300 -27000
+wait 1
+vis BP_GolfTee_C -700 -2300 -27000
+wait 1
+vis BP_GolfTee_C -700 -2300 -27000
+wait 1
+vis BP_GolfTee_C -700 -2300 -27000
+wait 1
+vis BP_GolfTee_C -700 -2300 -27000
+wait 1
+vis BP_GolfTee_C -700 -2300 -27000
+wait 1
+vis BP_GolfTee_C -700 -2300 -27000
+wait 1
+vis BP_GolfTee_C -700 -2300 -27000
+wait 1
+vis BP_GolfTee_C -700 -2300 -27000
+wait 1
+vis BP_GolfTee_C -700 -2300 -27000
+wait 1
+vis BP_GolfTee_C -700 -2300 -27000
+wait 1
+vis BP_GolfTee_C -700 -2300 -27000
+wait 1
+vis BP_GolfTee_C -700 -2300 -27000
+wait 1
+vis BP_GolfTee_C -700 -2300 -27000
+wait 1
+vis BP_GolfTee_C -700 -2300 -27000
+wait 1
+vis BP_GolfTee_C -700 -2300 -27000
+wait 1
+vis BP_GolfTee_C -700 -2300 -27000
+wait 1
+vis BP_GolfTee_C -700 -2300 -27000
+wait 1
+vis BP_GolfTee_C -700 -2300 -27000
+wait 1
+vis BP_GolfTee_C -700 -2300 -27000
+wait 1
+vis BP_GolfTee_C -700 -2300 -27000
+wait 1
+vis BP_GolfTee_C -700 -2300 -27000
+wait 1
+vis BP_GolfTee_C -700 -2300 -27000
+wait 1
+vis BP_GolfTee_C -700 -2300 -27000
+wait 1
+vis BP_GolfTee_C -700 -2300 -27000
+wait 1
+vis BP_GolfTee_C -700 -2300 -27000
+wait 1
+vis BP_GolfTee_C -700 -2300 -27000
+wait 1
+vis BP_GolfTee_C -700 -2300 -27000
+wait 1
+vis BP_GolfTee_C -700 -2300 -27000
+wait 1
+vis BP_GolfTee_C -700 -2300 -27000
+wait 1
+log UIF-OBS done

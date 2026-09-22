@@ -278,6 +278,7 @@ static void SbOwnedForget(const std::string& idx);     // below
 struct SbOwned;
 static std::string SbRespawnKeep(SDK::AActor* a, const SbOwned& keep, const char* why);   // below
 static SDK::AActor* SbActorForIdx(const std::string& idx);                                  // below
+static void SbMoveFlush();                                                                  // below (moves settle)
 static std::string g_sbSpawnCls;   // the editor class of the sandbox spawn in flight (for SbOwned)
 static std::string g_sbSpawnPath;  // ...and the palette path it was asked for (saved levels reload by it)
 static std::vector<std::string> g_sbPendingScripts;   // custom Luau script names for the spawn in flight
@@ -530,6 +531,7 @@ static void SpecEditTick()
     if (!g_specEdit) return;
     SeQuestTick();
     SeLvTick();
+    SbMoveFlush();
     if (g_seProxies.empty()) return;
     static ULONGLONG s_last = 0;
     const ULONGLONG now = GetTickCount64();
@@ -1677,12 +1679,42 @@ static int SbOwnedNodeCore(void* lgmHandle, uint64_t objectsBits, uint64_t idxBi
     return r;
 }
 
+// Moves waiting to be applied: object idx -> when it last moved.
+static std::unordered_map<std::string, ULONGLONG> g_sbMovePending;
+constexpr ULONGLONG kSbMoveSettleMs = 300;
+static void SbMoveFlush()
+{
+    if (g_sbMovePending.empty()) return;
+    const ULONGLONG now = GetTickCount64();
+    std::vector<std::string> due;
+    for (const auto& kv : g_sbMovePending) if (now - kv.second >= kSbMoveSettleMs) due.push_back(kv.first);
+    for (const auto& idx : due)
+    {
+        g_sbMovePending.erase(idx);
+        const SbOwned* o = SbOwnedByIdx(idx);
+        if (!o) continue;                                // deleted or rebuilt meanwhile
+        const SbOwned keep = *o;                         // o lives in g_sbOwned, which the rebuild changes
+        SbRespawnKeep(SbActorForIdx(keep.idx), keep, "move");
+    }
+}
+
 static bool SbOwnedApply(SbOwned& o, bool remove)
 {
     if (!o.lgm || !SeAlive(o.lgm))                       // its gamemode was unloaded (district change): gone
     {
         HxLog("[HalcyonA2][SPECEDIT] node %s %s: its gamemode is gone, dropping the record\n", remove ? "delete" : "move", o.idx.c_str());
         return false;
+    }
+    if (!remove)
+    {
+        // Move = rebuild in place (same id, area, scripts, slot wiring and Game data). It used to merge a new
+        // descriptor into the live node; that left the node's parent-id bookkeeping cyclic, and the next time
+        // the node was removed -- attaching a script, deleting it, unloading its level -- the game's path walk
+        // (+0x4665F80) recursed until the stack ran out and the server died. Reproduced: tests/movethenluau.txt.
+        // A drag sends a move ~30 times a second: the record (o.loc/rot/scl, already updated by the caller) takes
+        // every one, and the object is rebuilt once, when it has been still for kSbMoveSettleMs (SbMoveFlush).
+        g_sbMovePending[o.idx] = GetTickCount64();
+        return true;
     }
     SDK::AActor* slot = o.lgm ? *reinterpret_cast<SDK::AActor**>(reinterpret_cast<uintptr_t>(o.lgm) + 0x320) : nullptr;
     double pos[3] = { o.loc[0], o.loc[1], o.loc[2] }, r3[3] = { o.rot[0], o.rot[1], o.rot[2] };
@@ -1729,6 +1761,7 @@ static bool SeSandboxXform(SDK::AActor* a, const double* loc, const double* rot,
     if (SbOwned* o = SbOwnedByIdx(FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(pc) + 0x248))))
     {
         memcpy(o->loc, loc, sizeof(o->loc)); memcpy(o->rot, rot, sizeof(o->rot)); memcpy(o->scl, scl, sizeof(o->scl));
+        return SbOwnedApply(*o, false);                  // ours: rebuild in place, never merge (see SbOwnedApply)
     }
     SDK::UObject* lgm = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(pc) + 0x440);
     SDK::AActor* slot = lgm ? *reinterpret_cast<SDK::AActor**>(reinterpret_cast<uintptr_t>(lgm) + 0x320) : nullptr;
@@ -3632,6 +3665,7 @@ static bool SeLuauPutSource(SDK::UObject* lgm, const std::string& name, const st
 static std::string SbRespawnKeep(SDK::AActor* a, const SbOwned& keep, const char* why)
 {
     const std::string oldIdx = keep.idx;
+    g_sbMovePending.erase(oldIdx);                          // this rebuild already uses the latest transform
     if (!(a && SeSandboxDelete(a)))
     {
         SbOwned tmp = keep;

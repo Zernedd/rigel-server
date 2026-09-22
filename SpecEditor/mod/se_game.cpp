@@ -1584,6 +1584,42 @@ void RunScript(const Snapshot& snap)
     }
     if (!strcmp(op, "sbtypes")) { SendToServer("SE|SBTYPES"); return; }   // LOCAL TEST: server lists every prefab type
     if (!strcmp(op, "raw")) { SendToServer(rest); Log("[script] raw %s", rest.c_str()); return; }   // raw <SE|...>
+    if (!strcmp(op, "vis"))                   // vis <Class> x y z [0|1] -- is the instance nearest a point SHOWING on
+    {                                         // this client? (a script's hideLua/showLua; other players' view)
+        char name[128] = {};
+        Vec3 at{};
+        int want = -1;
+        const int got = sscanf_s(rest.c_str(), "%127s %lf %lf %lf %d", name, (unsigned)sizeof(name), &at.x, &at.y, &at.z, &want);
+        if (got < 4) { Log("[script] FAIL vis: want <Class> x y z [0|1]"); return; }
+        const SceneObject* best = nullptr;
+        double bestD = 1e30;
+        for (const SceneObject& s : g_lastObjects)
+        {
+            if (s.className.find(name) == std::string::npos) continue;
+            const double dx = s.location.x - at.x, dy = s.location.y - at.y, dz = s.location.z - at.z;
+            const double d = dx * dx + dy * dy + dz * dz;
+            if (d < bestD) { bestD = d; best = &s; }
+        }
+        if (!best || bestD > 600.0 * 600.0) { Log("[script] %s vis: no %s within 6m of (%.0f,%.0f,%.0f)", want == -1 ? "INFO" : "FAIL", name, at.x, at.y, at.z); return; }
+        auto* a = static_cast<SDK::AActor*>(best->ptr);
+        int prims = 0, shown = 0;                             // the actor's primitives (its default subobjects)
+        auto* pcls = SDK::UObject::FindClassFast("PrimitiveComponent");
+        const int32_t nObj = SDK::UObject::GObjects->Num();
+        for (int32_t i = 0; pcls && i < nObj; ++i)
+        {
+            SDK::UObject* c = SDK::UObject::GObjects->GetByIndex(i);
+            if (!c || c->Outer != a || !c->IsA(pcls)) continue;
+            auto* p = static_cast<SDK::UPrimitiveComponent*>(c);
+            ++prims;
+            if (p->bVisible && !p->bHiddenInGame) ++shown;
+        }
+        const bool showing = !a->bHidden && shown > 0;
+        const char* verdict = want == -1 ? "INFO" : (showing == (want == 1) ? "PASS" : "FAIL");
+        Log("[script] %s vis %s at (%.0f,%.0f,%.0f): %s (actor hidden=%d, %d/%d primitive(s) visible)", verdict,
+            a->GetName().c_str(), best->location.x, best->location.y, best->location.z, showing ? "SHOWING" : "HIDDEN",
+            a->bHidden ? 1 : 0, shown, prims);
+        return;
+    }
     if (!strcmp(op, "coinrun"))               // coinrun <sec> <questHex32> -- a red-coin run 4 m ahead: 3 coins + a start button
     {
         char q[64] = {};
@@ -2033,6 +2069,12 @@ void RunScript(const Snapshot& snap)
         std::string nm = rest;
         if (nm.find(".luau") == std::string::npos) nm += ".luau";
         Command c{ CmdType::LuauRemove }; c.str = o->handle; c.str2 = nm; State().Push(c);
+        return;
+    }
+    if (!strcmp(op, "select"))                // select -- the UI selects the last object, as a click would
+    {
+        RequestUiSelect(o->handle);
+        Log("[script] select %s", o->handle.c_str());
         return;
     }
     if (!strcmp(op, "luaufile"))              // luaufile <name> -- attach RigelScripts/<name>.luau to the last object

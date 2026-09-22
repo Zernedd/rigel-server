@@ -1,0 +1,73 @@
+# UI flow (observer half): polls the DiagSwitch target every 2 s.
+log UIF-OBS start
+enter
+wait 55
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+vis BP_GolfTee_C -700 -2300 -27000
+wait 2
+log UIF-OBS done

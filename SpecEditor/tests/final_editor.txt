@@ -1,0 +1,47 @@
+# FINAL end-to-end (editor half; pair with final_observer.txt).
+# LightSwitch on a wall: place, move, attach, wire, move again; flip the switch through Game data (the
+# "Is Enabled" box in the editor) -- the observer must see the wall hide/show. Then delete both (removal
+# after moves: the old crash path), and move + delete one of the STATION's own switches (merge path).
+log FIN-ED start
+enter
+wait 3
+spawnat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000 0
+wait 5
+spawnat LE_BP_LightSwitch_C -300 -2450 -27000 0
+wait 5
+move 0 -60 0
+wait 4
+select
+luaufile LightSwitch
+wait 10
+luauref LightSwitch Switch ToggleableComponent self
+wait 8
+luauref LightSwitch Target PhysicalComponent LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+wait 8
+move 0 -40 0
+wait 6
+log FIN-ED wired (observer: wall should be HIDDEN, switch is off)
+wait 8
+log FIN-ED switch ON
+dataset gd/IsEnabled bool 1
+wait 8
+log FIN-ED switch OFF
+dataset gd/IsEnabled bool 0
+wait 8
+log FIN-ED switch ON again
+dataset gd/IsEnabled bool 1
+wait 8
+log FIN-ED delete switch
+delete
+wait 6
+pickat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+delete
+wait 6
+log FIN-ED station object
+pick LE_BP_LightSwitch_C
+where
+move 0 50 0
+wait 6
+delete
+wait 8
+log FIN-ED done

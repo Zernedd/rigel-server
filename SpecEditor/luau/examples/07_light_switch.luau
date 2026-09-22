@@ -8,6 +8,8 @@
 --   3. In Details > Game data, under "Script LightSwitch.luau", drag the switch itself from the Outliner onto
 --      the Switch slot, and the object onto the Target slot.
 -- Flip the switch: the target shows when it's on and hides (and stops blocking players) when it's off.
+-- Good targets are things whose look IS their physical part: walls, platforms, cubes, ramps, meshes.
+-- A few gameplay objects keep their visible model separate (a golf tee, for one) and won't disappear.
 
 -- External Dependencies (slots: drag objects onto these in the editor)
 local Switch: ToggleableComponent = nil

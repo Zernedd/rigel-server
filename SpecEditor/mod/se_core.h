@@ -27,6 +27,7 @@
 namespace se {
 
 void Log(const char* fmt, ...);          // %TEMP%\spec_editor.log
+void RequestUiSelect(const std::string& handle);   // se_ui.cpp: the UI selects this next frame (test scripts)
 
 // ── what the render thread is allowed to know about the world ────────────────────────────────
 struct Vec3 { double x = 0, y = 0, z = 0; };

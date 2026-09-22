@@ -1,0 +1,14 @@
+log UIF-ED start
+enter
+wait 3
+spawnat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -700 -2300 -27000 0
+wait 5
+spawnat LE_BP_LightSwitch_C -700 -2450 -27000 0
+wait 5
+luaufile DiagSwitch
+wait 10
+luauref DiagSwitch Switch ToggleableComponent self
+wait 8
+luauref DiagSwitch Target PhysicalComponent LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -700 -2300 -27000
+wait 35
+log UIF-ED done

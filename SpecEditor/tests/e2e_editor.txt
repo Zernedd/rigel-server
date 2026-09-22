@@ -1,0 +1,39 @@
+# END TO END (editor half). Pair with e2e_observer.txt on a second client.
+# Place a target and a switch, MOVE the switch (the node-merge path that used to poison the tree), attach
+# LightSwitch, wire both slots, move it again, read its Game data (the script's fields), then flip it off
+# and on. The observer -- another player -- must see the target hide and come back.
+log E2E-ED start
+enter
+wait 3
+spawnat BP_GolfTee_C -300 -2300 -27000 0
+wait 6
+expect 1
+spawnat LE_BP_LightSwitch_C -300 -2450 -27000 0
+wait 6
+expect 1
+move 0 -80 0
+wait 5
+where
+luaufile LightSwitch
+wait 10
+luauref LightSwitch Switch ToggleableComponent self
+wait 8
+luauref LightSwitch Target PhysicalComponent BP_GolfTee_C -300 -2300 -27000
+wait 10
+move 0 -40 0
+wait 6
+where
+data
+wait 4
+datadump
+log E2E-ED toggle-off
+toggle off
+wait 6
+vis BP_GolfTee_C -300 -2300 -27000 0
+wait 14
+log E2E-ED toggle-on
+toggle on
+wait 6
+vis BP_GolfTee_C -300 -2300 -27000 1
+wait 14
+log E2E-ED done

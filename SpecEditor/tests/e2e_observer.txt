@@ -1,0 +1,39 @@
+# END TO END (observer half): another player on the same server. Places nothing; reports every 4 s whether
+# the editor's switch and target exist here and whether the target is showing.
+log E2E-OBS start
+enter
+wait 30
+vis LE_BP_LightSwitch_C -300 -2570 -27000
+vis BP_GolfTee_C -300 -2300 -27000
+wait 4
+vis BP_GolfTee_C -300 -2300 -27000
+wait 4
+vis BP_GolfTee_C -300 -2300 -27000
+wait 4
+vis BP_GolfTee_C -300 -2300 -27000
+wait 4
+vis BP_GolfTee_C -300 -2300 -27000
+wait 4
+vis BP_GolfTee_C -300 -2300 -27000
+wait 4
+vis BP_GolfTee_C -300 -2300 -27000
+wait 4
+vis BP_GolfTee_C -300 -2300 -27000
+wait 4
+vis BP_GolfTee_C -300 -2300 -27000
+wait 4
+vis BP_GolfTee_C -300 -2300 -27000
+wait 4
+vis BP_GolfTee_C -300 -2300 -27000
+wait 4
+vis BP_GolfTee_C -300 -2300 -27000
+wait 4
+vis BP_GolfTee_C -300 -2300 -27000
+wait 4
+vis BP_GolfTee_C -300 -2300 -27000
+wait 4
+vis BP_GolfTee_C -300 -2300 -27000
+wait 4
+vis LE_BP_LightSwitch_C -300 -2570 -27000
+vis BP_GolfTee_C -300 -2300 -27000
+log E2E-OBS done

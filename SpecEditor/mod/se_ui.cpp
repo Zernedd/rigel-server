@@ -2194,6 +2194,7 @@ void AttachScriptFile(const SceneObject* sel, const ScriptFile& f, const std::st
     WatchScript(f.path, asName);
 }
 
+void DrawScriptSlots(const Snapshot& snap, const SceneObject* sel, const std::string& script);   // below
 void DrawLuau(const Snapshot& snap, const SceneObject* sel)
 {
     if (ImGui::GetTime() - g_scriptsListed > 5.0) ListScripts();
@@ -2224,6 +2225,32 @@ void DrawLuau(const Snapshot& snap, const SceneObject* sel)
         ImGui::TextDisabled("Watching:");
         for (const auto& w : g_watched) { ImGui::SameLine(); ImGui::TextDisabled("%s.luau", w.name.c_str()); }
     }
+    // The scripts this object runs, each with its slots -- right here, under the button that attached them.
+    // (They were only listed up in Game data, out of sight after attaching: "nothing comes up to configure".)
+    ImGui::Spacing();
+    if (snap.dataHandle != sel->handle)
+    {
+        static std::string s_asked;                          // Game data may be collapsed: ask once ourselves
+        if (s_asked != sel->handle) { s_asked = sel->handle; Command c{ CmdType::DataRequest }; c.str = sel->handle; State().Push(c); }
+        ImGui::TextDisabled("Loading this object's scripts...");
+    }
+    else
+    {
+        bool any = false;
+        ImGui::PushID("##luau-slots");                       // the same slots are drawn in Game data too
+        for (const auto& e : snap.data)
+        {
+            if (e.kind != "script") continue;
+            any = true;
+            ImGui::SeparatorText(("On this object: " + e.value).c_str());
+            ImGui::PushID(e.value.c_str());
+            DrawScriptSlots(snap, sel, e.value);
+            ImGui::PopID();
+        }
+        ImGui::PopID();
+        if (!any) ImGui::TextDisabled("No script on this object yet. Attach one above and its slots show up here.");
+    }
+    ImGui::Spacing();
     if (ImGui::Button("Copy the game's own scripts into the folder (examples)"))
     {
         Command c{ CmdType::ScanScripts }; State().Push(c);
@@ -2434,6 +2461,23 @@ void DrawGameData(const Snapshot& snap, const SceneObject* sel)
     auto set = [&](const Snapshot::DataEntry& e, const std::string& v) {
         Command c{ CmdType::DataSet }; c.str = sel->handle; c.str2 = e.path; c.str3 = e.kind; c.str4 = v; State().Push(c);
     };
+    {
+        // One line whenever what this section shows changes: the first thing to read when someone says
+        // "nothing comes up to configure".
+        std::string sig = sel->handle + (snap.dataHandle == sel->handle ? " loaded" : " LOADING (data is for " + snap.dataHandle + ")");
+        sig += ", " + std::to_string(snap.data.size()) + " value(s)";
+        for (const auto& e : snap.data)
+            if (e.kind == "script")
+            {
+                std::string stem = e.value;
+                if (stem.size() > 5 && stem.compare(stem.size() - 5, 5, ".luau") == 0) stem.resize(stem.size() - 5);
+                const ScriptFile* file = nullptr;
+                for (const auto& f : g_scriptFiles) if (f.name == stem) file = &f;
+                sig += "; script " + e.value + (file ? ": " + std::to_string(ParseSlots(ReadFileUtf8(file->path)).size()) + " slot(s)" : ": NO LOCAL FILE");
+            }
+        static std::string s_sig;
+        if (sig != s_sig) { s_sig = sig; Log("[ui] Game data %s", sig.c_str()); }
+    }
     if (snap.dataHandle != sel->handle) { ImGui::TextDisabled("Loading..."); return; }
     if (snap.data.empty())
     {
@@ -2999,9 +3043,18 @@ void HandleShortcuts()
 
 }  // namespace
 
+static std::mutex g_uiSelectMx;
+static std::string g_uiSelectReq;                         // a test script asked the UI to select this handle
+void RequestUiSelect(const std::string& handle) { std::lock_guard<std::mutex> lk(g_uiSelectMx); g_uiSelectReq = handle; }
+
 void DrawEditorUI()
 {
     const Snapshot snap = State().ReadSnapshot();
+    {
+        std::string req;
+        { std::lock_guard<std::mutex> lk(g_uiSelectMx); req.swap(g_uiSelectReq); }
+        if (!req.empty()) { SelectHandle(req); Log("[ui] selected %s (test script)", req.c_str()); }
+    }
 
     const SceneObject* sel = nullptr;
     for (const auto& o : snap.objects)

@@ -1,0 +1,12 @@
+# The live crash sequence: place a switch, move it through the no-server-actor path (node merge),
+# then attach a script -- the rebuild removes the merged node and the game's path walk recursed forever.
+log MTL start
+enter
+wait 3
+spawnat LE_BP_LightSwitch_C -450 2060 -28625 0
+wait 8
+raw SE|NODEMOVE|LE_BP_LightSwitch_C@-450.0,2060.0,-28625.0|-450.0,2060.0,-28565.0
+wait 6
+luaufile LightSwitch
+wait 15
+log MTL done
