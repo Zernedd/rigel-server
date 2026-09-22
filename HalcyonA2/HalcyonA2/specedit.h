@@ -278,6 +278,7 @@ static void SbOwnedForget(const std::string& idx);     // below
 struct SbOwned;
 static std::string SbRespawnKeep(SDK::AActor* a, const SbOwned& keep, const char* why);   // below
 static SDK::AActor* SbActorForIdx(const std::string& idx);                                  // below
+static double g_sbHostOutsideCm = 0;   // set by SbHostGamemode: how far outside every importance volume (cm; 0 inside)
 static void SbMoveFlush();                                                                  // below (moves settle)
 static std::string g_sbSpawnCls;   // the editor class of the sandbox spawn in flight (for SbOwned)
 static std::string g_sbSpawnPath;  // ...and the palette path it was asked for (saved levels reload by it)
@@ -324,6 +325,10 @@ static void SeSpawn(SDK::UObject* pawn, const std::string& path, const std::stri
             g_sbSpawnPath.clear();
             if (!placed.empty())
             {
+                if (g_sbHostOutsideCm > 0)                   // no module's importance volume covers this spot
+                    if (SDK::UObject* pc = SeCallerPC(pawn))
+                        SeBroadcast("SE|NOTE|This spot is outside every module area (" + std::to_string(static_cast<int>(g_sbHostOutsideCm / 100.0)) +
+                                    " m from the nearest). Players away from it may not see what you place here - build inside a game area.", pc);
                 // The sandbox spawned the server's own copy synchronously. Placed meshes still need the
                 // collision stand-in: their Physical component does not switch collision on by itself.
                 char ident[256];
@@ -2722,37 +2727,120 @@ static bool SeSandboxClassOk(const std::string& className)
 // So: the area whose slot is nearest the spawn point wins. Among areas the same distance away -- the usual
 // case is one -- an area that already hosts this prefab type is preferred, because a prefab whose behaviour
 // comes from a Luau script needs a project that carries it.
-static SDK::UObject* SbHostGamemode(const std::string& uniqueId, const double* loc)
+// ---- culling: module slots with an importance volume -------------------------------------------------
+// The culling system only treats a gamemode's objects as important where its slot is a
+// BP_ModuleSlotWithImportanceVolume_C and they sit inside that slot's ImportanceVolume box (+0x458).
+static SDK::UBoxComponent* SbImportanceBox(SDK::AActor* slot)
 {
+    static SDK::UClass* cls = nullptr;
+    if (!cls) cls = SDK::UObject::FindClassFast("BP_ModuleSlotWithImportanceVolume_C");
+    if (!slot || !cls || !slot->IsA(cls)) return nullptr;
+    return *reinterpret_cast<SDK::UBoxComponent**>(reinterpret_cast<uintptr_t>(slot) + 0x458);
+}
+// How far (cm, world) a point is outside the box; 0 = inside.
+static double SbOutsideBox(SDK::UBoxComponent* box, const double* p)
+{
+    const SDK::FTransform xf = box->K2_GetComponentToWorld();
+    const SDK::FVector l = SDK::UKismetMathLibrary::InverseTransformLocation(xf, SDK::FVector{ p[0], p[1], p[2] });
+    const SDK::FVector e = box->GetUnscaledBoxExtent();
+    const double dx = (std::max)(0.0, fabs(l.X) - e.X) * xf.Scale3D.X;
+    const double dy = (std::max)(0.0, fabs(l.Y) - e.Y) * xf.Scale3D.Y;
+    const double dz = (std::max)(0.0, fabs(l.Z) - e.Z) * xf.Scale3D.Z;
+    return sqrt(dx * dx + dy * dy + dz * dz);
+}
+// SE|SLOTS[|x,y,z] (local test): every loaded gamemode's slot -- class, importance box, and how far the point is from it.
+static void SeSlotsDump(const std::string& at)
+{
+    if (!g_seLocalTest) return;
+    double p[3]{};
+    const bool havePt = SeVec(at, p);
+    auto* cls = SDK::UObject::FindClassFast("LoadedGameMode");
     auto* pcCls = SDK::UObject::FindClassFast("PrefabComponent");
-    SDK::UObject* best = nullptr; double bestD2 = 1.0e30; bool bestType = false;
-    SDK::UObject* byType = nullptr;
+    std::unordered_map<SDK::UObject*, int> hosted;       // gamemodes that host sandbox objects (candidates today)
     const int32_t n = SDK::UObject::GObjects->Num();
     for (int32_t i = 0; pcCls && i < n; ++i)
     {
         SDK::UObject* o = SDK::UObject::GObjects->GetByIndex(i);
         if (!o || o->IsDefaultObject() || !o->IsA(pcCls)) continue;
-        const uintptr_t pc = reinterpret_cast<uintptr_t>(o);
-        SDK::UObject* lgm = *reinterpret_cast<SDK::UObject**>(pc + 0x440);
-        if (!lgm) continue;
-        SDK::UObject* def = *reinterpret_cast<SDK::UObject**>(pc + 0x278);                 // prefabDefinition
-        SDK::UObject* st = def ? *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(def) + 0x38) : nullptr;
-        const bool sameType = st && reinterpret_cast<SDK::FName*>(reinterpret_cast<uintptr_t>(st) + 0xF0)->ToString() == uniqueId;
-        if (sameType && !byType) byType = lgm;
+        if (SDK::UObject* lgm = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(o) + 0x440)) ++hosted[lgm];
+    }
+    for (int32_t i = 0; cls && i < n; ++i)
+    {
+        SDK::UObject* l = SDK::UObject::GObjects->GetByIndex(i);
+        if (!l || l->IsDefaultObject() || !l->IsA(cls)) continue;
+        uint8_t* root = reinterpret_cast<uint8_t*>(SbNodeOf(reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(l) + 0x218)));
+        const std::string mode = root ? reinterpret_cast<SDK::FName*>(root + 48)->ToString() : std::string("?");
+        SDK::AActor* slot = *reinterpret_cast<SDK::AActor**>(reinterpret_cast<uintptr_t>(l) + 0x320);
+        char b[512];
+        if (!slot) { HxLog("[HalcyonA2][SPECEDIT] SLOT %s (%s): no slot\n", l->GetName().c_str(), mode.c_str()); continue; }
+        const SDK::FVector sl = slot->K2_GetActorLocation();
+        std::string boxs = "no importance volume";
+        if (SDK::UBoxComponent* box = SbImportanceBox(slot))
+        {
+            const SDK::FVector c = box->K2_GetComponentLocation(), e = box->GetScaledBoxExtent();
+            snprintf(b, sizeof(b), "IMPORTANCE box centre (%.0f,%.0f,%.0f) half-size (%.0f,%.0f,%.0f)%s", c.X, c.Y, c.Z, e.X, e.Y, e.Z,
+                     havePt ? (" -- point " + std::to_string(static_cast<int>(SbOutsideBox(box, p))) + "cm outside").c_str() : "");
+            boxs = b;
+        }
+        snprintf(b, sizeof(b), "SLOT %s (%s): %s %s at (%.0f,%.0f,%.0f), %d sandbox object(s); %s",
+                 l->GetName().c_str(), mode.c_str(), slot->Class->GetName().c_str(), slot->GetName().c_str(), sl.X, sl.Y, sl.Z,
+                 hosted.count(l) ? hosted[l] : 0, boxs.c_str());
+        HxLog("[HalcyonA2][SPECEDIT] %s\n", b);
+    }
+}
 
-        double d2 = 1.0e29;                                                                // no slot: last resort
-        if (SDK::AActor* slot = *reinterpret_cast<SDK::AActor**>(reinterpret_cast<uintptr_t>(lgm) + 0x320))
+// Which loaded gamemode hosts a new object: the module slot whose ImportanceVolume the spot is inside, so the
+// culling system treats the object as important wherever that module is (objects hosted in a module whose
+// volume doesn't contain them were culled -- the old "nearest slot origin" rule picked, e.g., a tackleball
+// training pod 44 m away for a spot in the middle of TKBGolf's volume). In order:
+//   0. a BP_ModuleSlotWithImportanceVolume_C (exactly) whose box contains the spot -- the smallest one;
+//   1. any importance-volume slot (JakeBall / Tackleball subclasses) whose box contains it -- the smallest;
+//   2. the importance box the spot is nearest to (it will be culled out there: the editor is told);
+//   3. no importance slot at all: the nearest slot origin.
+// Only gamemodes that already host sandbox objects are candidates (they carry the "objects" container).
+static SDK::UObject* SbHostGamemode(const std::string& uniqueId, const double* loc)
+{
+    static SDK::UClass* exactCls = nullptr;
+    if (!exactCls) exactCls = SDK::UObject::FindClassFast("BP_ModuleSlotWithImportanceVolume_C");
+    auto* pcCls = SDK::UObject::FindClassFast("PrefabComponent");
+    std::unordered_set<SDK::UObject*> seen;
+    SDK::UObject* best = nullptr; int bestTier = 99; double bestScore = 1.0e300;
+    std::string bestWhy;
+    const int32_t n = SDK::UObject::GObjects->Num();
+    for (int32_t i = 0; pcCls && i < n; ++i)
+    {
+        SDK::UObject* o = SDK::UObject::GObjects->GetByIndex(i);
+        if (!o || o->IsDefaultObject() || !o->IsA(pcCls)) continue;
+        SDK::UObject* lgm = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(o) + 0x440);
+        if (!lgm || !seen.insert(lgm).second) continue;
+        SDK::AActor* slot = *reinterpret_cast<SDK::AActor**>(reinterpret_cast<uintptr_t>(lgm) + 0x320);
+        int tier = 3; double score = 1.0e299;
+        if (SDK::UBoxComponent* box = slot ? SbImportanceBox(slot) : nullptr)
+        {
+            const double out = SbOutsideBox(box, loc);
+            const SDK::FVector e = box->GetScaledBoxExtent();
+            if (out <= 1.0) { tier = slot->Class == exactCls ? 0 : 1; score = e.X * e.Y * e.Z; }   // smallest area wins
+            else            { tier = 2; score = out; }
+        }
+        else if (slot)
         {
             const SDK::FVector s = slot->GetTransform().Translation;
             const double dx = s.X - loc[0], dy = s.Y - loc[1], dz = s.Z - loc[2];
-            d2 = dx * dx + dy * dy + dz * dz;
+            score = dx * dx + dy * dy + dz * dz;
         }
-        if (d2 < bestD2 - 1.0 || (d2 < bestD2 + 1.0 && sameType && !bestType))
-        { best = lgm; bestD2 = d2; bestType = sameType; }
+        if (tier < bestTier || (tier == bestTier && score < bestScore))
+        {
+            best = lgm; bestTier = tier; bestScore = score;
+            bestWhy = slot ? slot->Class->GetName() : std::string("no slot");
+        }
     }
-    if (best && byType && best != byType)
-        HxLog("[HalcyonA2][SPECEDIT] host for %s: the nearest game area (%.0fm from its slot) is not the one that "
-              "already has this type -- placing it where it is being put\n", uniqueId.c_str(), sqrt(bestD2) / 100.0);
+    g_sbHostOutsideCm = bestTier == 2 ? bestScore : (bestTier == 3 ? -1.0 : 0.0);
+    static const char* kTier[] = { "inside its importance volume", "inside its importance volume (subclass slot)",
+                                   "OUTSIDE every importance volume -- nearest one", "no importance volume anywhere -- nearest slot" };
+    if (best)
+        HxLog("[HalcyonA2][SPECEDIT] host for %s at (%.0f,%.0f,%.0f): %s (%s), %s%s\n", uniqueId.c_str(), loc[0], loc[1], loc[2],
+              best->GetName().c_str(), bestWhy.c_str(), kTier[bestTier < 4 ? bestTier : 3],
+              bestTier == 2 ? (" " + std::to_string(static_cast<int>(bestScore / 100.0)) + " m away").c_str() : "");
     return best;
 }
 
@@ -4572,6 +4660,7 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
     else if (op == "LGMTREE") SeLgmTree();
     else if (op == "LGMDESC" && p.size() >= 3) SeLgmDesc(p[2]);
     else if (op == "LUAUDUMP") SeLuauDump(p.size() >= 3 ? p[2] : std::string());
+    else if (op == "SLOTS") SeSlotsDump(p.size() >= 3 ? p[2] : std::string());
     else if (op == "NODEMOVE" && p.size() >= 4) SeTestNodeMove(p[2], p[3]);
     else if (op == "ACTORS" && p.size() >= 3) SeActorClasses(p[2]);
     else if (op == "SBDATA" && p.size() >= 3) SeSbData(pawn, p[2]);

@@ -1,0 +1,9 @@
+# Culling (observer half): both walls visible and solid for another player.
+log CULL-OBS start
+enter
+wait 22
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+traceat -450 2060 -28625
+traceat -300 -2300 -27000
+log CULL-OBS done

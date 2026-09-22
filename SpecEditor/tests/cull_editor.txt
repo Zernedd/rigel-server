@@ -1,0 +1,13 @@
+# Culling / module slots (editor half; pair with cull_observer.txt). Objects must be hosted by the module slot
+# whose ImportanceVolume contains them (server log "host for ..."); a spot outside every volume warns.
+log CULL-ED start
+enter
+wait 3
+spawnat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625 0
+wait 8
+spawnat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000 0
+wait 8
+traceat -450 2060 -28625
+traceat -300 -2300 -27000
+wait 20
+log CULL-ED done
