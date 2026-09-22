@@ -1375,7 +1375,11 @@ namespace SeSb {
                         MemFree = 0x10153A0,
                         LeafCtor = 0x464C150,      // (node[80], FName*, uint8 type) -> base node ctor
                         LeafStat = 0x46BC830,      // (node) memory stats only
-                        LeafVtbl = 0x804BDA0;      // type-6 blob leaf vtable
+                        LeafVtbl = 0x804BDA0,      // type-6 blob leaf vtable
+                        // The game's own string-node factory is at 0x4643350: malloc(0x50), LeafCtor(.., 4),
+                        // vtable 0x8021318, FString at +0x38 cleared, +0x48 = 0x200, then these two.
+                        StrAssign = 0xFC1250,      // (FString*, const wchar_t*, int32 len) -> assign, len w/o NUL
+                        StringStat = 0x4647E40;    // (node) memory stats for a string node
 }
 
 // A serverData value we want on an object: in "Properties" (typed, 02 01 <desc> <value>) or directly under
@@ -3550,18 +3554,21 @@ static int SeLuauNodeCore(void* lgmHandle, uint64_t scriptsBits, uint64_t nameBi
         const bool exists = itOld[0x48] != 0;
         NvReleaseIter(base, itOld);
         if (exists) { NvReleaseIter(base, itS); return -11; }   // never remove a live source node (see SeLuauPutSource)
-        uint8_t* n = mal(96);
-        memset(n, 0, 96);
+        // Built exactly like the game's own string-node factory (0x4643350), field for field. The field at
+        // +0x48 is the one that matters: the factory sets it to 0x200, we used to leave it zero, and a node
+        // with zero there sent the replication walk into endless recursion -- the server died with a stack
+        // overflow the moment a player in that area was sent the new script. It only showed up once objects
+        // started being hosted in the area they are placed in (the editor's own area, always subscribed).
+        uint8_t* n = mal(0x50);
+        memset(n, 0, 0x50);
         uint64_t nm = nameBits;
         reinterpret_cast<void(__fastcall*)(uint8_t*, uint64_t*, uint8_t)>(base + SeSb::LeafCtor)(n, &nm, 4);
         *reinterpret_cast<uintptr_t*>(n) = base + 0x8021318;                    // string node vtable
-        wchar_t* d = reinterpret_cast<wchar_t*>(mal(sizeof(wchar_t) * (len + 1)));
-        memcpy(d, src, sizeof(wchar_t) * len);
-        d[len] = 0;
-        *reinterpret_cast<wchar_t**>(n + 56) = d;
-        *reinterpret_cast<int32_t*>(n + 64) = len + 1;
-        *reinterpret_cast<int32_t*>(n + 68) = len + 1;
-        reinterpret_cast<void(__fastcall*)(uint8_t*)>(base + 0x4647E40)(n);   // string node stats
+        *reinterpret_cast<uint64_t*>(n + 0x38) = 0;                             // FString: data
+        *reinterpret_cast<uint64_t*>(n + 0x40) = 0;                             //          num, max
+        *reinterpret_cast<uint32_t*>(n + 0x48) = 0x200;
+        reinterpret_cast<void(__fastcall*)(uint8_t*, const wchar_t*, int32_t)>(base + SeSb::StrAssign)(n + 0x38, src, len);
+        reinterpret_cast<void(__fastcall*)(uint8_t*)>(base + SeSb::StringStat)(n);
         reinterpret_cast<void(__fastcall*)(uint8_t*, uint8_t**)>(base + SeSb::AddChild)(itS, &n);
         NvReleaseIter(base, itS);
         return 1;
@@ -3609,8 +3616,11 @@ static bool SeLuauPutSource(SDK::UObject* lgm, const std::string& name, const st
         if (r == 1) HxLog("[HalcyonA2][SPECEDIT] luau %s: source updated in place\n", name.c_str());
     }
     if (r == -1 || r == 0)                               // not there yet: create it
+    {
         r = SeLuauNodeCore(reinterpret_cast<uint8_t*>(lgm) + 0x218, NvNameBits(NvName("Scripts")), NvNameBits(NvName(name)),
                            w.c_str(), static_cast<int>(w.size()));
+        if (r == 1 && g_seLocalTest) SeLuauDump(std::string());   // the new node, byte for byte, next to the game's own
+    }
     if (SDK::AActor* slot = *reinterpret_cast<SDK::AActor**>(reinterpret_cast<uintptr_t>(lgm) + 0x320))
         if (r == 1) static_cast<SDK::AModuleSlot*>(slot)->PushNetVars();
     HxLog("[HalcyonA2][SPECEDIT] luau %s (%zu chars) -> %s: %d\n", name.c_str(), src.size(), lgm->GetName().c_str(), r);

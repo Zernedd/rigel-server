@@ -1,0 +1,19 @@
+# Attach the same script to objects in TWO different game areas: each area needs its own copy of the
+# source node, so this is the path the live server crashes on (stack overflow in the netvar walk right
+# after the source is written).
+log LUAU2AREA start
+enter
+wait 3
+spawnat LE_BP_LightSwitch_C -300 -2450 -27000 0
+wait 8
+luaufile LightSwitch
+wait 12
+spawnat LE_BP_LightSwitch_C -5400 7100 -28900 0
+wait 8
+luaufile LightSwitch
+wait 12
+spawnat LE_BP_LightSwitch_C 2400 -9100 -27400 0
+wait 8
+luaufile LightSwitch
+wait 12
+log LUAU2AREA done
