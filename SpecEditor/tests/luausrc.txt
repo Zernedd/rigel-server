@@ -1,0 +1,6 @@
+log LS start
+enter
+wait 3
+scripts Course
+scripts ServerGolfLogic
+log LS end

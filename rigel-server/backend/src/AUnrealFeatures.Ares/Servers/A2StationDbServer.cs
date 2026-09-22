@@ -2615,6 +2615,94 @@ namespace AUnrealFeatures.Ares.Servers
                 System.Text.Encoding.UTF8.GetBytes(NetvarOverridesFile.BuildText(station)));
         }
 
+        // ─── Spec Editor saved levels (game server only) ─────────────────────────
+        // Storage + semantics: SpecLevelsStore. Every route requires x-server-api-key == the server API key (401
+        // otherwise). Plain text, one item per line, TAB between fields. {name} is [A-Za-z0-9 _-]{1,64}
+        // (percent-encode spaces as %20); anything else is 400.
+
+        private static IHttpActionResult SpecText(string text)
+            => Results.Configurable(HttpStatusCode.OK, "text/plain; charset=utf-8", Encoding.UTF8.GetBytes(text));
+        private static IHttpActionResult SpecErr(HttpStatusCode code, string text)
+            => Results.Configurable(code, "text/plain; charset=utf-8", Encoding.UTF8.GetBytes(text));
+        private static IHttpActionResult SpecUnauthorized() => SpecErr(HttpStatusCode.Unauthorized, "unauthorized");
+        private static IHttpActionResult SpecBadName() => SpecErr(HttpStatusCode.BadRequest, "bad level name");
+
+        // GET /v1/spec/levels -> name\tautoload(0/1)\tloaded(0/1)\tupdated\tsize
+        [HttpGet("v1/spec/levels")]
+        public Task<IHttpActionResult> SpecListLevels(IHttpRequest request, IHttpResponse response)
+        {
+            if (!SpecLevelsStore.IsTrustedServer(request)) return Task.FromResult(SpecUnauthorized());
+            var lines = SpecLevelsStore.List().Select(l =>
+                $"{l.Name}\t{(l.Entry.Autoload ? 1 : 0)}\t{(l.Entry.Loaded ? 1 : 0)}\t{l.Entry.Updated}\t{l.Entry.Size}");
+            return Task.FromResult(SpecText(string.Join("\n", lines)));
+        }
+
+        // GET /v1/spec/levels/{name} -> the level text (404 if missing)
+        [HttpGet("v1/spec/levels/{name}")]
+        public Task<IHttpActionResult> SpecGetLevel(IHttpRequest request, IHttpResponse response, string name)
+        {
+            if (!SpecLevelsStore.IsTrustedServer(request)) return Task.FromResult(SpecUnauthorized());
+            var n = SpecLevelsStore.CleanName(name);
+            if (n == null) return Task.FromResult(SpecBadName());
+            var text = SpecLevelsStore.ReadText(n);
+            return Task.FromResult(text == null ? SpecErr(HttpStatusCode.NotFound, "not found") : SpecText(text));
+        }
+
+        // PUT /v1/spec/levels/{name}  body = level text -> "ok"
+        [HttpPut("v1/spec/levels/{name}")]
+        public Task<IHttpActionResult> SpecPutLevel(IHttpRequest request, IHttpResponse response, string name)
+        {
+            if (!SpecLevelsStore.IsTrustedServer(request)) return Task.FromResult(SpecUnauthorized());
+            var n = SpecLevelsStore.CleanName(name);
+            if (n == null) return Task.FromResult(SpecBadName());
+            SpecLevelsStore.Put(n, request.Body ?? Array.Empty<byte>());
+            return Task.FromResult(SpecText("ok"));
+        }
+
+        // POST /v1/spec/levels/{name}/loaded?value=0|1 -> "ok"
+        [HttpPost("v1/spec/levels/{name}/loaded")]
+        public Task<IHttpActionResult> SpecSetLoaded(IHttpRequest request, IHttpResponse response, string name)
+        {
+            if (!SpecLevelsStore.IsTrustedServer(request)) return Task.FromResult(SpecUnauthorized());
+            var n = SpecLevelsStore.CleanName(name);
+            if (n == null) return Task.FromResult(SpecBadName());
+            var v = (request.GetQueryParameter("value", "") ?? "").Trim().ToLowerInvariant();
+            bool? value = v switch { "1" or "true" => true, "0" or "false" => false, _ => null };
+            if (value == null) return Task.FromResult(SpecErr(HttpStatusCode.BadRequest, "value must be 0 or 1"));
+            if (!SpecLevelsStore.Update(n, null, value)) return Task.FromResult(SpecErr(HttpStatusCode.NotFound, "not found"));
+            return Task.FromResult(SpecText("ok"));
+        }
+
+        // POST /v1/spec/boot?deployment={id} -> names to load (loaded := autoload for every level)
+        [HttpPost("v1/spec/boot")]
+        public Task<IHttpActionResult> SpecBoot(IHttpRequest request, IHttpResponse response)
+        {
+            if (!SpecLevelsStore.IsTrustedServer(request)) return Task.FromResult(SpecUnauthorized());
+            var dep = (request.GetQueryParameter("deployment", "") ?? "").Trim();
+            return Task.FromResult(SpecText(string.Join("\n", SpecLevelsStore.Boot(dep))));
+        }
+
+        // GET /v1/spec/desired -> names with loaded == true
+        [HttpGet("v1/spec/desired")]
+        public Task<IHttpActionResult> SpecDesired(IHttpRequest request, IHttpResponse response)
+        {
+            if (!SpecLevelsStore.IsTrustedServer(request)) return Task.FromResult(SpecUnauthorized());
+            return Task.FromResult(SpecText(string.Join("\n", SpecLevelsStore.Desired())));
+        }
+
+        // POST /v1/spec/status?deployment={id}  body = names loaded on that server, one per line -> "ok"
+        [HttpPost("v1/spec/status")]
+        public Task<IHttpActionResult> SpecStatus(IHttpRequest request, IHttpResponse response)
+        {
+            if (!SpecLevelsStore.IsTrustedServer(request)) return Task.FromResult(SpecUnauthorized());
+            var dep = (request.GetQueryParameter("deployment", "") ?? "").Trim();
+            if (dep.Length == 0) return Task.FromResult(SpecErr(HttpStatusCode.BadRequest, "deployment required"));
+            var names = Encoding.UTF8.GetString(request.Body ?? Array.Empty<byte>())
+                .Split('\n').Select(l => l.Trim('\r', ' ', '\t')).Where(l => l.Length > 0);
+            SpecLevelsStore.Status(dep, names);
+            return Task.FromResult(SpecText("ok"));
+        }
+
         // GET /v1/deployments/{deployment_id}/config
         [HttpGet("v1/deployments/{deployment_id}/config")]
         public async Task<IHttpActionResult> GetDeploymentConfigV1(

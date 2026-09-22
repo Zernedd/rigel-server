@@ -53,6 +53,10 @@ bool         g_paletteDirty = true;
 ULONGLONG    g_lastPump = 0;
 bool         g_editorMode = false;   // client-side "Enter Level Editor" state
 SDK::UFunction* g_setQuestsFn = nullptr;   // A2PlayerQuestComponent::Client_SetQuests (see LogIncomingQuests)
+std::vector<Snapshot::GameScript> g_gameScripts;   // ScanScripts result
+std::string g_dumpScriptsTo;                       // test op: also write the scan to this folder
+std::vector<Snapshot::LevelInfo> g_levels;       // saved levels (SE|LVLIST), for the Levels tab
+int g_levelsSerial = 0;
 std::vector<Snapshot::QuestRef> g_knownQuests;   // every quest row seen, for the Game data quest pickers
 std::string g_dataHandle, g_dataIdent;             // Game data: the object asked about, and how we named it
 std::vector<Snapshot::DataEntry> g_data;
@@ -339,6 +343,22 @@ void BuildPalette(Snapshot& snap)
         ++sandboxAdded;
     }
     if (sandboxAdded) Log("[game] palette: +%d sandbox prefab(s) beyond the LE catalogue", sandboxAdded);
+    // Station actors with no sandbox prefab that are still worth placing (the server allows exactly these):
+    // the yellow speed pads and boost tanks. Their class is loaded because the station uses them.
+    for (const char* extra : { "BP_BoostPad_Omnidirectional_C", "BP_BoostTank_World_C" })
+    {
+        if (have(extra)) continue;
+        if (SDK::UClass* c = SDK::UObject::FindClassFast(extra))
+        {
+            const std::string full = c->GetFullName();
+            const size_t sp = full.find(' ');
+            PaletteItem it;
+            it.name = extra;
+            it.path = sp == std::string::npos ? full : full.substr(sp + 1);
+            it.category = "Parkour - Boost pads";
+            snap.palette.push_back(std::move(it));
+        }
+    }
     std::sort(snap.palette.begin(), snap.palette.end(),
               [](const PaletteItem& a, const PaletteItem& b) {
                   if (a.category != b.category) return a.category < b.category;
@@ -397,7 +417,7 @@ void BuildObjects(Snapshot& snap)
         // removed it. AActor::bActorIsBeingDestroyed is byte 0x65, bit 0.
         if (*(reinterpret_cast<const uint8_t*>(o) + 0x65) & 0x01) continue;
         const std::string cn = c->GetName();
-        if (cn.rfind("LE_", 0) != 0 && !IsSandboxClass(cn)) continue;
+        if (cn.rfind("LE_", 0) != 0 && !IsSandboxClass(cn) && cn != "BP_BoostPad_Omnidirectional_C" && cn != "BP_BoostTank_World_C") continue;
 
         SceneObject so;
         so.ptr = o;
@@ -644,6 +664,70 @@ void HandleCommands()
         case CmdType::SendRaw:
             SendToServer(c.str);
             break;
+
+        case CmdType::LuauAttach:
+        {
+            // The source goes up in hex chunks (commands are capped at 1 KB), then one attach command.
+            const std::string id = IdentFor(c.str);
+            if (id.empty() || c.str2.empty()) break;
+            std::string hex;
+            char hb[4];
+            for (unsigned char ch : c.str3) { snprintf(hb, sizeof(hb), "%02X", ch); hex += hb; }
+            for (size_t i = 0; i < hex.size(); i += 900) SendToServer("SE|LUAUPART|" + c.str2 + "|" + hex.substr(i, 900));
+            if (hex.empty()) SendToServer("SE|LUAUPART|" + c.str2 + "|");
+            SendToServer("SE|LUAU|" + id + "|" + c.str2);
+            Log("[luau] attach %s (%zu chars) to %s", c.str2.c_str(), c.str3.size(), id.c_str());
+            break;
+        }
+
+        case CmdType::ScanScripts:
+        {
+            // Every loaded gamemode's Luau (LGM+720: FString name -> FString source, stride from the pair).
+            g_gameScripts.clear();
+            auto* cls = SDK::UObject::FindClassFast("LoadedGameMode");
+            const int32_t n = SDK::UObject::GObjects->Num();
+            auto readable = [](const void* p, size_t len) { return p && !IsBadReadPtr(p, len); };
+            auto wstr = [&](const void* elem, std::string& out, int maxLen) -> bool {
+                if (!readable(elem, 16)) return false;
+                const wchar_t* w = *reinterpret_cast<wchar_t* const*>(elem);
+                const int len = *reinterpret_cast<const int32_t*>(reinterpret_cast<const uint8_t*>(elem) + 8);
+                if (len <= 1 || len > maxLen || !readable(w, len * 2)) return false;
+                out.clear();
+                for (int i = 0; i < len - 1; ++i) out.push_back(w[i] < 128 ? static_cast<char>(w[i]) : '?');
+                return true;
+            };
+            for (int32_t i = 0; cls && i < n && g_gameScripts.size() < 200; ++i)
+            {
+                SDK::UObject* l = SDK::UObject::GObjects->GetByIndex(i);
+                if (!l || l->IsDefaultObject() || !l->IsA(cls)) continue;
+                const uintptr_t map = reinterpret_cast<uintptr_t>(l) + 720;
+                const uint8_t* data = *reinterpret_cast<uint8_t* const*>(map);
+                const int num = *reinterpret_cast<const int32_t*>(map + 8);
+                std::string slot = l->GetName();
+                if (void* slotActor = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(l) + 0x320))
+                    wstr(reinterpret_cast<uint8_t*>(slotActor) + 0x390, slot, 200);
+                for (int k = 0; data && k < num && k < 100; ++k)
+                {
+                    std::string key, src;
+                    if (!wstr(data + k * 0x28, key, 200) || !wstr(data + k * 0x28 + 16, src, 400000)) continue;
+                    g_gameScripts.push_back({ slot, key, src });
+                }
+            }
+            Log("[luau] %zu game script(s) found", g_gameScripts.size());
+            if (!g_dumpScriptsTo.empty())
+            {
+                CreateDirectoryA(g_dumpScriptsTo.c_str(), nullptr);
+                for (const auto& gs : g_gameScripts)
+                {
+                    std::string fn = g_dumpScriptsTo + "\\" + gs.where + "__" + gs.name;
+                    for (size_t k = g_dumpScriptsTo.size() + 1; k < fn.size(); ++k) if (fn[k] == '/' || fn[k] == ':') fn[k] = '_';
+                    if (FILE* f = fopen(fn.c_str(), "wb")) { fwrite(gs.source.data(), 1, gs.source.size(), f); fclose(f); }
+                }
+                Log("[luau] wrote %zu script(s) to %s", g_gameScripts.size(), g_dumpScriptsTo.c_str());
+                g_dumpScriptsTo.clear();
+            }
+            break;
+        }
 
         case CmdType::DataRequest:
         {
@@ -1375,6 +1459,12 @@ void RunScript(const Snapshot& snap)
         Log("[script] spawnatplayer %s at (%.0f,%.0f,%.0f) next to %s", pick->name.c_str(), c.loc.x, c.loc.y, c.loc.z, other->GetName().c_str());
         return;
     }
+    if (!strcmp(op, "dumpscripts"))           // dumpscripts <folder> -- write every game Luau script to files
+    {
+        Command c{ CmdType::ScanScripts }; State().Push(c);
+        g_dumpScriptsTo = rest;
+        return;
+    }
     if (!strcmp(op, "sbtypes")) { SendToServer("SE|SBTYPES"); return; }   // LOCAL TEST: server lists every prefab type
     if (!strcmp(op, "raw")) { SendToServer(rest); Log("[script] raw %s", rest.c_str()); return; }   // raw <SE|...>
     if (!strcmp(op, "coinrun"))               // coinrun <sec> <questHex32> -- a red-coin run 4 m ahead: 3 coins + a start button
@@ -1448,6 +1538,19 @@ void RunScript(const Snapshot& snap)
                 if (!wstr(data + k * stride, key)) continue;
                 if (!rest.empty() && key.find(rest) == std::string::npos) continue;
                 Log("[script]   script '%s'", key.c_str());
+                if (rest.empty() || stride < 0x20) continue;
+                // A filter was given: print the source too (the value FString right after the key).
+                const uint8_t* ve = data + k * stride + 16;
+                const wchar_t* src = readable(ve, 16) ? *reinterpret_cast<wchar_t* const*>(ve) : nullptr;
+                const int len = src ? *reinterpret_cast<const int32_t*>(ve + 8) : 0;
+                if (!src || len <= 1 || len > 200000 || !readable(src, len * 2)) { Log("[script]     (no readable source)"); continue; }
+                std::string line;
+                for (int c = 0; c < len - 1; ++c)
+                {
+                    if (src[c] == L'\n') { Log("[src] %s", line.c_str()); line.clear(); continue; }
+                    if (src[c] != L'\r') line.push_back(src[c] < 128 ? static_cast<char>(src[c]) : '?');
+                }
+                if (!line.empty()) Log("[src] %s", line.c_str());
             }
         }
         return;
@@ -1711,6 +1814,13 @@ void RunScript(const Snapshot& snap)
     if (!strcmp(op, "datadump"))              // datadump -- log the Game data we have
     {
         for (const auto& e : g_data) Log("[script]   data %s (%s) = %s", e.path.c_str(), e.kind.c_str(), e.value.c_str());
+        return;
+    }
+    if (!strcmp(op, "luau"))                  // luau <name> <source...> -- attach a script to the last object
+    {
+        char nm[48] = {}; int used = 0;
+        sscanf_s(rest.c_str(), "%47s %n", nm, (unsigned)sizeof(nm), &used);
+        Command c{ CmdType::LuauAttach }; c.str = o->handle; c.str2 = nm; c.str3 = rest.substr(used); State().Push(c);
         return;
     }
     if (!strcmp(op, "press"))                 // press -- LOCAL TEST: press a ProgressionButton on THIS client (OnPressed)
@@ -2069,8 +2179,39 @@ void PumpImpl()
     else if (!wantCam && Cam().active) CameraDeactivate();
 
     FillProps(snap);
+    static bool s_iconsRead = false;
+    if (!s_iconsRead && snap.worldReady)
+    {
+        // Every icon the game has art for (UQuestAssets::TextureIcons, keys like RedCoin/TKB/Golf/Climb...),
+        // not only the ones used by quests this client happened to receive.
+        if (auto* qaCls = SDK::UObject::FindClassFast("QuestAssets"))
+        {
+            const int32_t n = SDK::UObject::GObjects->Num();
+            for (int32_t i = 0; i < n; ++i)
+            {
+                SDK::UObject* o = SDK::UObject::GObjects->GetByIndex(i);
+                if (!o || o->IsDefaultObject() || !o->IsA(qaCls)) continue;
+                const auto& icons = *reinterpret_cast<const SDK::TMap<SDK::FName, SDK::UObject*>*>(reinterpret_cast<uintptr_t>(o) + 0x30);
+                int added = 0;
+                for (auto it = SDK::begin(icons); it != SDK::end(icons); ++it)
+                {
+                    const std::string k = it->Key().ToString();
+                    if (!k.empty() && k != "None" && std::find(g_glyphs.begin(), g_glyphs.end(), k) == g_glyphs.end()) { g_glyphs.push_back(k); ++added; }
+                }
+                std::sort(g_glyphs.begin(), g_glyphs.end());
+                Log("[quests] %d icon(s) from QuestAssets", added);
+                s_iconsRead = true;
+                break;
+            }
+        }
+    }
+    static void* s_qlistWorld = nullptr;                 // ask the server for its quest list once per world
+    if (snap.inEditor && g_pc && s_qlistWorld != world) { s_qlistWorld = world; SendToServer("SE|QLIST"); }
     snap.glyphs = g_glyphs;
     snap.quests = g_knownQuests;
+    snap.levels = g_levels;
+    snap.gameScripts = g_gameScripts;
+    snap.levelsSerial = g_levelsSerial;
     snap.dataHandle = g_dataHandle;
     snap.data = g_data;
     snap.dataSerial = g_dataSerial;
@@ -2122,6 +2263,57 @@ void HandleServerMessage(const wchar_t* w)
     for (int i = 0; w[i] && i < 60000; ++i) msg.push_back(static_cast<char>(w[i] < 128 ? w[i] : '?'));
     if (msg.rfind("SE|PROP|", 0) == 0) ApplyRemoteProp(msg);
     else if (msg.rfind("SE|NOTE|", 0) == 0) { Notes().Set(msg.substr(8)); Log("[note] %s", msg.substr(8).c_str()); }
+    else if (msg.rfind("SE|LVLIST|", 0) == 0)
+    {
+        // SE|LVLIST|<loaded here ;-separated>|<name\tautoload\tloaded\tupdated\tsize>\x1E...
+        const size_t bar = msg.find('|', 10);
+        if (bar == std::string::npos) return;
+        const std::string here = ";" + msg.substr(10, bar - 10) + ";";
+        const std::string body = msg.substr(bar + 1);
+        g_levels.clear();
+        for (size_t b = 0; b < body.size();)
+        {
+            size_t e = body.find('\x1E', b);
+            if (e == std::string::npos) e = body.size();
+            const std::string ent = body.substr(b, e - b);
+            b = e + 1;
+            std::vector<std::string> f;
+            for (size_t x = 0; x <= ent.size();) { size_t y = ent.find('\t', x); if (y == std::string::npos) y = ent.size(); f.push_back(ent.substr(x, y - x)); x = y + 1; }
+            if (f.empty() || f[0].empty()) continue;
+            Snapshot::LevelInfo li;
+            li.name = f[0];
+            li.autoload = f.size() > 1 && f[1] == "1";
+            li.wanted = f.size() > 2 && f[2] == "1";
+            li.updated = f.size() > 3 ? f[3] : "";
+            li.size = f.size() > 4 ? atoi(f[4].c_str()) : 0;
+            li.here = here.find(";" + li.name + ";") != std::string::npos;
+            g_levels.push_back(li);
+        }
+        ++g_levelsSerial;
+        Log("[levels] %zu saved level(s)", g_levels.size());
+    }
+    else if (msg.rfind("SE|QLIST|", 0) == 0)
+    {
+        // Every quest the server knows (the station's and ours), for the quest pickers and icon list.
+        const std::string body = msg.substr(9);
+        for (size_t b = 0; b < body.size();)
+        {
+            size_t e = body.find('\x1E', b);
+            if (e == std::string::npos) e = body.size();
+            const std::string ent = body.substr(b, e - b);
+            b = e + 1;
+            const size_t f1 = ent.find('\x1F'), f2 = f1 == std::string::npos ? f1 : ent.find('\x1F', f1 + 1);
+            if (f2 == std::string::npos) continue;
+            const std::string id = ent.substr(0, f1), title = ent.substr(f1 + 1, f2 - f1 - 1), glyph = ent.substr(f2 + 1);
+            bool known = false;
+            for (auto& q : g_knownQuests) if (q.id == id) { q.title = title; q.glyph = glyph; known = true; break; }
+            if (!known) g_knownQuests.push_back({ id, title, glyph });
+            if (!glyph.empty() && glyph != "None" && std::find(g_glyphs.begin(), g_glyphs.end(), glyph) == g_glyphs.end())
+                g_glyphs.push_back(glyph);
+        }
+        std::sort(g_glyphs.begin(), g_glyphs.end());
+        Log("[quests] catalogue: %zu quest(s) known", g_knownQuests.size());
+    }
     else if (msg.rfind("SE|SBDATA|", 0) == 0)
     {
         // SE|SBDATA|<ident>|<path>\x1F<kind>\x1F<value>\x1E...

@@ -10,8 +10,9 @@ import {
   Users, Cpu, Wifi, Clock, Rocket, Calendar, Radio,
 } from "lucide-react";
 import NetvarsTab from "./NetvarsTab";
+import LevelsTab from "./LevelsTab";
 
-type Tab = "bans" | "roles" | "members" | "deployments" | "events" | "sessions" | "netvars" | "whitelist";
+type Tab = "bans" | "roles" | "members" | "deployments" | "events" | "sessions" | "netvars" | "levels" | "whitelist";
 
 // ── Shared UI ────────────────────────────────────────────────────────────────
 
@@ -1120,6 +1121,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "events",      label: "Events"      },
   { id: "sessions",    label: "EOS Sessions" },
   { id: "netvars",     label: "Netvars"     },
+  { id: "levels",      label: "Editor levels" },
   { id: "whitelist",   label: "Whitelist"   },
 ];
 
@@ -1203,6 +1205,7 @@ export default function StationDetailPage() {
       {tab === "events"      && <EventsTab      stationId={stationId} />}
       {tab === "sessions"    && <SessionsTab    stationId={stationId} />}
       {tab === "netvars"     && <NetvarsTab     stationId={stationId} />}
+      {tab === "levels"      && <LevelsTab />}
       {tab === "whitelist"   && <WhitelistTab   stationId={stationId} />}
     </div>
   );

@@ -101,6 +101,11 @@ struct Snapshot
     std::string               dataHandle;   // the object the Game data below belongs to
     std::vector<DataEntry>    data;         // its synced values (serverData, Properties, state)
     int                       dataSerial = 0;
+    struct LevelInfo { std::string name, updated; bool autoload = false, wanted = false, here = false; int size = 0; };
+    std::vector<LevelInfo>    levels;       // saved levels on the backend (Levels tab)
+    int                       levelsSerial = 0;
+    struct GameScript { std::string where, name, source; };
+    std::vector<GameScript>   gameScripts;  // the station's Luau (read-only examples of the API)
 };
 
 // ── commands: render thread -> game thread ───────────────────────────────────────────────────
@@ -124,6 +129,8 @@ enum class CmdType
     SendRaw,          // str = a complete SE| line (the red-coin run publish)
     DataRequest,      // str = handle: ask the server for the object's Game data
     DataSet,          // str = handle, str2 = path, str3 = kind, str4 = value
+    LuauAttach,       // str = handle, str2 = script name, str3 = source
+    ScanScripts,      // collect the game's own Luau scripts (for the script viewer)
 };
 
 struct Command

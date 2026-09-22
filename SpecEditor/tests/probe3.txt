@@ -1,0 +1,19 @@
+log P3 start
+enter
+wait 3
+raw SE|ACTORS|pad
+raw SE|ACTORS|speed
+raw SE|ACTORS|boost
+raw SE|ACTORS|launch
+raw SE|ACTORS|jump
+wait 3
+spawn LE_BP_RedCoin_C
+wait 6
+expect 1
+log P3 done
+raw SE|LGMTREE
+wait 3
+scripts LightSwitch
+scripts Toggle
+wait 2
+log P3 end

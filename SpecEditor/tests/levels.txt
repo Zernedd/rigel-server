@@ -1,0 +1,28 @@
+log LV start
+enter
+wait 3
+raw SE|LGMDESC|TKBGolf
+spawnat LE_BP_Text_C 0 -2600 -27000 0
+wait 6
+prop Text.Text LEVEL TEXT
+wait 3
+spawnat BP_BoostPad_Omnidirectional_C 300 -2600 -27050 0
+wait 6
+expect 1
+qpub lvq 250 0 Level Quest
+wait 3
+raw SE|LVSAVE|TestLevel
+wait 5
+raw SE|LVLIST
+wait 3
+raw SE|LVUNLOAD|TestLevel
+wait 22
+pickat LE_BP_Text_C 0 -2600 -27000
+expect 0
+raw SE|LVLOAD|TestLevel
+wait 22
+spawnat LE_BP_Text_C 5000 5000 -27000 0
+wait 1
+pickat LE_BP_Text_C 0 -2600 -27000
+dump Text
+log LV done

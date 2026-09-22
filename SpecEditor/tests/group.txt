@@ -1,0 +1,9 @@
+log GR start
+enter
+wait 3
+qpub gpa 250 0 Folder Part A
+qpub gpb 250 0 Folder Part B
+wait 3
+raw SE|QUEST|gpgrp|Folder Group|RedCoin|0||0|0|A folder test|250|0|gpa;gpb
+wait 8
+log GR done

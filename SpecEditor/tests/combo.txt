@@ -1,0 +1,20 @@
+log CB start
+enter
+wait 3
+spawnat BP_DebugCube_C 200 -2600 -27000 0
+wait 6
+expect 1
+luau RigelTest log("RIGEL LUAU OK " .. tostring(20 + 22))
+wait 10
+scripts RigelTest
+testquest cbq
+wait 20
+qpub cba 250 0 Group Part A
+qpub cbb 250 0 Group Part B
+wait 3
+raw SE|QUEST|cbgrp|My Group|RedCoin|0||0|0|A folder|250|0|cba;cbb
+wait 4
+spawnat BP_BoostPad_Omnidirectional_C 300 -2800 -27050 0
+wait 6
+dump
+log CB done

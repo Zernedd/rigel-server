@@ -1157,7 +1157,7 @@ void PublishQuest(QuestDraft& q)
         State().Push(c);
         q.published = true;
         q.dirty = false;
-        Notes().Set(std::string("Published group '") + q.title + "' - it completes when players finish every quest in it.");
+        Notes().Set(std::string("Published group '") + q.title + "' - its quests now show together under it, each with its own icon.");
         return;
     }
     if (q.kind == 1)
@@ -1238,8 +1238,8 @@ void AdoptPreviewCoins(const Snapshot& snap)
     }
 }
 
-// A quest group: one quest made of several others. Each part keeps its own icon; the game shows the parts
-// under the group and completes the group when every part is done (its progress is theirs, averaged).
+// A quest group: a folder in the players' quest list, with its own title and icon, holding several quests
+// that each keep their own icon and complete on their own.
 void DrawQuestGroup(const Snapshot& snap, QuestDraft& q)
 {
     ImGui::SeparatorText("Quests in this group");
@@ -1284,7 +1284,7 @@ void DrawQuestGroup(const Snapshot& snap, QuestDraft& q)
     ImGui::PopStyleColor();
     ImGui::EndDisabled();
     if (problem) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "%s", problem);
-    ImGui::TextDisabled("The group's own icon is the one set above; each part shows its own.");
+    ImGui::TextDisabled("The group's icon is the one set above; each quest in it keeps its own.");
 }
 
 // The red coin run half of the quest editor: where it starts, the coins, the clock, publish.
@@ -1505,7 +1505,7 @@ void DrawQuestEditor(const Snapshot& snap, const SceneObject* sel)
     label("Type");
     {
         const char* kinds[] = { "Checkpoint run - reach points in order", "Red coin run - start button + coins (like TKB)",
-                                "Quest group - several quests, each with its own icon" };
+                                "Quest group - shows several quests together (folder)" };
         ImGui::BeginDisabled(q.published);                   // a published quest keeps its type
         if (ImGui::Combo("##qk", &q.kind, kinds, IM_ARRAYSIZE(kinds))) q.dirty = true;
         ImGui::EndDisabled();
@@ -1728,6 +1728,122 @@ void DrawGameData(const Snapshot& snap, const SceneObject* sel)
     ImGui::TextDisabled("Changes reach every player.");
 }
 
+
+// ---- Levels: save what you built to the backend, and load saved levels on this server ------------------
+// A level is everything placed in the editor (objects, their Game data, quests, groups, coin runs). Saving
+// stores your unsaved work plus the level's own content under that name. Autoload (load on server boot) is
+// set on the dashboard; Load / Unload here or there apply to the server within ~15 s.
+char g_levelName[64] = "";
+double g_levelsAsked = -100.0;
+void DrawLevels(const Snapshot& snap)
+{
+    auto send = [](const std::string& m) { Command c{ CmdType::SendRaw }; c.str = m; State().Push(c); };
+    auto refresh = [&]() { send("SE|LVLIST"); g_levelsAsked = ImGui::GetTime(); };
+    if (snap.inEditor && ImGui::GetTime() - g_levelsAsked > 20.0) refresh();
+
+    ImGui::SeparatorText("Save");
+    ImGui::TextWrapped("Saves everything you have placed that isn't part of another level -- objects, their Game "
+                       "data, quests, groups and coin runs -- plus this level's own content.");
+    ImGui::SetNextItemWidth(-110);
+    ImGui::InputTextWithHint("##lvname", "Level name", g_levelName, sizeof(g_levelName),
+                             ImGuiInputTextFlags_CallbackCharFilter, [](ImGuiInputTextCallbackData* d) {
+                                 const ImWchar c = d->EventChar;
+                                 return (c < 128 && (isalnum(c) || c == ' ' || c == '-' || c == '_')) ? 0 : 1;
+                             });
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!g_levelName[0] || !snap.inEditor);
+    ImGui::PushStyleColor(ImGuiCol_Button, kSelBlue);
+    if (ImGui::Button("Save level", ImVec2(-1, 0))) { send(std::string("SE|LVSAVE|") + g_levelName); g_levelsAsked = ImGui::GetTime() - 17.0; }
+    ImGui::PopStyleColor();
+    ImGui::EndDisabled();
+
+    ImGui::SeparatorText("Saved levels");
+    if (snap.levels.empty()) ImGui::TextDisabled(snap.levelsSerial ? "No saved levels yet." : "Asking the server...");
+    for (const auto& l : snap.levels)
+    {
+        ImGui::PushID(l.name.c_str());
+        ImGui::AlignTextToFramePadding();
+        if (l.here) ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1), "%s", l.name.c_str());
+        else ImGui::TextUnformatted(l.name.c_str());
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s%s", l.here ? "loaded here" : "not loaded", l.autoload ? "  |  loads on boot" : "");
+        ImGui::SameLine(ImGui::GetWindowWidth() - 130);
+        if (ImGui::SmallButton("Use name")) strncpy_s(g_levelName, l.name.c_str(), _TRUNCATE);
+        ImGui::SameLine();
+        if (!l.here) { if (ImGui::SmallButton("Load")) { send("SE|LVLOAD|" + l.name); g_levelsAsked = ImGui::GetTime() - 5.0; } }
+        else if (ImGui::SmallButton("Unload")) { send("SE|LVUNLOAD|" + l.name); g_levelsAsked = ImGui::GetTime() - 5.0; }
+        ImGui::PopID();
+    }
+    if (ImGui::SmallButton("Refresh")) refresh();
+    ImGui::Spacing();
+    ImGui::TextDisabled("Autoload on server boot is set on the dashboard (station > Editor levels).");
+}
+
+
+// ---- Luau: attach your own script to an object ---------------------------------------------------------
+// The script is stored in the object's gamemode (every machine compiles it) and attached the way the station
+// attaches its own Luau. The object is rebuilt to pick it up. Scripts are saved with levels.
+char g_luauName[48] = "MyScript";
+std::string g_luauSrc =
+    "--!strict\n"
+    "-- Runs on every machine that has this object. See the game's own scripts (below) for the API:\n"
+    "-- components, events (x.onSomething.Listen(fn)), LuauClock.timeout(sec):andThen(fn), log(...).\n"
+    "log(\"Hello from a Spec Editor script\")\n";
+int g_scriptPick = -1;
+bool g_showGameScripts = false;
+int ResizeCb(ImGuiInputTextCallbackData* d)
+{
+    if (d->EventFlag == ImGuiInputTextFlags_CallbackResize)
+    {
+        auto* s = static_cast<std::string*>(d->UserData);
+        s->resize(d->BufTextLen);
+        d->Buf = s->data();
+    }
+    return 0;
+}
+void DrawLuau(const Snapshot& snap, const SceneObject* sel)
+{
+    ImGui::TextWrapped("Attach a Luau script to this object. It runs for every player (it is stored in the "
+                       "object's gamemode, like the station's own scripts) and is saved with levels.");
+    ImGui::SetNextItemWidth(160);
+    ImGui::InputText("Script name", g_luauName, sizeof(g_luauName), ImGuiInputTextFlags_CharsNoBlank);
+    g_luauSrc.reserve(4096);
+    ImGui::InputTextMultiline("##luau", g_luauSrc.data(), g_luauSrc.capacity() + 1, ImVec2(-1, 180),
+                              ImGuiInputTextFlags_CallbackResize | ImGuiInputTextFlags_AllowTabInput, ResizeCb, &g_luauSrc);
+    ImGui::BeginDisabled(!g_luauName[0] || !snap.inEditor);
+    ImGui::PushStyleColor(ImGuiCol_Button, kSelBlue);
+    if (ImGui::Button("Attach script to this object", ImVec2(-1, 0)))
+    {
+        Command c{ CmdType::LuauAttach }; c.str = sel->handle; c.str2 = g_luauName; c.str3 = g_luauSrc.c_str(); State().Push(c);
+    }
+    ImGui::PopStyleColor();
+    ImGui::EndDisabled();
+    if (ImGui::Checkbox("Show the game's own scripts (examples of the API)", &g_showGameScripts) && g_showGameScripts)
+    {
+        Command c{ CmdType::ScanScripts }; State().Push(c);
+    }
+    if (g_showGameScripts)
+    {
+        if (snap.gameScripts.empty()) ImGui::TextDisabled("(none found yet)");
+        std::string label = g_scriptPick >= 0 && g_scriptPick < (int)snap.gameScripts.size()
+                                ? snap.gameScripts[g_scriptPick].where + " / " + snap.gameScripts[g_scriptPick].name : "Pick a script";
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::BeginCombo("##gs", label.c_str()))
+        {
+            for (int i = 0; i < (int)snap.gameScripts.size(); ++i)
+                if (ImGui::Selectable((snap.gameScripts[i].where + " / " + snap.gameScripts[i].name + "##" + std::to_string(i)).c_str(), i == g_scriptPick))
+                    g_scriptPick = i;
+            ImGui::EndCombo();
+        }
+        if (g_scriptPick >= 0 && g_scriptPick < (int)snap.gameScripts.size())
+        {
+            const std::string& src = snap.gameScripts[g_scriptPick].source;
+            ImGui::InputTextMultiline("##gsrc", const_cast<char*>(src.c_str()), src.size() + 1, ImVec2(-1, 200), ImGuiInputTextFlags_ReadOnly);
+            if (ImGui::SmallButton("Copy into my script")) g_luauSrc = src;
+        }
+    }
+}
+
 void DrawDetailsPanel(const Snapshot& snap, const SceneObject* sel, ImVec2 pos, ImVec2 size)
 {
     if (!BeginPanel("##details", pos, size)) { ImGui::End(); return; }
@@ -1792,6 +1908,8 @@ void DrawDetailsPanel(const Snapshot& snap, const SceneObject* sel, ImVec2 pos, 
                 }
                 if (ImGui::CollapsingHeader("Game data (synced to everyone)", ImGuiTreeNodeFlags_DefaultOpen))
                     DrawGameData(snap, sel);
+                if (ImGui::CollapsingHeader("Luau script"))
+                    DrawLuau(snap, sel);
                 if (ImGui::CollapsingHeader("Properties", ImGuiTreeNodeFlags_DefaultOpen))
                     DrawProperties(snap, sel);
                 if (ContainsCi("Quest Checkpoint", g_detailsFilter) && ImGui::CollapsingHeader("Quest", ImGuiTreeNodeFlags_DefaultOpen))
@@ -1819,6 +1937,11 @@ void DrawDetailsPanel(const Snapshot& snap, const SceneObject* sel, ImVec2 pos, 
         if (ImGui::BeginTabItem("Quest Editor"))
         {
             DrawQuestEditor(snap, sel);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Levels"))
+        {
+            DrawLevels(snap);
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();

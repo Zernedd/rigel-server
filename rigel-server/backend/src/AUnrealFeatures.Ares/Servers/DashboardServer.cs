@@ -355,6 +355,71 @@ public sealed class AresDashboardServer : AstraHttpServer, IAresDashboardServer
         return Task.FromResult<IHttpActionResult>(Results.Ok(station.Config));
     }
 
+    // ── SPEC EDITOR SAVED LEVELS ─────────────────────────────────────────────────────────────
+    // Levels are uploaded by game servers over port 78 (v1/spec/*); see SpecLevelsStore. The dashboard only
+    // views them and flips autoload / loaded (loaded = desired state; servers poll it and apply live).
+
+    // GET /api/spec/levels
+    [HttpGet("/api/spec/levels")]
+    public Task<IHttpActionResult> GetSpecLevels(IHttpRequest request, IHttpResponse response)
+    {
+        var list = SpecLevelsStore.List().Select(l => new
+        {
+            name         = l.Name,
+            autoload     = l.Entry.Autoload,
+            loaded       = l.Entry.Loaded,
+            updated      = l.Entry.Updated,
+            size         = l.Entry.Size,
+            serverLoaded = l.Entry.ServerLoaded,
+            serverSeen   = l.Entry.ServerSeen,
+        }).ToList();
+        return Task.FromResult<IHttpActionResult>(Results.Ok(list));
+    }
+
+    // GET /api/spec/levels/{name}
+    [HttpGet("/api/spec/levels/{name}")]
+    public Task<IHttpActionResult> GetSpecLevel(IHttpRequest request, IHttpResponse response, string name)
+    {
+        var n = SpecLevelsStore.CleanName(name);
+        if (n == null) return Task.FromResult<IHttpActionResult>(Results.BadRequest(new { error = "bad level name" }));
+        var text = SpecLevelsStore.ReadText(n);
+        if (text == null) return Task.FromResult<IHttpActionResult>(Results.NotFound(new { error = "no such level", name = n }));
+        return Task.FromResult<IHttpActionResult>(Results.Ok(new { name = n, text }));
+    }
+
+    // PATCH /api/spec/levels/{name}  body: { autoload?: bool, loaded?: bool }
+    [HttpPatch("/api/spec/levels/{name}")]
+    public Task<IHttpActionResult> PatchSpecLevel(IHttpRequest request, IHttpResponse response, string name)
+    {
+        var n = SpecLevelsStore.CleanName(name);
+        if (n == null) return Task.FromResult<IHttpActionResult>(Results.BadRequest(new { error = "bad level name" }));
+        SpecLevelPatchBody? body;
+        try { body = System.Text.Json.JsonSerializer.Deserialize<SpecLevelPatchBody>(request.Body); }
+        catch { body = null; }
+        if (body == null || (body.Autoload == null && body.Loaded == null))
+            return Task.FromResult<IHttpActionResult>(Results.BadRequest(new { error = "body must be { autoload?: bool, loaded?: bool }" }));
+        if (!SpecLevelsStore.Update(n, body.Autoload, body.Loaded))
+            return Task.FromResult<IHttpActionResult>(Results.NotFound(new { error = "no such level", name = n }));
+        return Task.FromResult<IHttpActionResult>(Results.Ok(new { ok = true }));
+    }
+
+    // DELETE /api/spec/levels/{name}
+    [HttpDelete("/api/spec/levels/{name}")]
+    public Task<IHttpActionResult> DeleteSpecLevel(IHttpRequest request, IHttpResponse response, string name)
+    {
+        var n = SpecLevelsStore.CleanName(name);
+        if (n == null) return Task.FromResult<IHttpActionResult>(Results.BadRequest(new { error = "bad level name" }));
+        if (!SpecLevelsStore.Delete(n))
+            return Task.FromResult<IHttpActionResult>(Results.NotFound(new { error = "no such level", name = n }));
+        return Task.FromResult<IHttpActionResult>(Results.Ok(new { ok = true }));
+    }
+
+    private sealed class SpecLevelPatchBody
+    {
+        [JsonPropertyName("autoload")] public bool? Autoload { get; set; }
+        [JsonPropertyName("loaded")]   public bool? Loaded { get; set; }
+    }
+
     // ── STATION WHITELIST ────────────────────────────────────────────────────────────────────
     // The whitelist already lives in the station Config under "acl.whitelist" as a comma-separated
     // list of usernames, and PatchStationConfig can already write it. These two endpoints exist so the

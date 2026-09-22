@@ -40,6 +40,21 @@ export type Whitelist = {
   accounts: WhitelistAccount[];
 };
 
+/** A level saved from the in-game Spec Editor (Levels panel). */
+export type SpecLevel = {
+  name: string;
+  /** load this level whenever a game server boots */
+  autoload: boolean;
+  /** desired state: game servers poll this and load/unload to match (~15 s) */
+  loaded: boolean;
+  updated: string;
+  size: number;
+  /** deployment ids that last reported this level as loaded */
+  serverLoaded: string[];
+  /** when a game server last reported its loaded levels */
+  serverSeen: string;
+};
+
 export type Station = {
   station_id: string;
   station_name: string;
@@ -359,4 +374,11 @@ export const api = {
   setStationWhitelist: (stationId: string, usernames: string[]) =>
     put<{ success: boolean; station_id: string; enabled: boolean; usernames: string[] }>(
       `stations/${stationId}/whitelist`, { usernames }),
+
+  // Spec Editor saved levels (uploaded by game servers; the dashboard flips autoload/loaded)
+  specLevels: () => get<SpecLevel[]>("spec/levels"),
+  specLevel: (name: string) => get<{ name: string; text: string }>(`spec/levels/${encodeURIComponent(name)}`),
+  patchSpecLevel: (name: string, body: { autoload?: boolean; loaded?: boolean }) =>
+    patch<{ ok: boolean }>(`spec/levels/${encodeURIComponent(name)}`, body),
+  deleteSpecLevel: (name: string) => del<{ ok: boolean }>(`spec/levels/${encodeURIComponent(name)}`),
 };

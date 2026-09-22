@@ -1,0 +1,8 @@
+log C2 start
+enter
+wait 3
+dumpscripts C:\Users\Zern\AppData\Local\Temp\claude\C--Users-Zern-Documents-OrionDriftStuff\e1127066-f64a-456c-9a3d-24070d7a41d5\scratchpad\gamescripts
+wait 3
+testquest cbq2
+wait 25
+log C2 done
