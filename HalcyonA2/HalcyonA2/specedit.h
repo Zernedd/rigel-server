@@ -517,6 +517,30 @@ static void SeMarkProxyDirty(SDK::AActor* a)
     g_seProxies.push_back({ a, {}, GetTickCount64() });
 }
 
+// Every sandbox spawn asks for stand-ins by object id -- the editor's own placements, saved levels loading,
+// and the rebuild a move or a script change does (a new server actor each time). Only the editor's spawn
+// used to ask, so meshes from a loaded level, or any mesh after a move, had no collision for anyone.
+// The server's copy is looked up by id for a few seconds (throttled), then the normal 400 ms settle applies.
+static std::vector<std::pair<std::string, ULONGLONG>> g_seProxyWant;
+static void SeWantProxy(const std::string& idx) { if (!idx.empty()) g_seProxyWant.push_back({ idx, GetTickCount64() }); }
+static void SeProxyWantTick(ULONGLONG now)
+{
+    static ULONGLONG s_last = 0;
+    if (g_seProxyWant.empty() || now - s_last < 250) return;
+    s_last = now;
+    for (auto it = g_seProxyWant.begin(); it != g_seProxyWant.end();)
+    {
+        if (SDK::AActor* a = SbActorForIdx(it->first)) { SeMarkProxyDirty(a); it = g_seProxyWant.erase(it); continue; }
+        if (now - it->second > 5000)
+        {
+            HxLog("[HalcyonA2][SPECEDIT] collision: the server never built %s, so it has no stand-in\n", it->first.c_str());
+            it = g_seProxyWant.erase(it);
+            continue;
+        }
+        ++it;
+    }
+}
+
 static void SeDropProxies(SDK::AActor* a)
 {
     for (auto it = g_seProxies.begin(); it != g_seProxies.end(); ++it)
@@ -532,9 +556,10 @@ static void SpecEditTick()
     SeQuestTick();
     SeLvTick();
     SbMoveFlush();
+    const ULONGLONG now = GetTickCount64();
+    SeProxyWantTick(now);
     if (g_seProxies.empty()) return;
     static ULONGLONG s_last = 0;
-    const ULONGLONG now = GetTickCount64();
     if (now - s_last < 100) return;
     s_last = now;
     for (auto it = g_seProxies.begin(); it != g_seProxies.end();)
@@ -2815,6 +2840,7 @@ static std::string SeSandboxSpawn(const std::string& uniqueId, const double* loc
         o.uniqueId = uniqueId; o.path = g_sbSpawnPath; o.level = g_lvLoading;
         memcpy(o.loc, loc, sizeof(o.loc)); memcpy(o.rot, rot, sizeof(o.rot)); memcpy(o.scl, scl, sizeof(o.scl));
         g_sbOwned.push_back(o);
+        SeWantProxy(idxA);                               // collision stand-ins, whichever path spawned it
     }
     HxLog("[HalcyonA2][SPECEDIT] sandbox spawn %s: defaults from %d template(s), %d default node(s)\n", idxA.c_str(),
           g_sbDefResult > 0 ? g_sbDefResult >> 8 : g_sbDefResult, g_sbDefResult > 0 ? g_sbDefResult & 0xFF : 0);

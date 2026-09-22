@@ -1,0 +1,10 @@
+# Collision (observer half): what THIS player's world blocks at the wall, before and after the move,
+# and that nothing invisible is left where the wall used to be.
+log COLL-OBS start
+enter
+wait 10
+traceat -300 -2300 -27000
+wait 25
+traceat -300 -2100 -27000
+traceat -300 -2300 -27000
+log COLL-OBS done

@@ -1,0 +1,14 @@
+# Collision for placed meshes (editor half; pair with coll_observer.txt): a wall must block on every client
+# when placed AND after a move (a move rebuilds it as a new actor -- the path that lost its stand-in).
+log COLL-ED start
+enter
+wait 3
+spawnat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000 0
+wait 12
+traceat -300 -2300 -27000
+move 0 200 0
+wait 12
+traceat -300 -2100 -27000
+traceat -300 -2300 -27000
+wait 22
+log COLL-ED done

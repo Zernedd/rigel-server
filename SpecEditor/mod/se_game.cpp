@@ -1584,6 +1584,30 @@ void RunScript(const Snapshot& snap)
     }
     if (!strcmp(op, "sbtypes")) { SendToServer("SE|SBTYPES"); return; }   // LOCAL TEST: server lists every prefab type
     if (!strcmp(op, "raw")) { SendToServer(rest); Log("[script] raw %s", rest.c_str()); return; }   // raw <SE|...>
+    if (!strcmp(op, "traceat"))               // traceat x y z -- what does THIS client's world block, straight down
+    {                                         // through a point (6 m above to 6 m below)?
+        Vec3 at{};
+        if (sscanf_s(rest.c_str(), "%lf %lf %lf", &at.x, &at.y, &at.z) != 3) { Log("[script] FAIL traceat: want x y z"); return; }
+        SDK::Params::KismetSystemLibrary_LineTraceSingle p{};
+        p.WorldContextObject = g_pc;
+        p.Start = SDK::FVector{ at.x, at.y, at.z + 600.0 };
+        p.End   = SDK::FVector{ at.x, at.y, at.z - 600.0 };
+        p.TraceChannel = SDK::ETraceTypeQuery::TraceTypeQuery1;
+        p.DrawDebugType = SDK::EDrawDebugTrace::None;
+        p.bIgnoreSelf = true;
+        std::string what = "nothing";
+        if (g_pc && CallStatic("KismetSystemLibrary", "LineTraceSingle", p) && p.ReturnValue && p.OutHit.bBlockingHit)
+        {
+            SDK::UObject* c = WeakGet(reinterpret_cast<const uint8_t*>(&p.OutHit) + 0xD8);
+            SDK::UObject* owner = c ? c->Outer : nullptr;
+            char b[256];
+            snprintf(b, sizeof(b), "%s (%s) at z=%.0f", owner ? owner->GetName().c_str() : "?", owner && owner->Class ? owner->Class->GetName().c_str() : "?",
+                     p.OutHit.ImpactPoint.Z);
+            what = b;
+        }
+        Log("[script] TRACEAT (%.0f,%.0f,%.0f): hit %s", at.x, at.y, at.z, what.c_str());
+        return;
+    }
     if (!strcmp(op, "vis"))                   // vis <Class> x y z [0|1] -- is the instance nearest a point SHOWING on
     {                                         // this client? (a script's hideLua/showLua; other players' view)
         char name[128] = {};
