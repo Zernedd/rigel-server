@@ -1,0 +1,11 @@
+log G2D start
+enter
+wait 3
+pickat LE_BP_Text_C 321 -2852 -27651
+prop Text.Text EDIT A
+wait 5
+pickat LE_BP_Text_C 321 -2852 -27651
+prop Text.Text EDIT B WORKS
+wait 8
+log G2D done
+wait 600

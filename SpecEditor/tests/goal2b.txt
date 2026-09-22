@@ -1,0 +1,18 @@
+log G2B start
+enter
+wait 3
+spawnat LE_BP_Text_C -100 -2850 -27652 270
+wait 6
+prop Text.Text FIRST
+wait 6
+prop Text.Text SECOND EDIT
+wait 6
+coinrun 30 E68BAC0C44131D9D8355739D79D153D0
+wait 10
+dataset props/Duration float 99
+wait 3
+dataset props/Duration float 45
+wait 3
+datadump
+log G2B done
+wait 600

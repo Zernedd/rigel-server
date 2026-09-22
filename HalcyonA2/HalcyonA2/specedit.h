@@ -73,9 +73,13 @@ static bool SeVec(const std::string& s, double* out3)
 }
 
 // Only the level-editor prefabs may be touched. This is fence 3/4 above.
+static bool SeSandboxClassOk(const std::string& className);   // below: a sandbox-placeable class, sandbox mode
+// What the editor may place and edit: the LE_ prefabs, and -- with -SpecEditSandbox, where they are placed
+// through the game's own object system -- anything the sandbox itself can place (boost pads, traps...).
 static bool SeIsEditorClass(const std::string& className)
 {
-    return className.rfind("LE_", 0) == 0;
+    if (className.rfind("LE_", 0) == 0) return true;
+    return SeSandboxClassOk(className);
 }
 
 // run\backend\spec_editors.txt, re-read when it changes. No file = nobody is allowed.
@@ -261,6 +265,9 @@ static void SeTrack(SDK::AActor* a);   // below
 static SDK::UObject* SbPrefabOf(SDK::AActor* a);   // below
 static bool SeSandboxXform(SDK::AActor* a, const double* loc, const double* rot, const double* scl);   // below
 static bool SeSandboxDelete(SDK::AActor* a);   // below
+static bool SbOwnedXform(const std::string& ident, const std::string& locs, const std::string& rots, const std::string& scls);   // below
+static bool SbOwnedDelete(const std::string& ident);   // below
+static std::string g_sbSpawnCls;   // the editor class of the sandbox spawn in flight (for SbOwned)
 static int  SeBroadcast(const std::string& msg, SDK::UObject* pc);   // below
 
 // The player controller behind a command's context object: the controller itself (Vivox transport) or a
@@ -288,7 +295,10 @@ static void SeSpawn(SDK::UObject* pawn, const std::string& path, const std::stri
         if (!type.empty())
         {
             const double scl[3] = { 1, 1, 1 };
-            if (!SeSandboxSpawn(type, loc, rot, scl).empty())
+            g_sbSpawnCls = cls->GetName();
+            const std::string placed = SeSandboxSpawn(type, loc, rot, scl);
+            g_sbSpawnCls.clear();
+            if (!placed.empty())
             {
                 // The sandbox spawned the server's own copy synchronously. Placed meshes still need the
                 // collision stand-in: their Physical component does not switch collision on by itself.
@@ -517,7 +527,7 @@ static void SeTransform(const std::string& name, const std::string& locs, const 
                         const std::string& scls)
 {
     SDK::AActor* a = SeFindEditorActor(name);
-    if (!a) return;
+    if (!a) { SbOwnedXform(name, locs, rots, scls); return; }   // a node the server never built an actor for
     if (SbPrefabOf(a))                                   // a sandbox object: every machine owns its own copy
     {
         double l[3], r[3], sc[3];
@@ -543,7 +553,7 @@ static void SeTransform(const std::string& name, const std::string& locs, const 
 static void SeDelete(const std::string& name)
 {
     SDK::AActor* a = SeFindEditorActor(name);
-    if (!a) return;
+    if (!a) { SbOwnedDelete(name); return; }             // a node the server never built an actor for
     if (SeSandboxDelete(a)) { SeDropProxies(a); return; }   // a sandbox object: remove its node, every machine follows
     SeDropProxies(a);
     a->K2_DestroyActor();
@@ -586,6 +596,10 @@ struct SeAuthoredQuest
     int          rep = 0;
     int          validSec = 0;       // ValidLengthSeconds: how long an activation stays valid (0 = open-ended)
     float        reqProgress = 0.0f; // OptionalRequiredProgress: progress needed to complete (0 = row default)
+    // Quest group: ChildQuests (+0xA0), 20-byte {FGuid, float Weight} each. The client computes the parent's
+    // progress as the weighted average of its children and completes it when they are all done; each child
+    // shows its own icon -- "one quest, several icons".
+    std::vector<uint8_t> children;
 
     // Checkpoint run, driven by the server (see SeQuestTick): reach each checkpoint in order.
     std::vector<SDK::AActor*> checkpoints;
@@ -663,6 +677,7 @@ static bool SeBuildRow(SeAuthoredQuest& q, const std::string& glyph, int repetit
     copyTags(g_seTemplate + 0x10, q.tags);
     copyTags(g_seTemplate + 0x20, q.parentTags);
     SetTArray(q.row + 0x10, q.tags.data(), static_cast<int>(q.tags.size()));
+    SetTArray(q.row + 0xA0, q.children.data(), static_cast<int>(q.children.size() / 20));
     SetTArray(q.row + 0x20, q.parentTags.data(), static_cast<int>(q.parentTags.size()));
 
     SetFString(q.row + 0xF0, q.title);
@@ -753,7 +768,8 @@ static void SeQuestGuid(const std::string& questId, uint32_t id[4])
 
 static void SeQuest(const std::string& questId, const std::string& title, const std::string& glyph,
                     int repetition, const std::string& steps, int validSec = 0, float reqProgress = 0.0f,
-                    const std::string& description = std::string(), double radius = 250.0, int timeLimit = 0)
+                    const std::string& description = std::string(), double radius = 250.0, int timeLimit = 0,
+                    const std::string& children = std::string())
 {
     uint32_t id[4];
     SeQuestGuid(questId, id);
@@ -769,6 +785,20 @@ static void SeQuest(const std::string& questId, const std::string& title, const 
     q->rep = repetition;
     q->validSec = validSec < 0 ? 0 : validSec;
     q->reqProgress = reqProgress < 0 ? 0.0f : reqProgress;
+    q->children.clear();
+    for (const auto& c : SeSplit(children, ';', 32))
+    {
+        if (c.empty() || c == questId) continue;
+        bool sent = false;                              // only list children players actually receive
+        for (const auto& e : g_seAuthored) if (e.questId == c) { sent = true; break; }
+        if (!sent) continue;
+        uint32_t cg[4];
+        SeQuestGuid(c, cg);
+        const float w = 1.0f;
+        const uint8_t* a = reinterpret_cast<const uint8_t*>(cg);
+        q->children.insert(q->children.end(), a, a + 16);
+        q->children.insert(q->children.end(), reinterpret_cast<const uint8_t*>(&w), reinterpret_cast<const uint8_t*>(&w) + 4);
+    }
 
     const bool built = SeBuildRow(*q, glyph, repetition);
 
@@ -794,10 +824,10 @@ static void SeQuest(const std::string& questId, const std::string& title, const 
         if (SeAlive(c)) { SeSendAuthored(c); ++sent; }
 
     HxLog("[HalcyonA2][SPECEDIT] quest %s '%s' id=%08X%08X%08X%08X: row %s, %d checkpoint(s) (%d not found), radius %.0fcm, "
-          "time limit %ds, pushed to %d player(s)\n",
+          "time limit %ds, %zu child quest(s), pushed to %d player(s)\n",
           questId.c_str(), title.c_str(), id[0], id[1], id[2], id[3],
           built ? "built" : "WAITING FOR TEMPLATE (no player has received quests yet)",
-          static_cast<int>(q->checkpoints.size()), missing, q->radius, q->timeLimit, sent);
+          static_cast<int>(q->checkpoints.size()), missing, q->radius, q->timeLimit, q->children.size() / 20, sent);
     (void)bound;
 }
 
@@ -1132,11 +1162,108 @@ static int SbRemoveCore(uint8_t* handle)
     __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
 }
 
+
+// ---- sandbox objects we placed, tracked by node ------------------------------------------------------
+// Some prefab types never get an actor on the server (seen live: floating pipes, scoreboard sideboards,
+// DefaultMeshObject -- the node is added, clients build it, the server's object map does not grow). Every
+// later move/delete then failed ("no X near"), because those are resolved through server actors. So the
+// server keeps its own record of what it placed and edits those nodes directly when there is no actor.
+struct SbOwned { std::string idx, cls; SDK::UObject* lgm = nullptr; double loc[3]{}, rot[3]{}, scl[3]{ 1, 1, 1 }; };
+static std::vector<SbOwned> g_sbOwned;
+
+static SbOwned* SbOwnedFind(const std::string& ident)
+{
+    const size_t at = ident.find('@');
+    double want[3];
+    if (at == std::string::npos || !SeVec(ident.substr(at + 1), want)) return nullptr;
+    const std::string cls = ident.substr(0, at);
+    SbOwned* best = nullptr;
+    double bestD2 = 300.0 * 300.0;                        // 3 m: the client may still show a pre-move spot
+    for (auto& o : g_sbOwned)
+    {
+        if (o.cls != cls) continue;
+        const double dx = o.loc[0] - want[0], dy = o.loc[1] - want[1], dz = o.loc[2] - want[2];
+        const double d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 < bestD2) { bestD2 = d2; best = &o; }
+    }
+    return best;
+}
+static SbOwned* SbOwnedByIdx(const std::string& idx)
+{
+    for (auto& o : g_sbOwned) if (o.idx == idx) return &o;
+    return nullptr;
+}
+
+// POD core: resolve <lgm>/objects/<idx> to an iterator (a valid node handle) and merge or remove it.
+static int SbOwnedNodeCore(void* lgmHandle, uint64_t objectsBits, uint64_t idxBits, bool remove, uint8_t* buf,
+                           const double* pos, const double* rot, const double* scl)
+{
+    uint8_t itO[0x100] = {}, itN[0x100] = {};
+    int r = -1;
+    __try
+    {
+        const uintptr_t base = GetBase();
+        auto find = reinterpret_cast<void*(__fastcall*)(void*, uint8_t*, uint64_t, char)>(base + SeSb::FindChild);
+        find(lgmHandle, itO, objectsBits, 0);
+        if (!itO[0x48]) { NvReleaseIter(base, itO); return -10; }
+        find(itO, itN, idxBits, 0);
+        if (!itN[0x48]) { NvReleaseIter(base, itN); NvReleaseIter(base, itO); return -11; }
+        r = remove ? SbRemoveCore(itN) : SbMergeCore(itN, buf, pos, rot, scl);
+        if (!remove) NvReleaseIter(base, itN);
+        NvReleaseIter(base, itO);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return -12; }
+    return r;
+}
+
+static bool SbOwnedApply(SbOwned& o, bool remove)
+{
+    SDK::AActor* slot = o.lgm ? *reinterpret_cast<SDK::AActor**>(reinterpret_cast<uintptr_t>(o.lgm) + 0x320) : nullptr;
+    double pos[3] = { o.loc[0], o.loc[1], o.loc[2] }, r3[3] = { o.rot[0], o.rot[1], o.rot[2] };
+    if (slot && !remove)
+    {
+        const SDK::FTransform sx = slot->GetTransform();
+        const SDK::FVector rl = SDK::UKismetMathLibrary::InverseTransformLocation(sx, SDK::FVector{ pos[0], pos[1], pos[2] });
+        const SDK::FRotator rr = SDK::UKismetMathLibrary::InverseTransformRotation(sx, SDK::FRotator{ r3[0], r3[1], r3[2] });
+        pos[0] = rl.X; pos[1] = rl.Y; pos[2] = rl.Z; r3[0] = rr.Pitch; r3[1] = rr.Yaw; r3[2] = rr.Roll;
+    }
+    alignas(16) static uint8_t buf[0x400];
+    memset(buf, 0, sizeof(buf));
+    const int r = SbOwnedNodeCore(reinterpret_cast<uint8_t*>(o.lgm) + 0x218, NvNameBits(NvName("objects")),
+                                  NvNameBits(NvName(o.idx)), remove, buf, pos, r3, o.scl);
+    const bool ok = remove ? r == 1 : r == 5;
+    if (ok && slot) static_cast<SDK::AModuleSlot*>(slot)->PushNetVars();
+    HxLog("[HalcyonA2][SPECEDIT] node %s %s (no server actor): %s (%d)\n", remove ? "delete" : "move", o.idx.c_str(),
+          ok ? "ok" : "FAILED", r);
+    return ok;
+}
+
+static bool SbOwnedXform(const std::string& ident, const std::string& locs, const std::string& rots, const std::string& scls)
+{
+    SbOwned* o = SbOwnedFind(ident);
+    if (!o) return false;
+    SeVec(locs, o->loc); SeVec(rots, o->rot); SeVec(scls, o->scl);
+    return SbOwnedApply(*o, false);
+}
+
+static bool SbOwnedDelete(const std::string& ident)
+{
+    SbOwned* o = SbOwnedFind(ident);
+    if (!o) return false;
+    const bool ok = SbOwnedApply(*o, true);
+    if (ok) g_sbOwned.erase(g_sbOwned.begin() + (o - g_sbOwned.data()));
+    return ok;
+}
+
 // Move / rotate / scale a sandbox object for everyone: rewrite its node (slot-relative transform).
 static bool SeSandboxXform(SDK::AActor* a, const double* loc, const double* rot, const double* scl)
 {
     SDK::UObject* pc = SbPrefabOf(a);
     if (!pc) return false;
+    if (SbOwned* o = SbOwnedByIdx(FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(pc) + 0x248))))
+    {
+        memcpy(o->loc, loc, sizeof(o->loc)); memcpy(o->rot, rot, sizeof(o->rot)); memcpy(o->scl, scl, sizeof(o->scl));
+    }
     SDK::UObject* lgm = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(pc) + 0x440);
     SDK::AActor* slot = lgm ? *reinterpret_cast<SDK::AActor**>(reinterpret_cast<uintptr_t>(lgm) + 0x320) : nullptr;
     double pos[3] = { loc[0], loc[1], loc[2] }, r3[3] = { rot[0], rot[1], rot[2] };
@@ -1232,7 +1359,11 @@ static int SbBoundPropCore(uint8_t* objHandle, void* behavior, uint64_t keyBits,
         if (itP[0x48])
         {
             (*reinterpret_cast<uint8_t***>(props + 136))[li] = nullptr;       // detach the leaf from the holder
-            add(itP, &leaf);                                                  // same name -> replace path
+            uint8_t itOld[0x100] = {};                                        // drop the old leaf (AddChild keeps both)
+            find(itP, itOld, keyBits, 0);
+            if (itOld[0x48]) SbRemoveCore(itOld);
+            else NvReleaseIter(base, itOld);
+            add(itP, &leaf);
             rc = 2;
         }
         else
@@ -1438,6 +1569,29 @@ static void SeSandboxProbePaths(const std::string& ident)
     }
     HxLog("[HalcyonA2][SPECEDIT] SBPROBE %s bound:%s\n", a->GetName().c_str(), fl.c_str());
     HxLog("[HalcyonA2][SPECEDIT] SBPROBE %s found:%s\n", a->GetName().c_str(), out.empty() ? " (nothing)" : out.c_str());
+}
+
+static SDK::UObject* SbEngine();   // below
+// SE|SBTYPES (local test): every sandbox prefab type -- UniqueID and Blueprint class.
+static void SeSandboxTypes()
+{
+    if (!g_seLocalTest) return;
+    SDK::UObject* sb = SbEngine();
+    if (!sb) return;
+    const uintptr_t b = reinterpret_cast<uintptr_t>(sb);
+    SDK::UObject** rp = *reinterpret_cast<SDK::UObject***>(b + 0xF8);
+    const int raw = *reinterpret_cast<int32_t*>(b + 0xF8 + 8);
+    std::string out;
+    for (int i = 0; rp && i < raw && i < 1000; ++i)
+    {
+        SDK::UObject* def = rp[i];
+        if (!def) continue;
+        SDK::UObject* bp = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(def) + 0x30);
+        SDK::UObject* st = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(def) + 0x38);
+        out += (st ? reinterpret_cast<SDK::FName*>(reinterpret_cast<uintptr_t>(st) + 0xF0)->ToString() : std::string("?"));
+        out += " = " + (bp ? bp->GetName() : std::string("?")) + "\n";
+    }
+    HxLog("[HalcyonA2][SPECEDIT] SBTYPES %d:\n%s", raw, out.c_str());
 }
 
 // SE|SBTREE|<ident> (local test): the object's whole NetVar subtree, read from the raw nodes (children at
@@ -1647,6 +1801,12 @@ static int SbLiveLeafCore(uint8_t* objHandle, bool inProps, uint64_t sdBits, uin
             target = itP;
         }
         step = 2;
+        // Remove the old leaf first. AddChild on an existing name left BOTH in the tree (seen live: two
+        // Duration leaves after one edit), and a player joining later could read the stale one.
+        uint8_t itOld[0x100] = {};
+        find(target, itOld, nameBits, 0);
+        if (itOld[0x48]) SbRemoveCore(itOld);
+        else NvReleaseIter(base, itOld);
         uint8_t* leaf = SbMakeLeaf(nameBits, blob, len);
         reinterpret_cast<void(__fastcall*)(uint8_t*, uint8_t**)>(base + SeSb::AddChild)(target, &leaf);
         step = 3;
@@ -1777,6 +1937,11 @@ static void* SbBlueprintFor(const std::string& uniqueId)
     return nullptr;
 }
 
+static bool SeSandboxClassOk(const std::string& className)
+{
+    return g_seSandbox && !SbTypeFor(className).empty();
+}
+
 // The loaded gamemode that hosts the station's own sandbox objects: the GameMode of any live UPrefabComponent.
 // Which loaded gamemode should host a new object of this prefab type. A prefab whose behaviour comes from a
 // Luau script only works in a gamemode whose project carries that script, and the safe way to get that is
@@ -1863,6 +2028,13 @@ static std::string SeSandboxSpawn(const std::string& uniqueId, const double* loc
                             NvNameBits(NvName("objects")), desc, NvNameBits(NvName(idxA)));
     g_sbDefBp = nullptr;
     g_sbLeafCount = 0;
+    if (r == 6)
+    {
+        SbOwned o;
+        o.idx = idxA; o.cls = g_sbSpawnCls; o.lgm = lgm;
+        memcpy(o.loc, loc, sizeof(o.loc)); memcpy(o.rot, rot, sizeof(o.rot)); memcpy(o.scl, scl, sizeof(o.scl));
+        g_sbOwned.push_back(o);
+    }
     HxLog("[HalcyonA2][SPECEDIT] sandbox spawn %s: defaults from %d template(s), %d default node(s)\n", idxA.c_str(),
           g_sbDefResult > 0 ? g_sbDefResult >> 8 : g_sbDefResult, g_sbDefResult > 0 ? g_sbDefResult & 0xFF : 0);
     if (r == 6 && slot) static_cast<SDK::AModuleSlot*>(slot)->PushNetVars();
@@ -1902,7 +2074,8 @@ static bool SbSetButtonQuest(SDK::AActor* button, const std::string& questHex)
 static std::unordered_map<std::string, std::pair<std::string, std::string>> g_seCoinRuns;
 
 static void SeCoinRun(const std::string& ident, const std::string& locs, const std::string& durs,
-                      const std::string& questRef, const std::string& coins, const std::string& buttonLoc)
+                      const std::string& questRef, const std::string& coins, const std::string& buttonLoc,
+                      const std::string& thrusters)
 {
     // questRef: a 32-hex GUID, or the id of a quest published from the editor (its GUID is derived the same way).
     std::string questHex = questRef;
@@ -1938,6 +2111,15 @@ static void SeCoinRun(const std::string& ident, const std::string& locs, const s
         leaves.push_back({ true, "TargetQuest", SbBlobGuid(g) });
     }
     if (!rel.empty()) leaves.push_back({ false, "CoinTransforms_v2", SbBlobCoins(rel) });
+    // ThrusterResponseType MUST be written: the prefab default is 0 = PreventThrusters, which locks the
+    // player's thrusters at run start and only releases them on one end path -- players who finished an
+    // editor-made run could never boost again. 2 = AllowThrusters (never touches them), 1 = FailOnThrusters
+    // (the TKB behaviour: boosting fails the run; binds a delegate, never locks). Never 0.
+    {
+        int mode = atoi(thrusters.c_str());
+        if (mode != 1) mode = 2;
+        leaves.push_back({ true, "ThrusterResponseType", { 0x02, 0x01, 0x3F, 0x00, static_cast<uint8_t>(mode) } });
+    }
     if (!a)
     {
         if (auto old = g_seCoinRuns.find(questRef); old != g_seCoinRuns.end())
@@ -1964,6 +2146,329 @@ static void SeCoinRun(const std::string& ident, const std::string& locs, const s
     const bool ok = SbWriteLeaves(a, leaves);
     HxLog("[HalcyonA2][SPECEDIT] COINRUN update %s: %zu coin(s), %.0fs, quest %s -> %s\n", a->GetName().c_str(), rel.size(), dur,
           questHex.c_str(), ok ? "ok" : "FAILED");
+}
+
+
+// ---- Game data: every value the game syncs for a sandbox object, readable and editable -------------------
+// What the in-game level editor configures is exactly this: an object's serverData leaves (a button's
+// TargetQuest string...), its bound component fields under serverData/Properties (a kiosk's TargetQuests,
+// a run's Duration...), and its live gameData state (a switch's IsEnabled). Listing them and writing them
+// through the replicated setters makes every blueprint configurable, for every player, vanilla included.
+// Wire format (server -> editor, ClientMessage): SE|SBDATA|<ident>|<entry>\x1E<entry>...,
+// entry = <path>\x1F<kind>\x1F<value>; kinds: bool num str float double int byte guid text hex(read-only).
+
+// The bound field classes of an actor: field name -> FProperty class name (StrProperty, FloatProperty...),
+// plus the struct name for StructProperty (FStructProperty::Struct @0x78).
+static std::unordered_map<std::string, std::string> SbFieldClasses(SDK::AActor* a)
+{
+    std::unordered_map<std::string, std::string> out;
+    auto* lbCls = SDK::UObject::FindClassFast("LuauBehavior");
+    const int32_t n = SDK::UObject::GObjects->Num();
+    for (int32_t i = 0; lbCls && i < n; ++i)
+    {
+        SDK::UObject* o = SDK::UObject::GObjects->GetByIndex(i);
+        if (!o || o->Outer != a || !o->IsA(lbCls)) continue;
+        const uint8_t* arr = *reinterpret_cast<uint8_t* const*>(reinterpret_cast<uintptr_t>(o) + 0x3C0);
+        const int cnt = *reinterpret_cast<const int32_t*>(reinterpret_cast<uintptr_t>(o) + 0x3C8);
+        for (int k = 0; arr && k < cnt && k < 64; ++k)
+        {
+            const std::string name = reinterpret_cast<const SDK::FName*>(arr + k * 16)->ToString();
+            const SDK::FField* fp = *reinterpret_cast<SDK::FField* const*>(arr + k * 16 + 8);
+            if (!fp || !fp->ClassPrivate) continue;
+            std::string cls = fp->ClassPrivate->Name.ToString();
+            if (cls == "StructProperty")
+            {
+                SDK::UObject* st = *reinterpret_cast<SDK::UObject* const*>(reinterpret_cast<uintptr_t>(fp) + 0x78);
+                if (st) cls += ":" + st->GetName();
+            }
+            out[name] = cls;
+        }
+    }
+    return out;
+}
+
+// Where the value starts in a Properties blob (after 02 01 <type desc>), and its encoded size, by class.
+// Strings: find the offset whose int32 SaveNum exactly accounts for the rest of the blob.
+static bool SbBlobValue(const std::string& cls, const uint8_t* d, int len, int* off, int* vlen)
+{
+    int fixed = 0;
+    if (cls == "FloatProperty" || cls == "IntProperty" || cls == "UInt32Property") fixed = 4;
+    else if (cls == "DoubleProperty" || cls == "Int64Property") fixed = 8;
+    else if (cls == "ByteProperty" || cls == "EnumProperty" || cls == "BoolProperty") fixed = 1;
+    else if (cls == "StructProperty:Guid" || (cls.rfind("StructProperty", 0) == 0 && len == 20)) fixed = 16;   // FGuid-shaped
+    if (fixed) { if (len < fixed + 3) return false; *off = len - fixed; *vlen = fixed; return true; }
+    if (cls.rfind("ArrayProperty", 0) == 0)          // a kiosk's TargetQuests: 02 01 0A <array body>
+    {
+        if (len < 5 || d[2] != 0x0A) return false;
+        *off = 3; *vlen = len - 3;
+        return true;
+    }
+    if (cls == "StrProperty" || cls == "NameProperty" || cls == "TextProperty")
+    {
+        for (int o = 3; o + 4 <= len && o < 12; ++o)
+        {
+            const int32_t save = *reinterpret_cast<const int32_t*>(d + o);
+            const int64_t need = save >= 0 ? 4 + int64_t(save) : 4 + int64_t(-save) * 2;
+            if (o + need == len) { *off = o; *vlen = len - o; return true; }
+        }
+    }
+    return false;
+}
+
+static std::string SbHex(const uint8_t* d, int n)
+{
+    std::string h;
+    char b[4];
+    for (int i = 0; i < n; ++i) { snprintf(b, sizeof(b), "%02X", d[i]); h += b; }
+    return h;
+}
+
+static std::string SbDecode(const std::string& cls, const uint8_t* v, int n, std::string* kind)
+{
+    char b[64];
+    if (cls == "FloatProperty") { *kind = "float"; snprintf(b, sizeof(b), "%g", *reinterpret_cast<const float*>(v)); return b; }
+    if (cls == "DoubleProperty") { *kind = "double"; snprintf(b, sizeof(b), "%g", *reinterpret_cast<const double*>(v)); return b; }
+    if (cls == "IntProperty") { *kind = "int"; snprintf(b, sizeof(b), "%d", *reinterpret_cast<const int32_t*>(v)); return b; }
+    if (cls == "ByteProperty" || cls == "EnumProperty") { *kind = "byte"; snprintf(b, sizeof(b), "%u", v[0]); return b; }
+    if (cls == "BoolProperty") { *kind = "bool"; return v[0] ? "1" : "0"; }
+    if (cls == "StructProperty:Guid" || (cls.rfind("StructProperty", 0) == 0 && n == 16))
+    {
+        *kind = "guid";
+        const uint32_t* g = reinterpret_cast<const uint32_t*>(v);
+        snprintf(b, sizeof(b), "%08X%08X%08X%08X", g[0], g[1], g[2], g[3]);
+        return b;
+    }
+    if (cls == "StrProperty" || cls == "NameProperty" || cls == "TextProperty")
+    {
+        *kind = "text";
+        const int32_t save = *reinterpret_cast<const int32_t*>(v);
+        std::string out;
+        if (save > 0) for (int i = 0; i < save - 1 && 4 + i < n; ++i) out.push_back(static_cast<char>(v[4 + i]));
+        else if (save < 0) for (int i = 0; i < -save - 1 && 4 + 2 * i + 1 < n; ++i) { const wchar_t c = v[4 + 2 * i] | (v[5 + 2 * i] << 8); out.push_back(c < 128 ? static_cast<char>(c) : '?'); }
+        return out;
+    }
+    if (cls.rfind("ArrayProperty", 0) == 0)
+    {
+        // Array body: header byte (bit0 all-same-type, bit1 count<17, count in bits 2..7), the element type
+        // once (1 byte, or 2 when its bit0 is set: FGuid-struct is 3D 00), then 16-byte FGuids.
+        const uint8_t h = v[0];
+        if (!(h & 1) || !(h & 2)) { *kind = "hex"; return SbHex(v, n); }   // mixed types / 17+: not ours to edit
+        const int cnt = h >> 2;
+        const int dlen = (n > 1 && (v[1] & 1)) ? 2 : 1;
+        if (cnt && (dlen != 2 || v[1] != 0x3D)) { *kind = "hex"; return SbHex(v, n); }   // not FGuid elements
+        *kind = "guids";
+        std::string out;
+        for (int i = 0; i < cnt && 1 + dlen + 16 * (i + 1) <= n; ++i)
+        {
+            const uint32_t* g = reinterpret_cast<const uint32_t*>(v + 1 + dlen + 16 * i);
+            snprintf(b, sizeof(b), "%s%08X%08X%08X%08X", i ? "," : "", g[0], g[1], g[2], g[3]);
+            out += b;
+        }
+        return out;
+    }
+    *kind = "hex";
+    return SbHex(v, n);
+}
+
+static std::vector<uint8_t> SbEncode(const std::string& kind, const std::string& value)
+{
+    std::vector<uint8_t> v;
+    auto put = [&](const void* p, size_t n) { v.insert(v.end(), static_cast<const uint8_t*>(p), static_cast<const uint8_t*>(p) + n); };
+    if (kind == "float") { const float f = static_cast<float>(atof(value.c_str())); put(&f, 4); }
+    else if (kind == "double") { const double d = atof(value.c_str()); put(&d, 8); }
+    else if (kind == "int") { const int32_t i = atoi(value.c_str()); put(&i, 4); }
+    else if (kind == "byte" || kind == "bool") v.push_back(static_cast<uint8_t>(atoi(value.c_str())));
+    else if (kind == "guid" && value.size() == 32)
+    {
+        uint32_t g[4];
+        for (int i = 0; i < 4; ++i) g[i] = static_cast<uint32_t>(strtoul(value.substr(i * 8, 8).c_str(), nullptr, 16));
+        put(g, 16);
+    }
+    else if (kind == "guids")
+    {
+        std::vector<std::string> ids;
+        for (size_t b = 0; b < value.size();) { size_t e = value.find(',', b); if (e == std::string::npos) e = value.size(); if (e - b == 32) ids.push_back(value.substr(b, 32)); b = e + 1; }
+        if (ids.size() > 16) ids.resize(16);             // the one-byte header holds up to 16
+        v.push_back(static_cast<uint8_t>(0x03 | (ids.size() << 2)));
+        if (ids.empty()) v.push_back(0x00);
+        else { v.push_back(0x3D); v.push_back(0x00); }
+        for (const auto& id : ids)
+        {
+            uint32_t g[4];
+            for (int i = 0; i < 4; ++i) g[i] = static_cast<uint32_t>(strtoul(id.substr(i * 8, 8).c_str(), nullptr, 16));
+            put(g, 16);
+        }
+    }
+    else if (kind == "text")
+    {
+        const int32_t save = value.empty() ? 0 : static_cast<int32_t>(value.size()) + 1;
+        put(&save, 4);
+        if (save) { put(value.data(), value.size()); v.push_back(0); }
+    }
+    return v;
+}
+
+// POD core: read serverData / gameData leaves of types 2/3/4 through the replicated API, and the raw
+// Properties blobs. Output is plain text lines "<where>\t<name>\t<type>\t<payload>" (payload hex for blobs).
+static void SbListImpl(uint8_t* node, std::string* out)
+{
+    {
+        for (int which = 0; which < 2; ++which)
+        {
+            uint8_t* c = *reinterpret_cast<uint8_t**>(node + (which ? 560 : 552));
+            if (!c) continue;
+            uint8_t** arr = *reinterpret_cast<uint8_t***>(c + 136);
+            const int cnt = *reinterpret_cast<int32_t*>(c + 144);
+            for (int i = 0; arr && i < cnt && i < 200; ++i)
+            {
+                uint8_t* ch = arr[i];
+                if (!ch) continue;
+                const int t = ch[24];
+                const std::string name = reinterpret_cast<SDK::FName*>(ch + 48)->ToString();
+                if (t == 1 && name == "Properties" && !which)
+                {
+                    uint8_t** pa = *reinterpret_cast<uint8_t***>(ch + 136);
+                    const int pc = *reinterpret_cast<int32_t*>(ch + 144);
+                    for (int k = 0; pa && k < pc && k < 64; ++k)
+                    {
+                        uint8_t* lf = pa[k];
+                        if (!lf || lf[24] != 6) continue;
+                        const uint8_t* d = *reinterpret_cast<uint8_t**>(lf + 56);
+                        const int len = *reinterpret_cast<int32_t*>(lf + 64);
+                        if (!d || len <= 0 || len > 4096) continue;
+                        *out += "P\t" + reinterpret_cast<SDK::FName*>(lf + 48)->ToString() + "\t6\t" + SbHex(d, len) + "\n";
+                    }
+                    continue;
+                }
+                if (t == 2 || t == 3 || t == 4) *out += std::string(which ? "G" : "S") + "\t" + name + "\t" + std::to_string(t) + "\t\n";
+            }
+        }
+    }
+}
+static void SbListCore(uint8_t* node, std::string* out)
+{
+    __try { SbListImpl(node, out); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { out->append("!fault\n"); }
+}
+
+static void SeSbData(SDK::UObject* ctx, const std::string& ident)
+{
+    SDK::AActor* a = SeFindEditorActor(ident);
+    SDK::UObject* pc = SbPrefabOf(a);
+    SDK::UObject* caller = SeCallerPC(ctx);
+    if (!pc || !caller) return;
+    uint8_t* handle = reinterpret_cast<uint8_t*>(pc) + 0x3A0;
+    std::string raw;
+    SbListCore(reinterpret_cast<uint8_t*>(SbNodeOf(handle)), &raw);
+    const auto fields = SbFieldClasses(a);
+    std::string entries;
+    auto add = [&](const std::string& path, const std::string& kind, const std::string& value) {
+        if (!entries.empty()) entries += '\x1E';
+        entries += path + '\x1F' + kind + '\x1F' + value;
+    };
+    for (size_t b = 0; b < raw.size();)
+    {
+        size_t e = raw.find('\n', b);
+        if (e == std::string::npos) e = raw.size();
+        const std::string line = raw.substr(b, e - b);
+        b = e + 1;
+        std::vector<std::string> f;
+        for (size_t x = 0; x <= line.size();) { size_t y = line.find('\t', x); if (y == std::string::npos) y = line.size(); f.push_back(line.substr(x, y - x)); x = y + 1; }
+        if (f.size() < 4) continue;
+        const std::string& name = f[1];
+        if (name.rfind("default__", 0) == 0 || name == "Blueprint") continue;
+        if (f[0] == "P")
+        {
+            std::vector<uint8_t> d;
+            for (size_t i = 0; i + 1 < f[3].size(); i += 2) d.push_back(static_cast<uint8_t>(strtoul(f[3].substr(i, 2).c_str(), nullptr, 16)));
+            auto it = fields.find(name);
+            const std::string cls = it == fields.end() ? std::string() : it->second;
+            int off = 0, vlen = 0;
+            std::string kind = "hex", value = f[3];
+            if (!cls.empty() && SbBlobValue(cls, d.data(), static_cast<int>(d.size()), &off, &vlen))
+                value = SbDecode(cls, d.data() + off, vlen, &kind);
+            add("props/" + name, kind, value);
+            continue;
+        }
+        // serverData / gameData scalar leaves, read through the replicated API
+        const std::string top = f[0] == "S" ? "serverData" : "gameData";
+        const int type = atoi(f[2].c_str());
+        const uint64_t segs[2] = { NvNameBits(NvName(top)), NvNameBits(NvName(name)) };
+        NvWalk w{}; void* parent = nullptr; int failAt = -1;
+        std::string value;
+        if (NvWorldWalk(handle, segs, 1, &w, &parent, &failAt))
+        {
+            NvOrig o{};
+            if (NvReadNative(parent, segs[1], type, &o) == 1)
+            {
+                char bb[64];
+                if (type == NvNative::TBool) value = o.b ? "1" : "0";
+                else if (type == NvNative::TNumber) { snprintf(bb, sizeof(bb), "%g", o.num); value = bb; }
+                else { for (int i = 0; o.str[i] && i < 511; ++i) value.push_back(o.str[i] < 128 ? static_cast<char>(o.str[i]) : '?'); }
+            }
+        }
+        NvWalkRelease(&w);
+        add((f[0] == "S" ? "sd/" : "gd/") + name, type == NvNative::TBool ? "bool" : type == NvNative::TNumber ? "num" : "str", value);
+    }
+    SeBroadcast("SE|SBDATA|" + ident + "|" + entries, caller);
+    HxLog("[HalcyonA2][SPECEDIT] SBDATA %s: %zu byte(s) sent\n", a->GetName().c_str(), entries.size());
+}
+
+// SE|SBSET|<ident>|<path>|<kind>|<value>
+static void SeSbSet(SDK::UObject* ctx, const std::string& ident, const std::string& path, const std::string& kind,
+                    const std::string& value)
+{
+    SDK::AActor* a = SeFindEditorActor(ident);
+    SDK::UObject* pc = SbPrefabOf(a);
+    if (!pc) return;
+    uint8_t* handle = reinterpret_cast<uint8_t*>(pc) + 0x3A0;
+    bool ok = false;
+    if (path.rfind("props/", 0) == 0)
+    {
+        // Rebuild the leaf: the current blob's prefix (02 01 <type desc>) + the new value.
+        const std::string name = path.substr(6);
+        std::string raw;
+        SbListCore(reinterpret_cast<uint8_t*>(SbNodeOf(handle)), &raw);
+        const std::string key = "P\t" + name + "\t6\t";
+        const size_t at = raw.find(key);
+        const auto fields = SbFieldClasses(a);
+        auto it = fields.find(name);
+        if (at != std::string::npos && it != fields.end())
+        {
+            const size_t e = raw.find('\n', at);
+            const std::string hex = raw.substr(at + key.size(), e - at - key.size());
+            std::vector<uint8_t> d;
+            for (size_t i = 0; i + 1 < hex.size(); i += 2) d.push_back(static_cast<uint8_t>(strtoul(hex.substr(i, 2).c_str(), nullptr, 16)));
+            int off = 0, vlen = 0;
+            const std::vector<uint8_t> val = SbEncode(kind, value);
+            if (!val.empty() && SbBlobValue(it->second, d.data(), static_cast<int>(d.size()), &off, &vlen))
+            {
+                std::vector<uint8_t> blob(d.begin(), d.begin() + off);
+                blob.insert(blob.end(), val.begin(), val.end());
+                ok = SbWriteLeaves(a, { { true, name, blob } });
+            }
+        }
+    }
+    else if (path.rfind("sd/", 0) == 0 || path.rfind("gd/", 0) == 0)
+    {
+        const std::string top = path[0] == 's' ? "serverData" : "gameData";
+        const uint64_t segs[2] = { NvNameBits(NvName(top)), NvNameBits(NvName(path.substr(3))) };
+        NvWalk w{}; void* parent = nullptr; int failAt = -1;
+        if (NvWorldWalk(handle, segs, 1, &w, &parent, &failAt))
+        {
+            const std::wstring ws(value.begin(), value.end());
+            const int type = kind == "bool" ? NvNative::TBool : kind == "num" ? NvNative::TNumber : NvNative::TString;
+            ok = NvWriteNative(parent, segs[1], type, static_cast<float>(atof(value.c_str())), static_cast<uint8_t>(atoi(value.c_str()) != 0),
+                               ws.c_str(), static_cast<int32_t>(ws.size()) + 1, nullptr) == 1;
+        }
+        NvWalkRelease(&w);
+        SDK::UObject* lgm = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(pc) + 0x440);
+        SDK::AActor* slot = lgm ? *reinterpret_cast<SDK::AActor**>(reinterpret_cast<uintptr_t>(lgm) + 0x320) : nullptr;
+        if (ok && slot) static_cast<SDK::AModuleSlot*>(slot)->PushNetVars();
+    }
+    HxLog("[HalcyonA2][SPECEDIT] SBSET %s %s (%s) = '%s': %s\n", a->GetName().c_str(), path.c_str(), kind.c_str(), value.c_str(),
+          ok ? "ok" : "FAILED");
+    SeSbData(ctx, ident);                               // refresh the editor's view
 }
 
 // SE|SBTEXTS|<text> (local test): four sandbox Text objects, 4 m N/E/S/W of the first real player, each
@@ -2175,10 +2680,14 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
     else if (op == "SBTEXTS" && p.size() >= 3) SeSandboxTextsAtPlayer(p[2]);
     else if (op == "SBPROBE" && p.size() >= 3) SeSandboxProbePaths(p[2]);
     else if (op == "SBTREE" && p.size() >= 3) SeSandboxTree(p[2]);
-    else if (op == "COINRUN" && p.size() >= 7) SeCoinRun(p[2], p[3], p[4], p[5], p[6], p.size() >= 8 ? p[7] : std::string());
+    else if (op == "SBDATA" && p.size() >= 3) SeSbData(pawn, p[2]);
+    else if (op == "SBSET"  && p.size() >= 6) SeSbSet(pawn, p[2], p[3], p[4], p[5]);
+    else if (op == "SBTYPES") SeSandboxTypes();
+    else if (op == "COINRUN" && p.size() >= 7) SeCoinRun(p[2], p[3], p[4], p[5], p[6], p.size() >= 8 ? p[7] : std::string(),
+                                                     p.size() >= 9 ? p[8] : std::string());
     else if (op == "QUEST"  && p.size() >= 12)
         SeQuest(p[2], p[3], p[4], atoi(p[5].c_str()), p[6], atoi(p[7].c_str()), static_cast<float>(atof(p[8].c_str())), p[9],
-                atof(p[10].c_str()), atoi(p[11].c_str()));
+                atof(p[10].c_str()), atoi(p[11].c_str()), p.size() >= 13 ? p[12] : std::string());
     else if (op == "QUEST"  && p.size() >= 10)
         SeQuest(p[2], p[3], p[4], atoi(p[5].c_str()), p[6], atoi(p[7].c_str()), static_cast<float>(atof(p[8].c_str())), p[9]);
     else if (op == "QUEST"  && p.size() >= 7) SeQuest(p[2], p[3], p[4], atoi(p[5].c_str()), p[6]);

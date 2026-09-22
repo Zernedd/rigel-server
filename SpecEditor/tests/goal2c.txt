@@ -1,0 +1,7 @@
+log G2C start
+enter
+wait 3
+sbtexts RING ONE
+wait 15
+log G2C placed
+wait 600

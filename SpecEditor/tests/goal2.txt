@@ -1,0 +1,39 @@
+# Goal 2: boost pads / traps from the sandbox palette, Game data read+write, delete of a no-actor object,
+# thruster mode on new runs, quest group.
+log G2 start
+enter
+wait 3
+spawn BP_SmallBoostPickup_C
+wait 8
+expect 1
+data
+wait 3
+datadump
+spawn BP_Trap_BunnyHop_C
+wait 8
+expect 1
+spawn LE_BP_DefaultMeshObject_C
+wait 8
+delete
+wait 6
+expect 0
+coinrun 30 E68BAC0C44131D9D8355739D79D153D0
+wait 10
+data
+wait 3
+datadump
+dataset props/Duration float 99
+wait 3
+datadump
+pick LE_BP_ProgressionButton_C
+data
+wait 3
+datadump
+qstep
+qpub g2a 250 0 Part A
+wait 3
+qpub g2b 250 0 Part B
+wait 3
+raw SE|QUEST|g2grp|Group Test|PKRClimb5|0||0|0|A group|250|0|g2a;g2b
+wait 5
+log G2 done

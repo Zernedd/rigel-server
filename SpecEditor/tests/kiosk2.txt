@@ -1,0 +1,6 @@
+log K2 start
+enter
+wait 3
+pickat LE_BP_QuestDisplayKiosk_C 0 -2600 -27000
+dump progressionKiosk
+log K2 done

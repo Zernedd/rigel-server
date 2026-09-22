@@ -1,0 +1,14 @@
+log PK start
+enter
+wait 3
+pick LE_BP_QuestDisplayKiosk_C
+sbtree
+spawn BP_SmallBoostPickup_C
+wait 8
+expect 1
+sbtree
+spawn BP_Trap_BunnyHop_C
+wait 8
+expect 1
+sbtree
+log PK done

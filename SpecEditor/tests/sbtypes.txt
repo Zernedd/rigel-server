@@ -1,0 +1,6 @@
+log T start
+enter
+wait 3
+sbtypes
+wait 3
+log T done

@@ -37,6 +37,7 @@ static_assert(static_cast<int>(sereflect::PType::Object) == se::PT_Object &&
               static_cast<int>(sereflect::PType::Vector) == se::PT_Vector,
               "se::PropType must mirror sereflect::PType");
 #include <cmath>
+#include <unordered_set>
 #include <algorithm>
 #include <cstdlib>
 
@@ -52,6 +53,10 @@ bool         g_paletteDirty = true;
 ULONGLONG    g_lastPump = 0;
 bool         g_editorMode = false;   // client-side "Enter Level Editor" state
 SDK::UFunction* g_setQuestsFn = nullptr;   // A2PlayerQuestComponent::Client_SetQuests (see LogIncomingQuests)
+std::vector<Snapshot::QuestRef> g_knownQuests;   // every quest row seen, for the Game data quest pickers
+std::string g_dataHandle, g_dataIdent;             // Game data: the object asked about, and how we named it
+std::vector<Snapshot::DataEntry> g_data;
+int g_dataSerial = 0;
 std::vector<std::string> g_glyphs;        // quest icon ids seen in any bundle (for the Quest Editor's picker)
 SDK::UFunction* g_clientMsgFn = nullptr;   // APlayerController::ClientMessage (see ApplyRemoteProp)
 
@@ -219,6 +224,71 @@ const std::vector<PaletteItem>& Catalogue()
     return s_items;
 }
 
+// Every prefab the game's own sandbox can place (USandboxEngine::RawPrefabs @0xF8: definition +0x30
+// Blueprint class, +0x38 Settings, Settings +0xF0 UniqueID). Far more than the LE_ catalogue: boost pads,
+// traps, sliding platforms, gravity volumes, force fields, buttons, timers... The server places these
+// through the sandbox, so every client builds them with their scripts.
+struct SandboxPrefab { std::string cls, path, uniqueId; };
+const std::vector<SandboxPrefab>& SandboxPrefabs()
+{
+    static std::vector<SandboxPrefab> s_list;
+    if (!s_list.empty()) return s_list;
+    auto* sbCls = SDK::UObject::FindClassFast("SandboxEngine");
+    SDK::UObject* sb = nullptr;
+    const int32_t n = SDK::UObject::GObjects->Num();
+    for (int32_t i = 0; sbCls && i < n && !sb; ++i)
+    {
+        SDK::UObject* o = SDK::UObject::GObjects->GetByIndex(i);
+        if (o && !o->IsDefaultObject() && o->IsA(sbCls)) sb = o;
+    }
+    if (!sb) return s_list;
+    const uintptr_t b = reinterpret_cast<uintptr_t>(sb);
+    SDK::UObject** rp = *reinterpret_cast<SDK::UObject***>(b + 0xF8);
+    const int raw = *reinterpret_cast<int32_t*>(b + 0xF8 + 8);
+    for (int i = 0; rp && i < raw && i < 1000; ++i)
+    {
+        SDK::UObject* def = rp[i];
+        if (!def || IsBadReadPtr(def, 0x40)) continue;
+        SDK::UObject* bp = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(def) + 0x30);
+        SDK::UObject* st = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(def) + 0x38);
+        if (!bp || !st) continue;
+        const std::string full = bp->GetFullName();          // "BlueprintGeneratedClass /Game/...Asset.Asset_C"
+        const size_t sp = full.find(' ');
+        s_list.push_back({ bp->GetName(), sp == std::string::npos ? full : full.substr(sp + 1),
+                           reinterpret_cast<SDK::FName*>(reinterpret_cast<uintptr_t>(st) + 0xF0)->ToString() });
+    }
+    if (!s_list.empty()) Log("[game] sandbox prefabs: %d", (int)s_list.size());
+    return s_list;
+}
+bool IsSandboxClass(const std::string& cls)
+{
+    static std::unordered_set<std::string> s_set;              // hot: asked for every actor, every refresh
+    static ULONGLONG s_tried = 0;
+    if (s_set.empty() && GetTickCount64() - s_tried > 3000)    // registry not filled yet: retry, not per call
+    {
+        s_tried = GetTickCount64();
+        for (const auto& p : SandboxPrefabs()) s_set.insert(p.cls);
+    }
+    return s_set.count(cls) != 0;
+}
+// A palette category for a sandbox prefab from its UniqueID.
+std::string SandboxCategory(const std::string& id, const std::string& cls)
+{
+    auto has = [&](const char* k) { return id.find(k) != std::string::npos || cls.find(k) != std::string::npos; };
+    if (has("Boost")) return "Parkour - Boost pads";
+    if (has("Trap") || has("Sliding") || has("Gravity") || has("HandHold") || has("Deathrun")) return "Parkour - Traps & movers";
+    if (has("ForceField") || has("Shield")) return "Force fields";
+    if (has("Primitive") || has("Cube") || has("Sphere") || has("Cylinder")) return "Shapes";
+    if (has("Golf")) return "Golf";
+    if (has("Quest") || has("Progression") || has("RedCoin") || has("Kiosk")) return "Quests";
+    if (has("Trigger") || has("Button") || has("Timer") || has("Repeater") || has("NetVar") || has("Speaker") ||
+        has("Sound") || has("Swapper") || has("Switch") || has("Teleporter") || has("Text")) return "Logic & interaction";
+    if (has("Ball") || has("Goal") || has("Score") || has("team") || has("Team") || has("Tackleball") || has("driftball") ||
+        has("Passer") || has("Ticket") || has("GameState") || has("Volley") || has("Net")) return "Sports & games";
+    if (id.rfind("aa_se_SM_", 0) == 0) return "";           // meshes: already in the catalogue by folder
+    return "Sandbox - other";
+}
+
 // Placeable items: the whole catalogue, plus any LE class loaded in memory that it does not list (so a
 // newer build's prefabs still show up even before the catalogue is regenerated).
 void BuildPalette(Snapshot& snap)
@@ -254,6 +324,21 @@ void BuildPalette(Snapshot& snap)
         snap.palette.push_back(std::move(it));
         ++extra;
     }
+    int sandboxAdded = 0;
+    for (const auto& sp : SandboxPrefabs())
+    {
+        if (have(sp.cls)) continue;
+        const std::string cat = SandboxCategory(sp.uniqueId, sp.cls);
+        if (cat.empty()) continue;
+        PaletteItem it;
+        it.name = sp.cls;
+        it.path = sp.path;
+        it.category = cat;
+        ClassifyPrefab(it);
+        snap.palette.push_back(std::move(it));
+        ++sandboxAdded;
+    }
+    if (sandboxAdded) Log("[game] palette: +%d sandbox prefab(s) beyond the LE catalogue", sandboxAdded);
     std::sort(snap.palette.begin(), snap.palette.end(),
               [](const PaletteItem& a, const PaletteItem& b) {
                   if (a.category != b.category) return a.category < b.category;
@@ -301,7 +386,7 @@ void BuildObjects(Snapshot& snap)
     auto* actorCls = SDK::UObject::FindClassFast("Actor");
     if (!actorCls) return;
     const int32_t n = SDK::UObject::GObjects->Num();
-    for (int32_t i = 0; i < n && snap.objects.size() < 1024; ++i)
+    for (int32_t i = 0; i < n && snap.objects.size() < 4096; ++i)
     {
         auto* o = SDK::UObject::GObjects->GetByIndex(i);
         if (!o || o->IsDefaultObject() || !o->IsA(actorCls)) continue;
@@ -312,7 +397,7 @@ void BuildObjects(Snapshot& snap)
         // removed it. AActor::bActorIsBeingDestroyed is byte 0x65, bit 0.
         if (*(reinterpret_cast<const uint8_t*>(o) + 0x65) & 0x01) continue;
         const std::string cn = c->GetName();
-        if (cn.rfind("LE_", 0) != 0) continue;
+        if (cn.rfind("LE_", 0) != 0 && !IsSandboxClass(cn)) continue;
 
         SceneObject so;
         so.ptr = o;
@@ -560,6 +645,24 @@ void HandleCommands()
             SendToServer(c.str);
             break;
 
+        case CmdType::DataRequest:
+        {
+            const std::string id = IdentFor(c.str);
+            if (id.empty()) break;
+            g_dataHandle = c.str; g_dataIdent = id;
+            SendToServer("SE|SBDATA|" + id);
+            break;
+        }
+
+        case CmdType::DataSet:
+        {
+            const std::string id = IdentFor(c.str);
+            if (id.empty()) break;
+            g_dataHandle = c.str; g_dataIdent = id;
+            SendToServer("SE|SBSET|" + id + "|" + c.str2 + "|" + c.str3 + "|" + c.str4);
+            break;
+        }
+
         case CmdType::QuestAddStep:
             g_questSteps.push_back({ c.str, atoi(c.str2.c_str()) });
             break;
@@ -585,7 +688,7 @@ void HandleCommands()
             for (auto& ch : desc)  if (ch == '|') ch = '/';       // '|' is the field separator
             for (auto& ch : title) if (ch == '|') ch = '/';
             SendToServer("SE|QUEST|" + c.str + "|" + title + "|" + c.str3 + "|" + std::to_string(c.num) + "|" + steps +
-                         extra + desc + tail);
+                         extra + desc + tail + "|" + c.str5);
             Log("[game] quest publish: %s '%s' glyph=%s rep=%d, %d step(s)%s", c.str.c_str(), c.str2.c_str(),
                 c.str3.c_str(), c.num, (int)g_questSteps.size() - unresolved,
                 unresolved ? " (some steps no longer exist and were skipped)" : "");
@@ -1272,6 +1375,8 @@ void RunScript(const Snapshot& snap)
         Log("[script] spawnatplayer %s at (%.0f,%.0f,%.0f) next to %s", pick->name.c_str(), c.loc.x, c.loc.y, c.loc.z, other->GetName().c_str());
         return;
     }
+    if (!strcmp(op, "sbtypes")) { SendToServer("SE|SBTYPES"); return; }   // LOCAL TEST: server lists every prefab type
+    if (!strcmp(op, "raw")) { SendToServer(rest); Log("[script] raw %s", rest.c_str()); return; }   // raw <SE|...>
     if (!strcmp(op, "coinrun"))               // coinrun <sec> <questHex32> -- a red-coin run 4 m ahead: 3 coins + a start button
     {
         char q[64] = {};
@@ -1362,6 +1467,21 @@ void RunScript(const Snapshot& snap)
         SendToServer("SE|TESTQUEST|" + rest);
         return;
     }
+    if (!strcmp(op, "qprev"))                 // qprev <n> <title> -- red coin run draft with n preview coins
+    {
+        int n = 3, used = 0;
+        sscanf_s(rest.c_str(), "%d %n", &n, &used);
+        ScriptCoinPreview(snap, rest.substr(used), n);
+        Log("[script] qprev %d coins", n);
+        return;
+    }
+    if (!strcmp(op, "qprevcheck"))            // qprevcheck <n> -- PASS when n preview coins were adopted
+    {
+        const int want = atoi(rest.c_str()), got = ScriptCoinPreviewAdopted();
+        Log("[script] %s qprevcheck adopted %d, want %d", got == want ? "PASS" : "FAIL", got, want);
+        return;
+    }
+    if (!strcmp(op, "qprevpub")) { ScriptCoinPreviewPublish(); Log("[script] qprevpub"); return; }
     if (!strcmp(op, "qcoinrun"))              // qcoinrun <seconds> <coins> <title...> -- publish a red coin run via the UI path
     {
         int secs = 60, n = 4, used = 0;
@@ -1574,6 +1694,23 @@ void RunScript(const Snapshot& snap)
             what = b;
         }
         Log("[script] TRACEDOWN over %s: hit %s", o->className.c_str(), what.c_str());
+        return;
+    }
+    if (!strcmp(op, "data"))                  // data -- ask the server for this object's Game data (logged on arrival)
+    {
+        Command c{ CmdType::DataRequest }; c.str = o->handle; State().Push(c);
+        return;
+    }
+    if (!strcmp(op, "dataset"))               // dataset <path> <kind> <value...>
+    {
+        char path[128] = {}, kind[32] = {}; int used = 0;
+        sscanf_s(rest.c_str(), "%127s %31s %n", path, (unsigned)sizeof(path), kind, (unsigned)sizeof(kind), &used);
+        Command c{ CmdType::DataSet }; c.str = o->handle; c.str2 = path; c.str3 = kind; c.str4 = rest.substr(used); State().Push(c);
+        return;
+    }
+    if (!strcmp(op, "datadump"))              // datadump -- log the Game data we have
+    {
+        for (const auto& e : g_data) Log("[script]   data %s (%s) = %s", e.path.c_str(), e.kind.c_str(), e.value.c_str());
         return;
     }
     if (!strcmp(op, "press"))                 // press -- LOCAL TEST: press a ProgressionButton on THIS client (OnPressed)
@@ -1894,8 +2031,16 @@ void PumpImpl()
     static void*     s_world = nullptr;
     static ULONGLONG s_lastPaletteTry = 0;
     void* world = *reinterpret_cast<void**>(base + SDK::Offsets::GWorld);
-    if (world != s_world) { s_world = world; g_paletteDirty = true; }
+    static bool s_paletteHasSandbox = false;
+    if (world != s_world) { s_world = world; g_paletteDirty = true; s_paletteHasSandbox = false; }
     if (snap.worldReady && g_palette.empty() && GetTickCount64() - s_lastPaletteTry > 5000) g_paletteDirty = true;
+    // The sandbox's prefab registry fills a few seconds AFTER the world is ready (it loads the station's
+    // project), so a palette built at arrival has none of the sandbox-only prefabs (boost pads, traps...).
+    if (snap.worldReady && !s_paletteHasSandbox && GetTickCount64() - s_lastPaletteTry > 3000 && !SandboxPrefabs().empty())
+    {
+        g_paletteDirty = true;
+        s_paletteHasSandbox = true;
+    }
     if (g_paletteDirty && snap.worldReady)
     {
         Snapshot tmp;
@@ -1925,6 +2070,10 @@ void PumpImpl()
 
     FillProps(snap);
     snap.glyphs = g_glyphs;
+    snap.quests = g_knownQuests;
+    snap.dataHandle = g_dataHandle;
+    snap.data = g_data;
+    snap.dataSerial = g_dataSerial;
     State().Publish(std::move(snap));
     HandleCommands();
 }
@@ -1944,6 +2093,16 @@ void LogIncomingQuests(const void* parms)
     {
         const std::string g = reinterpret_cast<const SDK::FName*>(rows + static_cast<size_t>(i) * 0x120 + 0x100)->ToString();
         if (!g.empty() && g != "None" && std::find(g_glyphs.begin(), g_glyphs.end(), g) == g_glyphs.end()) g_glyphs.push_back(g);
+        const uint8_t* r = rows + static_cast<size_t>(i) * 0x120;
+        const uint32_t* id = reinterpret_cast<const uint32_t*>(r);
+        char hx[40];
+        snprintf(hx, sizeof(hx), "%08X%08X%08X%08X", id[0], id[1], id[2], id[3]);
+        const wchar_t* t = *reinterpret_cast<const wchar_t* const*>(r + 0xF0);
+        std::string title;
+        for (int k = 0; t && t[k] && k < 80; ++k) title.push_back(t[k] < 128 ? static_cast<char>(t[k]) : '?');
+        bool known = false;
+        for (auto& q : g_knownQuests) if (q.id == hx) { q.title = title; q.glyph = g; known = true; break; }
+        if (!known) g_knownQuests.push_back({ hx, title, g });
     }
     std::sort(g_glyphs.begin(), g_glyphs.end());
     if (!uid || wcscmp(uid, L"SpecEditorQuests") != 0 || !rows) return;
@@ -1960,9 +2119,29 @@ void LogIncomingQuests(const void* parms)
 void HandleServerMessage(const wchar_t* w)
 {
     std::string msg;
-    for (int i = 0; w[i] && i < 1100; ++i) msg.push_back(static_cast<char>(w[i] < 128 ? w[i] : '?'));
+    for (int i = 0; w[i] && i < 60000; ++i) msg.push_back(static_cast<char>(w[i] < 128 ? w[i] : '?'));
     if (msg.rfind("SE|PROP|", 0) == 0) ApplyRemoteProp(msg);
     else if (msg.rfind("SE|NOTE|", 0) == 0) { Notes().Set(msg.substr(8)); Log("[note] %s", msg.substr(8).c_str()); }
+    else if (msg.rfind("SE|SBDATA|", 0) == 0)
+    {
+        // SE|SBDATA|<ident>|<path>\x1F<kind>\x1F<value>\x1E...
+        const size_t bar = msg.find('|', 10);
+        if (bar == std::string::npos || msg.substr(10, bar - 10) != g_dataIdent) return;   // an older request
+        g_data.clear();
+        const std::string body = msg.substr(bar + 1);
+        for (size_t b = 0; b < body.size();)
+        {
+            size_t e = body.find('\x1E', b);
+            if (e == std::string::npos) e = body.size();
+            const std::string ent = body.substr(b, e - b);
+            b = e + 1;
+            const size_t f1 = ent.find('\x1F'), f2 = f1 == std::string::npos ? f1 : ent.find('\x1F', f1 + 1);
+            if (f2 == std::string::npos) continue;
+            g_data.push_back({ ent.substr(0, f1), ent.substr(f1 + 1, f2 - f1 - 1), ent.substr(f2 + 1) });
+        }
+        ++g_dataSerial;
+        Log("[data] %zu value(s) for %s", g_data.size(), g_dataIdent.c_str());
+    }
 }
 
 #ifdef RIGEL_EOS

@@ -95,6 +95,12 @@ struct Snapshot
     std::string               inspectClass;     // class of the object at inspectPath
     std::vector<PropInfo>     props;
     std::vector<std::string>  glyphs;    // quest icon ids seen in the game's own quest bundles
+    struct QuestRef { std::string id, title, glyph; };
+    std::vector<QuestRef>     quests;    // every quest the game has sent us (id = 32 hex), for pickers
+    struct DataEntry { std::string path, kind, value; };
+    std::string               dataHandle;   // the object the Game data below belongs to
+    std::vector<DataEntry>    data;         // its synced values (serverData, Properties, state)
+    int                       dataSerial = 0;
 };
 
 // ── commands: render thread -> game thread ───────────────────────────────────────────────────
@@ -116,6 +122,8 @@ enum class CmdType
     Inspect,          // str = handle, str2 = sub-object path ("" = the actor) -- what Details shows
     SetProperty,      // str = handle, str2 = property path, str3 = value (wire encoding)
     SendRaw,          // str = a complete SE| line (the red-coin run publish)
+    DataRequest,      // str = handle: ask the server for the object's Game data
+    DataSet,          // str = handle, str2 = path, str3 = kind, str4 = value
 };
 
 struct Command
@@ -132,6 +140,7 @@ struct Command
     int         num2 = 0;           // QuestCompile: valid length, seconds (0 = open-ended)
     float       f1 = 0.0f;          // QuestCompile: required progress (0 = template default)
     std::string str4;               // QuestCompile: description
+    std::string str5;               // QuestCompile: child quest ids, ';'-separated (a quest group)
     float       snap = 0.0f;
     double      fallback = 400.0;   // SpawnTraced: distance to use when the ray hits nothing
     double      radius = 250.0;     // QuestCompile: checkpoint touch distance, cm
@@ -256,6 +265,9 @@ bool InstallGameHook();       // UObject::ProcessEvent -> game-thread pump
 void DrawEditorUI();          // render thread; the whole UE-styled editor
 void GameThreadPump();        // game thread; drains commands, republishes the snapshot
 void ScriptCoinRun(const Snapshot& snap, const std::string& title, int seconds, int coins);   // test scripts: the red coin run publish
+void ScriptCoinPreview(const Snapshot& snap, const std::string& title, int coins);   // test scripts: coin previews
+int  ScriptCoinPreviewAdopted();
+void ScriptCoinPreviewPublish();
 
 extern bool g_uiVisible;      // INSERT toggles
 extern DWORD g_mainThread;    // UE's game thread = the process main thread (recorded in DllMain)

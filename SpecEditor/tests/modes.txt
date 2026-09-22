@@ -1,0 +1,8 @@
+log MODES start
+enter
+wait 3
+spawn LE_SM_SP_Floor_2x2x025_A_01_C
+wait 6
+select
+log MODES ready
+wait 900

@@ -1,0 +1,9 @@
+log CP start
+enter
+wait 3
+qprev 3 Preview Run
+wait 10
+qprevcheck 3
+qprevpub
+wait 10
+log CP done

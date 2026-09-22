@@ -14,6 +14,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstring>
+#include <unordered_map>
 
 namespace se {
 namespace {
@@ -51,11 +52,18 @@ struct QuestDraft
     std::vector<QuestStep> steps;
     // Red coin run (kind 1): the game's own TKB-style run. A start button activates the quest; the player
     // then has runSeconds to collect every coin, and the game completes the quest on their machine.
-    int         kind = 0;            // 0 = checkpoint run, 1 = red coin run
+    int         kind = 0;            // 0 = checkpoint run, 1 = red coin run, 2 = quest group
+    std::vector<std::string> parts;  // kind 2: ids of the quests in the group (each keeps its own icon)
     bool        hasButton = false;
     Vec3        buttonAt;
-    std::vector<Vec3> coins;
+    std::vector<Vec3> coins;         // the published course (positions)
+    // While you build the course each coin is a real red coin object -- the actual mesh, movable with the
+    // gizmo like anything else. Publishing reads where they are, builds the run, and removes them.
+    std::vector<std::string> coinObjs;
+    struct PendingCoin { Vec3 at; double since; };
+    std::vector<PendingCoin> pendingCoins;
     int         runSeconds = 60;
+    int         thrusters = 0;       // 0 = allowed (boost pads work), 1 = boosting fails the run (like TKB)
     bool        published = false;
     bool        dirty = true;        // changed since it was last published
 };
@@ -1140,8 +1148,29 @@ Vec3 InFront(const Snapshot& snap, double dist)
 void PublishQuest(QuestDraft& q)
 {
     if (q.id.empty()) q.id = QuestIdFrom(q.title);
+    if (q.kind == 2)
+    {
+        Command c{ CmdType::QuestCompile };
+        c.str = q.id; c.str2 = q.title; c.str3 = q.glyph; c.num = q.repetition;
+        c.str4 = q.desc[0] ? q.desc : q.title;
+        for (const auto& id : q.parts) c.str5 += (c.str5.empty() ? "" : ";") + id;
+        State().Push(c);
+        q.published = true;
+        q.dirty = false;
+        Notes().Set(std::string("Published group '") + q.title + "' - it completes when players finish every quest in it.");
+        return;
+    }
     if (q.kind == 1)
     {
+        if (!q.coinObjs.empty())                       // the course as the preview coins stand now
+        {
+            const Snapshot snap = State().ReadSnapshot();
+            q.coins.clear();
+            for (const auto& h : q.coinObjs)
+                if (const SceneObject* o = FindObject(snap, h)) q.coins.push_back(o->location);
+            for (const auto& h : q.coinObjs) { Command d{ CmdType::DeleteObject }; d.str = h; State().Push(d); }
+            q.coinObjs.clear();
+        }
         // The quest row first (no checkpoints: the game itself completes a coin run), then the run. The run
         // is anchored at its start button; coins are stored relative to it.
         Command c{ CmdType::QuestCompile };
@@ -1157,7 +1186,7 @@ void PublishQuest(QuestDraft& q)
             snprintf(b, sizeof(b), "%s%.1f,%.1f,%.1f", i ? ";" : "", q.coins[i].x, q.coins[i].y, q.coins[i].z);
             msg += b;
         }
-        snprintf(b, sizeof(b), "|%.1f,%.1f,%.1f", q.buttonAt.x, q.buttonAt.y, q.buttonAt.z);
+        snprintf(b, sizeof(b), "|%.1f,%.1f,%.1f|%d", q.buttonAt.x, q.buttonAt.y, q.buttonAt.z, q.thrusters == 1 ? 1 : 2);
         msg += b;
         Command r{ CmdType::SendRaw }; r.str = msg; State().Push(r);
         q.published = true;
@@ -1179,6 +1208,83 @@ void PublishQuest(QuestDraft& q)
     q.published = true;
     q.dirty = false;
     Notes().Set(std::string("Published '") + q.title + "' - players online get it now; it completes when they reach every checkpoint in order.");
+}
+
+// Adopt preview coins we asked for, once they replicate back: the new red coin nearest each request.
+// Runs every frame for every quest, whichever tab is open, so no coin is ever left orphaned.
+void AdoptPreviewCoins(const Snapshot& snap)
+{
+    for (auto& q : g_quests)
+    {
+        if (q.pendingCoins.empty()) continue;
+        for (auto it = q.pendingCoins.begin(); it != q.pendingCoins.end();)
+        {
+            const SceneObject* best = nullptr;
+            double bestD = 200.0 * 200.0;
+            for (const auto& o : snap.objects)
+            {
+                if (o.className != "LE_BP_RedCoin_C") continue;
+                bool taken = false;
+                for (const auto& d : g_quests)
+                    if (std::find(d.coinObjs.begin(), d.coinObjs.end(), o.handle) != d.coinObjs.end()) { taken = true; break; }
+                if (taken) continue;
+                const Vec3 d = Sub(o.location, it->at);
+                if (Dot(d, d) < bestD) { bestD = Dot(d, d); best = &o; }
+            }
+            if (best) { q.coinObjs.push_back(best->handle); it = q.pendingCoins.erase(it); }
+            else if (ImGui::GetTime() - it->since > 12.0) it = q.pendingCoins.erase(it);   // gave up
+            else ++it;
+        }
+    }
+}
+
+// A quest group: one quest made of several others. Each part keeps its own icon; the game shows the parts
+// under the group and completes the group when every part is done (its progress is theirs, averaged).
+void DrawQuestGroup(const Snapshot& snap, QuestDraft& q)
+{
+    ImGui::SeparatorText("Quests in this group");
+    int remove = -1;
+    for (int i = 0; i < (int)q.parts.size(); ++i)
+    {
+        ImGui::PushID(i);
+        const QuestDraft* part = nullptr;
+        for (const auto& d : g_quests) if (d.id == q.parts[i]) part = &d;
+        ImGui::AlignTextToFramePadding();
+        if (part) ImGui::Text("%d. %s  [%s]%s", i + 1, part->title, part->glyph, part->published ? "" : "  (not published)");
+        else ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.35f, 1), "%d. (removed quest)", i + 1);
+        ImGui::SameLine(ImGui::GetWindowWidth() - 40);
+        if (ImGui::SmallButton("X")) { remove = i; }
+        ImGui::PopID();
+    }
+    if (remove >= 0) { q.parts.erase(q.parts.begin() + remove); q.dirty = true; }
+    if (q.parts.empty()) ImGui::TextDisabled("Add quests you have made. Give each one its own icon in its own settings.");
+    if (ImGui::BeginCombo("##addpart", "Add a quest to the group..."))
+    {
+        for (auto& d : g_quests)
+        {
+            if (&d == &q || d.kind == 2) continue;
+            if (d.id.empty()) d.id = QuestIdFrom(d.title);
+            if (std::find(q.parts.begin(), q.parts.end(), d.id) != q.parts.end()) continue;
+            const std::string lab = std::string(d.title[0] ? d.title : "(untitled)") + "  [" + d.glyph + "]##" + d.id;
+            if (ImGui::Selectable(lab.c_str())) { q.parts.push_back(d.id); q.dirty = true; }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::Spacing();
+    bool unpublished = false;
+    for (const auto& id : q.parts)
+        for (const auto& d : g_quests) if (d.id == id && (!d.published || d.dirty)) unpublished = true;
+    const char* problem = !q.title[0] ? "Give the group a name." :
+                          q.parts.size() < 2 ? "Add at least two quests." :
+                          unpublished ? "Publish every quest in the group first." :
+                          !snap.inEditor ? "Click Start Editing first." : nullptr;
+    ImGui::BeginDisabled(problem != nullptr);
+    ImGui::PushStyleColor(ImGuiCol_Button, kSelBlue);
+    if (ImGui::Button(q.published ? "Update group" : "Publish group", ImVec2(-1, 30))) PublishQuest(q);
+    ImGui::PopStyleColor();
+    ImGui::EndDisabled();
+    if (problem) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "%s", problem);
+    ImGui::TextDisabled("The group's own icon is the one set above; each part shows its own.");
 }
 
 // The red coin run half of the quest editor: where it starts, the coins, the clock, publish.
@@ -1205,27 +1311,56 @@ void DrawCoinRun(const Snapshot& snap, QuestDraft& q, float lw)
     }
 
     ImGui::SeparatorText("2. Coins (collect all of them)");
-    int remove = -1;
-    for (int i = 0; i < (int)q.coins.size(); ++i)
+    const PaletteItem* coinItem = FindItem(snap, "LE_BP_RedCoin_C");
+    auto placeCoin = [&](const Vec3& at) {
+        if (!coinItem) { Notes().Set("The red coin prefab isn't in the palette, so coins can't be previewed."); return; }
+        Command c{ CmdType::SpawnItem }; c.str = coinItem->path; c.loc = at; c.rot = { 0.0, 0.0, 0.0 }; State().Push(c);
+        q.pendingCoins.push_back({ at, ImGui::GetTime() });
+    };
+    const bool editing = !q.coinObjs.empty() || !q.pendingCoins.empty();
+    if (editing)
     {
-        ImGui::PushID(i);
-        ImGui::AlignTextToFramePadding();
-        ImGui::Text("Coin %d", i + 1);
-        ImGui::SameLine();
-        ImGui::TextDisabled("%.0f m away", dist(q.coins[i]));
-        ImGui::SameLine(ImGui::GetWindowWidth() - 132);
-        if (ImGui::SmallButton("Go")) goBtn(q.coins[i]);
-        ImGui::SameLine(); if (ImGui::SmallButton("Move here")) { q.coins[i] = InFront(snap, 250.0); q.dirty = true; }
-        ImGui::SameLine(); if (ImGui::SmallButton("X")) remove = i;
-        ImGui::PopID();
+        int remove = -1;
+        for (int i = 0; i < (int)q.coinObjs.size(); ++i)
+        {
+            ImGui::PushID(i);
+            const SceneObject* o = FindObject(snap, q.coinObjs[i]);
+            ImGui::AlignTextToFramePadding();
+            if (o) ImGui::Text("Coin %d", i + 1); else ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.35f, 1), "Coin %d (deleted)", i + 1);
+            ImGui::SameLine();
+            if (o) ImGui::TextDisabled("%.0f m away", dist(o->location));
+            ImGui::SameLine(ImGui::GetWindowWidth() - 132);
+            ImGui::BeginDisabled(!o);
+            if (ImGui::SmallButton("Select")) SelectHandle(q.coinObjs[i]);
+            ImGui::SameLine(); if (ImGui::SmallButton("Go")) goBtn(o->location);
+            ImGui::EndDisabled();
+            ImGui::SameLine(); if (ImGui::SmallButton("X")) remove = i;
+            ImGui::PopID();
+        }
+        if (remove >= 0)
+        {
+            Command d{ CmdType::DeleteObject }; d.str = q.coinObjs[remove]; State().Push(d);
+            q.coinObjs.erase(q.coinObjs.begin() + remove);
+            q.dirty = true;
+        }
+        if (!q.pendingCoins.empty()) ImGui::TextDisabled("Placing %d coin(s)...", (int)q.pendingCoins.size());
+        ImGui::TextDisabled("Select a coin and drag it with the move tool to fine-tune it.");
     }
-    if (remove >= 0) { q.coins.erase(q.coins.begin() + remove); q.dirty = true; }
-    if (q.coins.empty()) ImGui::TextDisabled("No coins yet. Fly to a spot and add one.");
-    ImGui::BeginDisabled(q.coins.size() >= 30);
-    if (ImGui::Button("Add coin here", ImVec2(-1, 0))) { q.coins.push_back(InFront(snap, 250.0)); q.dirty = true; }
+    else if (!q.coins.empty())
+    {
+        ImGui::Text("%d coin(s) in the published run.", (int)q.coins.size());
+        if (ImGui::Button("Edit coins (show them)", ImVec2(-1, 0)))
+            for (const auto& c : q.coins) placeCoin(c);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Brings the coins back as movable objects. Update the run when you're done.");
+    }
+    else ImGui::TextDisabled("No coins yet. Fly to a spot and add one.");
+    const int total = (int)(q.coinObjs.size() + q.pendingCoins.size());
+    ImGui::BeginDisabled(total >= 30 || (!editing && !q.coins.empty()));
+    if (ImGui::Button("Add coin here", ImVec2(-1, 0))) { placeCoin(InFront(snap, 250.0)); q.dirty = true; }
     ImGui::EndDisabled();
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-        ImGui::SetTooltip(q.coins.size() >= 30 ? "30 coins is the most one run can hold." : "Adds a coin 2.5 m in front of the camera. Coins show as gold markers until you publish.");
+        ImGui::SetTooltip(total >= 30 ? "30 coins is the most one run can hold." :
+                          (!editing && !q.coins.empty()) ? "Click Edit coins first." : "Places a real coin 2.5 m in front of the camera. Move it like any object.");
 
     ImGui::SeparatorText("3. Time limit");
     ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted("Seconds"); ImGui::SameLine(lw); ImGui::SetNextItemWidth(-1);
@@ -1233,13 +1368,17 @@ void DrawCoinRun(const Snapshot& snap, QuestDraft& q, float lw)
     q.runSeconds = (std::max)(10, (std::min)(600, q.runSeconds));
     ImGui::TextDisabled("%d:%02d from pressing the button. Miss it and the run resets.", q.runSeconds / 60, q.runSeconds % 60);
 
+    ImGui::SeparatorText("4. Boosting");
+    if (ImGui::RadioButton("Allowed (boost pads work)", q.thrusters == 0)) { q.thrusters = 0; q.dirty = true; }
+    if (ImGui::RadioButton("Boosting fails the run (like TKB)", q.thrusters == 1)) { q.thrusters = 1; q.dirty = true; }
+
     // Unpublished coins and the button, drawn in the viewport so you can see the course you are building.
     {
         const View v = MakeView(snap);
         ImDrawList* dl = ImGui::GetBackgroundDrawList();
         ImVec2 sp;
-        for (size_t i = 0; v.valid && i < q.coins.size(); ++i)
-            if (W2S(v, q.coins[i], sp))
+        for (size_t i = 0; v.valid && i < q.pendingCoins.size(); ++i)
+            if (W2S(v, q.pendingCoins[i].at, sp))
             {
                 dl->AddCircleFilled(sp, 9.0f, IM_COL32(235, 60, 50, 230));
                 dl->AddCircle(sp, 9.0f, IM_COL32(255, 220, 120, 255), 0, 2.0f);
@@ -1256,7 +1395,8 @@ void DrawCoinRun(const Snapshot& snap, QuestDraft& q, float lw)
     ImGui::Spacing();
     const char* problem = !q.title[0] ? "Give the quest a name." :
                           !q.hasButton ? "Place the start button." :
-                          q.coins.empty() ? "Add at least one coin." :
+                          (q.coins.empty() && q.coinObjs.empty()) ? "Add at least one coin." :
+                          !q.pendingCoins.empty() ? "Waiting for coins to appear..." :
                           !snap.inEditor ? "Click Start Editing first." : nullptr;
     ImGui::BeginDisabled(problem != nullptr);
     ImGui::PushStyleColor(ImGuiCol_Button, kSelBlue);
@@ -1331,9 +1471,9 @@ void DrawQuestEditor(const Snapshot& snap, const SceneObject* sel)
         {
             const QuestDraft& q = g_quests[i];
             char label[160];
-            const int n = q.kind == 1 ? (int)q.coins.size() : (int)q.steps.size();
+            const int n = q.kind == 1 ? (int)(q.coins.size() + q.coinObjs.size()) : q.kind == 2 ? (int)q.parts.size() : (int)q.steps.size();
             snprintf(label, sizeof(label), "%s  -  %d %s%s  %s##q%d", q.title[0] ? q.title : "(untitled)", n,
-                     q.kind == 1 ? "coin" : "checkpoint", n == 1 ? "" : "s",
+                     q.kind == 1 ? "coin" : q.kind == 2 ? "quest" : "checkpoint", n == 1 ? "" : "s",
                      !q.published ? "(not published)" : q.dirty ? "(changed)" : "(live)", i);
             if (ImGui::Selectable(label, g_questSel == i)) g_questSel = i;
         }
@@ -1364,12 +1504,14 @@ void DrawQuestEditor(const Snapshot& snap, const SceneObject* sel)
 
     label("Type");
     {
-        const char* kinds[] = { "Checkpoint run - reach points in order", "Red coin run - start button + coins (like TKB)" };
+        const char* kinds[] = { "Checkpoint run - reach points in order", "Red coin run - start button + coins (like TKB)",
+                                "Quest group - several quests, each with its own icon" };
         ImGui::BeginDisabled(q.published);                   // a published quest keeps its type
         if (ImGui::Combo("##qk", &q.kind, kinds, IM_ARRAYSIZE(kinds))) q.dirty = true;
         ImGui::EndDisabled();
     }
     if (q.kind == 1) { DrawCoinRun(snap, q, lw); return; }
+    if (q.kind == 2) { DrawQuestGroup(snap, q); return; }
 
     // ── checkpoints ──
     ImGui::SeparatorText("Checkpoints (reached in this order)");
@@ -1461,6 +1603,131 @@ void DrawQuestEditor(const Snapshot& snap, const SceneObject* sel)
     ImGui::TextDisabled("Quests live until the server restarts.");
 }
 
+
+// ---- Game data: every value the game syncs for the selected object ---------------------------------------
+// What the game's own level editor configures -- a kiosk's quests, a button's target quest, a run's timer,
+// a switch's state -- read from the server and written back through the replicated setters, so every player
+// (vanilla Quest included) gets the change. Values are shown by type; quest ids get a picker.
+std::string g_dataFor;                                   // handle the section was last filled for
+int g_dataSeen = -1;
+std::unordered_map<std::string, std::string> g_dataEdit;  // path -> the text being edited
+
+std::string DataLabel(const std::string& path)
+{
+    std::string n = path.substr(path.find('/') + 1);
+    std::string out;
+    for (size_t i = 0; i < n.size(); ++i)                // camelCase -> "camel Case"
+    {
+        if (i && isupper((unsigned char)n[i]) && islower((unsigned char)n[i - 1])) out += ' ';
+        out += n[i] == '_' ? ' ' : n[i];
+    }
+    if (path.rfind("gd/", 0) == 0) out += "  (live state)";
+    return out;
+}
+const char* QuestTitle(const Snapshot& snap, const std::string& id)
+{
+    for (const auto& q : snap.quests) if (q.id == id) return q.title.empty() ? "(untitled quest)" : q.title.c_str();
+    return nullptr;
+}
+bool QuestPicker(const Snapshot& snap, const char* label, std::string& id)
+{
+    bool changed = false;
+    const char* cur = id.empty() ? "(none)" : QuestTitle(snap, id);
+    if (ImGui::BeginCombo(label, cur ? cur : id.c_str(), ImGuiComboFlags_HeightLarge))
+    {
+        static char filter[64] = "";
+        ImGui::SetNextItemWidth(-1);
+        ImGui::InputTextWithHint("##qf", "Search quests", filter, sizeof(filter));
+        for (const auto& q : snap.quests)
+        {
+            if (filter[0] && !ContainsCi(q.title, filter)) continue;
+            const std::string lab = (q.title.empty() ? q.id : q.title) + "##" + q.id;
+            if (ImGui::Selectable(lab.c_str(), q.id == id)) { id = q.id; changed = true; }
+        }
+        ImGui::EndCombo();
+    }
+    return changed;
+}
+
+void DrawGameData(const Snapshot& snap, const SceneObject* sel)
+{
+    auto request = [&]() { Command c{ CmdType::DataRequest }; c.str = sel->handle; State().Push(c); };
+    if (g_dataFor != sel->handle) { g_dataFor = sel->handle; g_dataEdit.clear(); request(); }
+    if (snap.dataSerial != g_dataSeen) { g_dataSeen = snap.dataSerial; g_dataEdit.clear(); }
+    auto set = [&](const Snapshot::DataEntry& e, const std::string& v) {
+        Command c{ CmdType::DataSet }; c.str = sel->handle; c.str2 = e.path; c.str3 = e.kind; c.str4 = v; State().Push(c);
+    };
+    if (snap.dataHandle != sel->handle) { ImGui::TextDisabled("Loading..."); return; }
+    if (snap.data.empty())
+    {
+        ImGui::TextDisabled("Nothing to configure on this object.");
+        if (ImGui::SmallButton("Refresh")) request();
+        return;
+    }
+    const float lw = 150.0f;
+    for (const auto& e : snap.data)
+    {
+        ImGui::PushID(e.path.c_str());
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(DataLabel(e.path).c_str());
+        ImGui::SameLine(lw);
+        ImGui::SetNextItemWidth(-1);
+        const bool questy = e.path.find("Quest") != std::string::npos;
+        if (e.kind == "bool")
+        {
+            bool b = e.value == "1";
+            if (ImGui::Checkbox("##v", &b)) set(e, b ? "1" : "0");
+        }
+        else if (questy && (e.kind == "guid" || (e.kind == "str" && e.value.size() <= 32)))
+        {
+            std::string id = e.value;
+            if (QuestPicker(snap, "##v", id)) set(e, id);
+        }
+        else if (e.kind == "guids")
+        {
+            std::vector<std::string> ids;
+            for (size_t b = 0; b < e.value.size();) { size_t x = e.value.find(',', b); if (x == std::string::npos) x = e.value.size(); if (x > b) ids.push_back(e.value.substr(b, x - b)); b = x + 1; }
+            ImGui::NewLine();
+            int drop = -1;
+            for (int i = 0; i < (int)ids.size(); ++i)
+            {
+                ImGui::PushID(i);
+                const char* t = QuestTitle(snap, ids[i]);
+                ImGui::BulletText("%s", t ? t : ids[i].c_str());
+                ImGui::SameLine(ImGui::GetWindowWidth() - 40);
+                if (ImGui::SmallButton("X")) drop = i;
+                ImGui::PopID();
+            }
+            std::string add;
+            ImGui::SetNextItemWidth(-1);
+            if (QuestPicker(snap, "##add", add) && !add.empty()) ids.push_back(add), drop = -2;
+            if (drop != -1)
+            {
+                if (drop >= 0) ids.erase(ids.begin() + drop);
+                std::string v;
+                for (size_t i = 0; i < ids.size(); ++i) v += (i ? "," : "") + ids[i];
+                set(e, v);
+            }
+        }
+        else if (e.kind == "hex")
+            ImGui::TextDisabled("(%zu bytes, not editable here)", e.value.size() / 2);
+        else
+        {
+            auto it = g_dataEdit.find(e.path);
+            if (it == g_dataEdit.end()) it = g_dataEdit.emplace(e.path, e.value).first;
+            char buf[256];
+            strncpy_s(buf, it->second.c_str(), _TRUNCATE);
+            const bool numeric = e.kind == "num" || e.kind == "float" || e.kind == "double" || e.kind == "int" || e.kind == "byte";
+            if (ImGui::InputText("##v", buf, sizeof(buf), numeric ? ImGuiInputTextFlags_CharsScientific : 0)) it->second = buf;
+            if (ImGui::IsItemDeactivatedAfterEdit() && it->second != e.value) set(e, it->second);
+        }
+        ImGui::PopID();
+    }
+    if (ImGui::SmallButton("Refresh")) request();
+    ImGui::SameLine();
+    ImGui::TextDisabled("Changes reach every player.");
+}
+
 void DrawDetailsPanel(const Snapshot& snap, const SceneObject* sel, ImVec2 pos, ImVec2 size)
 {
     if (!BeginPanel("##details", pos, size)) { ImGui::End(); return; }
@@ -1523,6 +1790,8 @@ void DrawDetailsPanel(const Snapshot& snap, const SceneObject* sel, ImVec2 pos, 
                     ImGui::SetNextItemWidth(110); ImGui::DragFloat("Grid", &g_gridSnap, 1.0f, 1.0f, 1000.0f);
                     ImGui::SetNextItemWidth(110); ImGui::DragFloat("Rotation", &g_rotSnap, 1.0f, 1.0f, 90.0f);
                 }
+                if (ImGui::CollapsingHeader("Game data (synced to everyone)", ImGuiTreeNodeFlags_DefaultOpen))
+                    DrawGameData(snap, sel);
                 if (ImGui::CollapsingHeader("Properties", ImGuiTreeNodeFlags_DefaultOpen))
                     DrawProperties(snap, sel);
                 if (ContainsCi("Quest Checkpoint", g_detailsFilter) && ImGui::CollapsingHeader("Quest", ImGuiTreeNodeFlags_DefaultOpen))
@@ -1927,12 +2196,41 @@ void DrawEditorUI()
     DrawGizmoOverlay(snap, sel);   // first: a handle click must win over a marker click
     DrawViewportMarkers(snap);
     HandleAssetDrag(snap);
+    AdoptPreviewCoins(snap);
 }
 
 // Test-script entry (se_game.cpp): the red coin run publish, through the UI's own path.
 void ScriptCoinRun(const Snapshot& snap, const std::string& title, int seconds, int coins)
 {
     ScriptPublishCoinRun(snap, title, seconds, coins);
+}
+
+// Test-script entries for the coin preview flow: place N preview coins (real objects) on a new red coin run
+// draft, report how many were adopted, and publish it through PublishQuest.
+void ScriptCoinPreview(const Snapshot& snap, const std::string& title, int coins)
+{
+    g_quests.emplace_back();
+    QuestDraft& q = g_quests.back();
+    strncpy_s(q.title, title.c_str(), _TRUNCATE);
+    q.kind = 1;
+    q.buttonAt = InFront(snap, 250.0);
+    q.hasButton = true;
+    g_questSel = (int)g_quests.size() - 1;
+    const PaletteItem* coin = FindItem(snap, "LE_BP_RedCoin_C");
+    for (int i = 0; coin && i < coins; ++i)
+    {
+        const Vec3 at{ q.buttonAt.x + 300.0 * (i + 1), q.buttonAt.y, q.buttonAt.z + 80.0 };
+        Command c{ CmdType::SpawnItem }; c.str = coin->path; c.loc = at; State().Push(c);
+        q.pendingCoins.push_back({ at, ImGui::GetTime() });
+    }
+}
+int ScriptCoinPreviewAdopted()
+{
+    return g_quests.empty() ? -1 : (int)g_quests.back().coinObjs.size();
+}
+void ScriptCoinPreviewPublish()
+{
+    if (!g_quests.empty()) PublishQuest(g_quests.back());
 }
 
 }  // namespace se
