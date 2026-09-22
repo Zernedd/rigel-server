@@ -144,7 +144,8 @@ from the top, <code>BeginPlay</code> included;</li>
 
 <h3>Scripts already on an object</h3>
 <p>Selecting any object, including the station's own, lists its scripts in <b>Game data</b> as
-<i>Script &lt;name&gt;.luau</i>. <b>Replace</b> swaps in a file from your folder. On objects you placed this
+<i>Script &lt;name&gt;.luau</i>. <b>Replace</b> swaps in a file from your folder, and <b>Remove</b> takes the
+script off an object you placed (the object is rebuilt without it). On objects you placed this
 happens right away. On the station's objects, players who join from then on get the new code.</p>
 
 <h3>Borrowing from the game's scripts</h3>
@@ -540,7 +541,7 @@ objects onto its slots.</p>
 	<span class="k">if</span> (Switch :: ToggleableComponent?) == <span class="k">nil</span> <span class="k">then</span> table.insert(missing, <span class="s">&quot;Switch&quot;</span>) <span class="k">end</span>
 	<span class="k">if</span> (Target :: PhysicalComponent?) == <span class="k">nil</span> <span class="k">then</span> table.insert(missing, <span class="s">&quot;Target&quot;</span>) <span class="k">end</span>
 	<span class="k">if</span> #missing &gt; <span class="n">0</span> <span class="k">then</span>
-		log(<span class="s">&quot;LightSwitch: drag objects onto these slots in the editor: &quot;</span> .. table.concat(missing, <span class="s">&quot;, &quot;</span>))
+		log(<span class="s">&quot;LightSwitch: pick objects for these slots in the editor (Details &gt; Game data): &quot;</span> .. table.concat(missing, <span class="s">&quot;, &quot;</span>))
 		<span class="k">return</span>
 	<span class="k">end</span>
 	Switch.blueprintOnEnabled.Listen(<span class="k">function</span>() apply(<span class="k">true</span>) <span class="k">end</span>)
@@ -566,7 +567,7 @@ objects onto its slots.</p>
 
 <span class="k">function</span> BeginPlay()
 	<span class="k">if</span> (Platform :: PhysicalComponent?) == <span class="k">nil</span> <span class="k">then</span>
-		log(<span class="s">&quot;VanishingPlatform: drag the platform onto the Platform slot&quot;</span>)
+		log(<span class="s">&quot;VanishingPlatform: pick the platform for the Platform slot in the editor&quot;</span>)
 		<span class="k">return</span>
 	<span class="k">end</span>
 	Platform.onOverlapByPlayerSimple.Listen(<span class="k">function</span>()
@@ -609,7 +610,7 @@ objects onto its slots.</p>
 
 <span class="k">function</span> BeginPlay()
 	<span class="k">if</span> (Target :: PhysicalComponent?) == <span class="k">nil</span> <span class="k">then</span>
-		log(<span class="s">&quot;Blinker: drag an object onto the Target slot&quot;</span>)
+		log(<span class="s">&quot;Blinker: pick an object for the Target slot in the editor&quot;</span>)
 		<span class="k">return</span>
 	<span class="k">end</span>
 	cycle()
@@ -631,7 +632,7 @@ objects onto its slots.</p>
 
 <span class="k">function</span> BeginPlay()
 	<span class="k">if</span> (Button :: BasicButtonComponent?) == <span class="k">nil</span> <span class="k">or</span> (Door :: PhysicalComponent?) == <span class="k">nil</span> <span class="k">then</span>
-		log(<span class="s">&quot;SecretDoor: drag objects onto the Button and Door slots&quot;</span>)
+		log(<span class="s">&quot;SecretDoor: pick objects for the Button and Door slots in the editor&quot;</span>)
 		<span class="k">return</span>
 	<span class="k">end</span>
 	Button.onButtonPressEvent.Listen(<span class="k">function</span>()

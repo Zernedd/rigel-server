@@ -617,6 +617,7 @@ void PredictTransform(const std::string& handle, const Vec3& loc, const Rot& rot
 bool TraceWorld(const Vec3& from, const Vec3& dir, double maxDist, Vec3& hit);   // editor camera section
 void CameraFocus(const Vec3& p);
 
+std::vector<Vec3> g_clickPlaced;                         // PlaceTraced results (see Snapshot::clickPlaced)
 std::string g_slotCandType;                             // SlotScan result (see Snapshot::slotCands)
 std::vector<Snapshot::SlotCand> g_slotCands;
 
@@ -680,6 +681,15 @@ void HandleCommands()
             if (hex.empty()) SendToServer("SE|LUAUPART|" + c.str2 + "|");
             SendToServer("SE|LUAU|" + id + "|" + c.str2);
             Log("[luau] attach %s (%zu chars) to %s", c.str2.c_str(), c.str3.size(), id.c_str());
+            break;
+        }
+
+        case CmdType::LuauRemove:
+        {
+            const std::string id = IdentFor(c.str);
+            if (id.empty() || c.str2.empty()) break;
+            SendToServer("SE|LUAUDEL|" + id + "|" + c.str2);
+            Log("[luau] remove %s from %s", c.str2.c_str(), id.c_str());
             break;
         }
 
@@ -823,6 +833,18 @@ void HandleCommands()
                 c.str3.c_str(), c.num, (int)g_questSteps.size() - unresolved,
                 unresolved ? " (some steps no longer exist and were skipped)" : "");
             g_questSteps.clear();
+            break;
+        }
+
+        case CmdType::PlaceTraced:
+        {
+            // Construction mode: on the surface the click hit, lifted so the coin floats at pickup height.
+            Vec3 at;
+            if (TraceWorld(c.loc, c.dir, 50000.0, at)) at.z += 60.0;
+            else at = { c.loc.x + c.dir.x * 1500.0, c.loc.y + c.dir.y * 1500.0, c.loc.z + c.dir.z * 1500.0 };
+            SendToServer("SE|SPAWN|" + c.str + "|" + Fmt3(at) + "|0,0,0");
+            g_clickPlaced.push_back(at);
+            Log("[game] construction: placed at (%.0f, %.0f, %.0f)", at.x, at.y, at.z);
             break;
         }
 
@@ -1243,6 +1265,11 @@ bool RayBoxT(const Vec3& e, const Vec3& r, const Vec3& c, const Vec3& h, double&
     return tOut > 0.0;
 }
 
+// Red coin stand-ins (see CoinStandinTick): coin actor -> its local mesh actor.
+struct CoinStandin { SDK::AActor* actor = nullptr; Vec3 at; Vec3 scale; bool hidden = false; Vec3 meshOff; bool measured = false; };
+std::unordered_map<SDK::UObject*, CoinStandin> g_coinStandins;
+
+std::string PickRay(const Vec3& eye, const Vec3& dir);
 void PickTick()
 {
     Vec3 eye, dir;
@@ -1252,6 +1279,19 @@ void PickTick()
         if (!ps.valid) { ps.hovered.clear(); return; }
         eye = ps.eye; dir = ps.dir;
     }
+    const std::string hovered = PickRay(eye, dir);
+    Vec3 hit;
+    const bool hasHit = TraceWorld(eye, dir, 50000.0, hit);
+    PickState& ps = Pick();
+    std::lock_guard<std::mutex> lk(ps.mx);
+    ps.hovered = hovered;
+    ps.hasHit = hasHit;
+    ps.hit = hit;
+}
+
+// What a click along this ray selects (the viewport's pick; also the clickat test op).
+std::string PickRay(const Vec3& eye, const Vec3& dir)
+{
     std::string hovered;
     double surface = 1e30;
 
@@ -1271,6 +1311,8 @@ void PickTick()
         SDK::UObject* o = WeakGet(reinterpret_cast<const uint8_t*>(&p.OutHit) + 0xD8);   // Component
         for (int depth = 0; o && depth < 6 && hovered.empty(); ++depth)
         {
+            for (const auto& [coin, st] : g_coinStandins)            // a coin stand-in answers for its coin
+                if (st.actor == o) { o = coin; break; }
             for (const SceneObject& so : g_lastObjects) if (so.ptr == o) { hovered = so.handle; break; }
             if (!hovered.empty()) break;
             SDK::UObject* next = o->Outer;
@@ -1297,9 +1339,7 @@ void PickTick()
             if (vol < bestVol) { bestVol = vol; hovered = so.handle; }
         }
     }
-    PickState& ps = Pick();
-    std::lock_guard<std::mutex> lk(ps.mx);
-    ps.hovered = hovered;
+    return hovered;
 }
 
 // Script-driven drag: feeds LiveDrag exactly as the gizmo does, one step per game frame.
@@ -1659,6 +1699,14 @@ void RunScript(const Snapshot& snap)
         return;
     }
     if (!strcmp(op, "qprevpub")) { ScriptCoinPreviewPublish(); Log("[script] qprevpub"); return; }
+    if (!strcmp(op, "placeclick"))            // placeclick x y z -- construction mode: a click aimed at this point
+    {
+        Vec3 at{};
+        if (sscanf_s(rest.c_str(), "%lf %lf %lf", &at.x, &at.y, &at.z) != 3) { Log("[script] FAIL placeclick: want x y z"); return; }
+        ScriptConstructClick(snap, at);
+        Log("[script] placeclick toward (%.0f,%.0f,%.0f)", at.x, at.y, at.z);
+        return;
+    }
     if (!strcmp(op, "qcoinrun"))              // qcoinrun <seconds> <coins> <title...> -- publish a red coin run via the UI path
     {
         int secs = 60, n = 4, used = 0;
@@ -1713,6 +1761,41 @@ void RunScript(const Snapshot& snap)
             for (const SceneObject& so : g_lastObjects) if (so.handle == g_slotCands[i].handle) cls = so.className;
             Log("[script]   %s (%s) comp=%s", cls.c_str(), g_slotCands[i].handle.c_str(), g_slotCands[i].comp.c_str());
         }
+        return;
+    }
+    if (!strcmp(op, "qprog"))                 // qprog <guid hex> -- TEST: this client's replicated QuestProgression entry
+    {
+        uint32_t g[4] = {};
+        for (int i = 0; i < 4 && rest.size() >= 32; ++i) g[i] = static_cast<uint32_t>(strtoul(rest.substr(i * 8, 8).c_str(), nullptr, 16));
+        auto* qcCls = SDK::UObject::FindClassFast("A2PlayerQuestComponent");
+        const int32_t n = SDK::UObject::GObjects->Num();
+        for (int32_t i = 0; qcCls && i < n; ++i)
+        {
+            SDK::UObject* c = SDK::UObject::GObjects->GetByIndex(i);
+            if (!c || c->IsDefaultObject() || !c->IsA(qcCls) || !c->Outer || c->Outer->IsDefaultObject()) continue;
+            const uintptr_t p = reinterpret_cast<uintptr_t>(c);
+            const uint8_t* data = *reinterpret_cast<uint8_t* const*>(p + 0x128);
+            const int cnt = *reinterpret_cast<const int32_t*>(p + 0x130);
+            int prog = -1, cver = -1;
+            for (int k = 0; data && k < cnt && k < 4096; ++k)
+                if (memcmp(data + k * 0x20, g, 16) == 0) { prog = data[k * 0x20 + 0x10]; cver = *reinterpret_cast<const int32_t*>(data + k * 0x20 + 0x14); }
+            Log("[script] qprog %s on %s: %d stored, this quest progress=%d completedVersion=%d init=%d local=%d",
+                rest.c_str(), c->Outer->GetName().c_str(), cnt, prog, cver, *reinterpret_cast<const uint8_t*>(p + 0x140), *reinterpret_cast<const uint8_t*>(p + 0xF8));
+        }
+        return;
+    }
+    if (!strcmp(op, "clickat"))               // clickat x y z -- TEST: what a viewport click from the camera toward this point selects
+    {
+        Vec3 at{};
+        if (sscanf_s(rest.c_str(), "%lf %lf %lf", &at.x, &at.y, &at.z) != 3) { Log("[script] FAIL clickat: want x y z"); return; }
+        Vec3 d{ at.x - snap.cameraPos.x, at.y - snap.cameraPos.y, at.z - snap.cameraPos.z };
+        const double len = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+        if (len < 1.0) { Log("[script] FAIL clickat: point is at the camera"); return; }
+        d = { d.x / len, d.y / len, d.z / len };
+        const std::string h = PickRay(snap.cameraPos, d);
+        std::string cls;
+        for (const SceneObject& so : g_lastObjects) if (so.handle == h) cls = so.className;
+        Log("[script] clickat (%.0f,%.0f,%.0f): %s", at.x, at.y, at.z, h.empty() ? "nothing" : (cls + " " + h).c_str());
         return;
     }
     if (!strcmp(op, "qdefs"))                 // qdefs <text> -- TEST: how many quest definitions here have <text> in the title
@@ -1942,6 +2025,13 @@ void RunScript(const Snapshot& snap)
         Log("[script] luauref %s.%s -> %s", script.c_str(), sl, target.empty() ? "(cleared)" : target.c_str());
         return;
     }
+    if (!strcmp(op, "luaudel"))               // luaudel <name> -- take <name>.luau off the last object
+    {
+        std::string nm = rest;
+        if (nm.find(".luau") == std::string::npos) nm += ".luau";
+        Command c{ CmdType::LuauRemove }; c.str = o->handle; c.str2 = nm; State().Push(c);
+        return;
+    }
     if (!strcmp(op, "luaufile"))              // luaufile <name> -- attach RigelScripts/<name>.luau to the last object
     {
         Log("[script] luaufile %s: %s", rest.c_str(), ScriptAttachFile(o->handle, rest) ? "attached" : "FAIL no such file");
@@ -2016,7 +2106,10 @@ void RunScript(const Snapshot& snap)
                 CallNative(c, "PrimitiveComponent", "GetCollisionProfileName", pn);
                 CallNative(c, "PrimitiveComponent", "GetCollisionObjectType", ot);
                 char b[200];
-                snprintf(b, sizeof(b), " coll=%d profile=%s objtype=%d", (int)ce.ReturnValue, pn.ReturnValue.ToString().c_str(), (int)ot.ReturnValue);
+                SDK::Params::SceneComponent_IsVisible vis{};
+                CallNative(c, "SceneComponent", "IsVisible", vis);
+                snprintf(b, sizeof(b), " coll=%d profile=%s objtype=%d visible=%d", (int)ce.ReturnValue, pn.ReturnValue.ToString().c_str(),
+                         (int)ot.ReturnValue, (int)vis.ReturnValue);
                 extra = b;
                 if (smcCls && c->IsA(smcCls))
                 {
@@ -2226,6 +2319,197 @@ void LogReplicationChanges(const Snapshot& snap)
     }
 }
 
+// ---- red coin stand-ins (this editor only, never replicated) ----------------------------------------------
+// A placed red coin (LE_BP_RedCoin_C) draws nothing until a run is live, so authors had to guess where their
+// coins were. Every coin in the level gets a local mesh actor here -- spawned on this machine only, no
+// collision (clicks and traces go through), following the coin as it's moved, hidden outside the editor.
+
+// The mesh to show: the coin's own (its first StaticMeshComponent's StaticMesh @0x560), else any loaded
+// coin mesh, else the engine sphere.
+// The look of a live coin: BP_RedCoin (/Game/A2/Progression/TimedQuest/BP_RedCoin, what a running red coin
+// quest spawns). Loaded here, one copy spawned far below the map just long enough to read its mesh,
+// materials and scale, then destroyed; the stand-ins wear the same.
+struct CoinLook { SDK::UObject* mesh = nullptr; std::vector<SDK::UObject*> mats; Vec3 scale{ 1, 1, 1 }; bool tried = false; };
+CoinLook g_coinLook;
+
+const CoinLook& CoinStandinLook()
+{
+    if (g_coinLook.mesh && ObjectAlive(g_coinLook.mesh)) return g_coinLook;
+    if (g_coinLook.tried) return g_coinLook;
+    g_coinLook.tried = true;
+    SDK::Params::KismetSystemLibrary_MakeSoftClassPath mk{};
+    mk.PathString = SDK::FString(L"/Game/A2/Progression/TimedQuest/BP_RedCoin.BP_RedCoin_C");
+    SDK::Params::KismetSystemLibrary_Conv_SoftClassPathToSoftClassRef cv{};
+    SDK::Params::KismetSystemLibrary_LoadClassAsset_Blocking ld{};
+    SDK::UClass* cls = nullptr;
+    if (CallStatic("KismetSystemLibrary", "MakeSoftClassPath", mk))
+    {
+        cv.SoftClassPath = mk.ReturnValue;
+        if (CallStatic("KismetSystemLibrary", "Conv_SoftClassPathToSoftClassRef", cv))
+        {
+            ld.AssetClass = cv.ReturnValue;
+            if (CallStatic("KismetSystemLibrary", "LoadClassAsset_Blocking", ld)) cls = ld.ReturnValue;
+        }
+    }
+    if (!cls || !g_pc) { Log("[coins] BP_RedCoin could not be loaded"); return g_coinLook; }
+    SDK::Params::GameplayStatics_BeginDeferredActorSpawnFromClass b{};
+    b.WorldContextObject = g_pc;
+    b.ActorClass = cls;
+    b.SpawnTransform = MakeXf(0.0, 0.0, -1000000.0);          // far below everything: nothing touches it
+    b.CollisionHandlingOverride = SDK::ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+    b.TransformScaleMethod = SDK::ESpawnActorScaleMethod::MultiplyWithRoot;
+    if (!CallStatic("GameplayStatics", "BeginDeferredActorSpawnFromClass", b) || !b.ReturnValue) { Log("[coins] BP_RedCoin template spawn failed"); return g_coinLook; }
+    SDK::Params::GameplayStatics_FinishSpawningActor f{};
+    f.Actor = b.ReturnValue;
+    f.SpawnTransform = b.SpawnTransform;
+    f.TransformScaleMethod = SDK::ESpawnActorScaleMethod::MultiplyWithRoot;
+    CallStatic("GameplayStatics", "FinishSpawningActor", f);
+    SDK::AActor* tmpl = b.ReturnValue;
+    auto* smcCls = SDK::UObject::FindClassFast("StaticMeshComponent");
+    SDK::Params::Actor_GetComponentByClass gc{};
+    gc.ComponentClass = static_cast<SDK::UClass*>(smcCls);
+    if (smcCls && CallNative(tmpl, "Actor", "GetComponentByClass", gc) && gc.ReturnValue)
+    {
+        SDK::UObject* smc = gc.ReturnValue;
+        g_coinLook.mesh = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(smc) + 0x560);
+        SDK::Params::PrimitiveComponent_GetNumMaterials nm{};
+        CallNative(smc, "PrimitiveComponent", "GetNumMaterials", nm);
+        for (int k = 0; k < nm.ReturnValue && k < 8; ++k)
+        {
+            SDK::Params::PrimitiveComponent_GetMaterial gm{};
+            gm.ElementIndex = k;
+            CallNative(smc, "PrimitiveComponent", "GetMaterial", gm);
+            g_coinLook.mats.push_back(gm.ReturnValue);
+        }
+        SDK::Params::SceneComponent_K2_GetComponentScale sc{};
+        if (CallNative(smc, "SceneComponent", "K2_GetComponentScale", sc)) g_coinLook.scale = { sc.ReturnValue.X, sc.ReturnValue.Y, sc.ReturnValue.Z };
+    }
+    struct { uint8_t pad[8]; } d{};
+    CallNative(tmpl, "Actor", "K2_DestroyActor", d);
+    Log("[coins] stand-in look from BP_RedCoin: mesh %s, %zu material(s), scale %.2f",
+        g_coinLook.mesh ? g_coinLook.mesh->GetName().c_str() : "(none)", g_coinLook.mats.size(), g_coinLook.scale.x);
+    return g_coinLook;
+}
+
+SDK::AActor* SpawnCoinStandin(SDK::UObject* coin, const Vec3& at, const Vec3& scale0)
+{
+    auto* cls = SDK::UObject::FindClassFast("StaticMeshActor");
+    const CoinLook& look = CoinStandinLook();
+    SDK::UObject* mesh = look.mesh;
+    if (!cls || !mesh || !g_pc) return nullptr;
+    const Vec3 scale{ scale0.x * look.scale.x, scale0.y * look.scale.y, scale0.z * look.scale.z };
+    (void)coin;
+    SDK::Params::GameplayStatics_BeginDeferredActorSpawnFromClass b{};
+    b.WorldContextObject = g_pc;
+    b.ActorClass = cls;
+    b.SpawnTransform = MakeXf(at.x, at.y, at.z);
+    b.CollisionHandlingOverride = SDK::ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+    b.TransformScaleMethod = SDK::ESpawnActorScaleMethod::MultiplyWithRoot;
+    if (!CallStatic("GameplayStatics", "BeginDeferredActorSpawnFromClass", b) || !b.ReturnValue) return nullptr;
+    SDK::AActor* a = b.ReturnValue;
+    SDK::Params::Actor_K2_GetRootComponent r{};
+    CallNative(a, "Actor", "K2_GetRootComponent", r);
+    if (SDK::UObject* root = r.ReturnValue)
+    {
+        SDK::Params::SceneComponent_SetMobility mob{};
+        mob.NewMobility = SDK::EComponentMobility::Movable;
+        CallNative(root, "SceneComponent", "SetMobility", mob);
+        SDK::Params::StaticMeshComponent_SetStaticMesh sm{};
+        sm.NewMesh = static_cast<SDK::UStaticMesh*>(mesh);
+        CallNative(root, "StaticMeshComponent", "SetStaticMesh", sm);
+        for (size_t k = 0; k < look.mats.size(); ++k)
+        {
+            if (!look.mats[k]) continue;
+            SDK::Params::PrimitiveComponent_SetMaterial mt{};
+            mt.ElementIndex = static_cast<int32_t>(k);
+            mt.Material = static_cast<SDK::UMaterialInterface*>(look.mats[k]);
+            CallNative(root, "PrimitiveComponent", "SetMaterial", mt);
+        }
+        // Traces only (this machine's clicks): nothing can bump into it, but clicking it selects the coin.
+        SDK::Params::PrimitiveComponent_SetCollisionEnabled col{};
+        col.NewType = SDK::ECollisionEnabled::QueryOnly;
+        CallNative(root, "PrimitiveComponent", "SetCollisionEnabled", col);
+    }
+    SDK::Params::GameplayStatics_FinishSpawningActor f{};
+    f.Actor = a;
+    f.SpawnTransform = b.SpawnTransform;
+    f.TransformScaleMethod = SDK::ESpawnActorScaleMethod::MultiplyWithRoot;
+    CallStatic("GameplayStatics", "FinishSpawningActor", f);
+    SDK::Params::Actor_SetActorScale3D sc{};
+    sc.NewScale3D = SDK::FVector{ scale.x, scale.y, scale.z };
+    CallNative(a, "Actor", "SetActorScale3D", sc);
+    return a;
+}
+
+void CoinStandinTick(const Snapshot& snap)
+{
+    if (!snap.worldReady || !g_pc) return;
+    const bool show = snap.inEditor;
+    std::unordered_set<SDK::UObject*> live;
+    for (const SceneObject& o : snap.objects)
+    {
+        if (o.className != "LE_BP_RedCoin_C" || !o.ptr) continue;
+        // Only coins near the editor camera (the station has hundreds): shown as you approach, freed as you leave.
+        const double cx = o.location.x - snap.cameraPos.x, cy = o.location.y - snap.cameraPos.y, cz = o.location.z - snap.cameraPos.z;
+        if (cx * cx + cy * cy + cz * cz > 8000.0 * 8000.0) continue;
+        SDK::UObject* coin = static_cast<SDK::UObject*>(o.ptr);
+        live.insert(coin);
+        CoinStandin& st = g_coinStandins[coin];
+        if (!st.actor || !ObjectAlive(st.actor))
+        {
+            if (!show) continue;                               // only built once you're editing
+            st.actor = SpawnCoinStandin(coin, o.location, o.scale);
+            Log("[coins] stand-in for %s at (%.0f,%.0f,%.0f): %s", o.handle.c_str(), o.location.x, o.location.y, o.location.z,
+                st.actor ? "shown" : "FAILED");
+            st.at = o.location; st.scale = o.scale; st.hidden = false;
+            if (!st.actor) continue;
+        }
+        if (!st.measured)                                          // where the mesh's centre sits relative to its pivot
+        {
+            SDK::Params::Actor_GetActorBounds b{};
+            b.bOnlyCollidingComponents = false;
+            b.bIncludeFromChildActors = false;
+            if (CallNative(st.actor, "Actor", "GetActorBounds", b))
+            {
+                st.meshOff = { b.Origin.X - st.at.x, b.Origin.Y - st.at.y, b.Origin.Z - st.at.z };
+                st.measured = true;
+                st.at = { 1e30, 1e30, 1e30 };                        // re-place it centred below
+            }
+        }
+        // Centre the coin in its box (the coin's own bounds = its pickup trigger, what the selection box shows).
+        const Vec3 want{ o.location.x + o.boundsOff.x - st.meshOff.x, o.location.y + o.boundsOff.y - st.meshOff.y,
+                         o.location.z + o.boundsOff.z - st.meshOff.z };
+        const double dx = st.at.x - want.x, dy = st.at.y - want.y, dz = st.at.z - want.z;
+        if (dx * dx + dy * dy + dz * dz > 0.25)                  // follow the coin (gizmo drags, server moves)
+        {
+            SDK::Params::Actor_K2_SetActorLocationAndRotation p{};
+            p.NewLocation = SDK::FVector{ want.x, want.y, want.z };
+            p.NewRotation = SDK::FRotator{ o.rotation.pitch, o.rotation.yaw, o.rotation.roll };
+            p.bSweep = false;
+            p.bTeleport = true;
+            CallNative(st.actor, "Actor", "K2_SetActorLocationAndRotation", p);
+            st.at = want;
+        }
+        if (st.hidden == show)
+        {
+            SDK::Params::Actor_SetActorHiddenInGame h{};
+            h.bNewHidden = !show;
+            CallNative(st.actor, "Actor", "SetActorHiddenInGame", h);
+            st.hidden = !show;
+        }
+    }
+    for (auto it = g_coinStandins.begin(); it != g_coinStandins.end();)   // coin deleted: its stand-in goes too
+    {
+        if (live.count(it->first)) { ++it; continue; }
+        if (it->second.actor && ObjectAlive(it->second.actor))
+        {
+            struct { uint8_t pad[8]; } d{};                        // K2_DestroyActor takes no parameters
+            CallNative(it->second.actor, "Actor", "K2_DestroyActor", d);
+        }
+        it = g_coinStandins.erase(it);
+    }
+}
+
 void PumpImpl()
 {
     Snapshot snap;
@@ -2300,6 +2584,7 @@ void PumpImpl()
     ConnectOnce(snap);
     LogReplicationChanges(snap);
     RunScript(snap);
+    CoinStandinTick(snap);
 
     // The editor camera follows state: it is the view while editing with the UI up, and F12 or Stop
     // Editing hands the player their own view back. A travel destroys the camera actor, so a dead actor
@@ -2347,6 +2632,7 @@ void PumpImpl()
     snap.data = g_data;
     snap.dataSerial = g_dataSerial;
     snap.slotCandType = g_slotCandType;
+    snap.clickPlaced = g_clickPlaced;
     snap.slotCands = g_slotCands;
     State().Publish(std::move(snap));
     HandleCommands();

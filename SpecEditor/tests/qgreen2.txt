@@ -1,0 +1,10 @@
+log QG2 start
+enter
+wait 3
+qpub pkrg 250 0 Green Test
+wait 6
+raw SE|QCOMPLETE|pkrg
+wait 6
+raw SE|QCOMPLETE|pkrg
+wait 3
+log QG2 done

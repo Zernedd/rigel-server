@@ -1,0 +1,6 @@
+log QG4 start
+enter
+wait 3
+raw SE|TESTQUEST|pkrlive
+wait 20
+log QG4 done

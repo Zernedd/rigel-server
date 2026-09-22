@@ -1,0 +1,8 @@
+log TP start
+enter
+wait 3
+raw SE|LGMDESC|ScraprunPrime:tree
+wait 2
+raw SE|LGMDESC|TKBGolf:tree
+wait 3
+log TP done

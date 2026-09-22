@@ -576,6 +576,27 @@ static void Tick()
     TryDirectConnect();
 
     if (Pressed(VK_F1, g_prevF1)) ExitSpectator(pc);
+    // -HalcyonAutoSpawn (local tests on a machine nobody is at): leave spectator by ourselves once connected --
+    // F1 is read with GetAsyncKeyState, which a locked remote desktop never delivers.
+    {
+        static ULONGLONG s_autoNext = 0;
+        static int s_autoTries = 0;
+        static const bool s_auto = wcsstr(GetCommandLineW(), L"-HalcyonAutoSpawn") != nullptr;
+        static SDK::UClass* vrPawnCls = nullptr;
+        if (!vrPawnCls) vrPawnCls = SDK::UObject::FindClassFast("VRPawn");
+        const ULONGLONG nowa = GetTickCount64();
+        if (s_auto && s_autoTries < 6 && vrPawnCls && !(pc->Pawn && pc->Pawn->IsA(vrPawnCls)))
+        {
+            if (!s_autoNext) s_autoNext = nowa + 15000;
+            else if (nowa >= s_autoNext)
+            {
+                ++s_autoTries;
+                s_autoNext = nowa + 10000;
+                Log("[A2PlayerControl] -HalcyonAutoSpawn: leaving spectator (try %d)\n", s_autoTries);
+                ExitSpectator(pc);
+            }
+        }
+    }
     if (Pressed(VK_F5, g_prevF5))
     {
         g_handsEnabled = !g_handsEnabled;

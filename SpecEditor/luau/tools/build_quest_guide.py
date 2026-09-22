@@ -52,8 +52,12 @@ never changes.</li>
 <ol>
 <li><b>+ New quest</b>, then set <b>Type</b> to <i>Red coin run</i>.</li>
 <li><b>Place start button here</b> puts the button in front of you. <b>Move here</b> moves it later.</li>
+<li><b>Place coins by clicking (construction mode)</b>: click anywhere in the world and a coin drops there,
+floating at pickup height above the surface you clicked. A red marker shows where it will land. Press <b>Esc</b> or the
+button again to stop. <b>Add coin here</b> still places one in front of the camera.</li>
 <li><b>Add coin here</b> places a real red coin at the spot in front of you. While you build the course the coins
-are real objects: select one and move it with the gizmo like anything else. <b>Select</b>, <b>Go</b> and <b>X</b> work
+are real objects, shown in the editor with the real coin's look: click one and move it with the gizmo like
+anything else. <b>Select</b>, <b>Go</b> and <b>X</b> work
 on each coin in the list.</li>
 <li>Set the <b>run time</b> in seconds.</li>
 <li><b>Boosting</b>: <i>Allowed</i> means boost pads and thrusters work during the run. <i>Boosting fails the run</i> is the
@@ -80,7 +84,8 @@ progress. To set one up:</p>
 <li><b>Target Quests</b> is the kiosk's list. Add a quest with the searchable picker under the list (your
 published quests are marked <i>(editor)</i>, next to all the station's own quests). <b>X</b> removes a row, and
 the order here is the order on the board.</li>
-<li><b>Kiosk Header</b> is the title shown above the list.</li>
+<li><b>Kiosk Header</b> is the title shown above the list. Every setting a kiosk has is listed, even ones it
+hasn't stored yet, so a brand-new kiosk can be set up straight away.</li>
 </ol>
 <p>Changes go through the game's own synced values, so every player sees the new board immediately.</p>
 <p>A <b>Progression Button</b> works the same way. Its <b>Target Quest</b> field in Game data chooses which quest
@@ -122,7 +127,8 @@ stores quest references by name and resolves them on the server it loads on.</p>
 <li><b>The quest doesn't show up</b>: a player must have received the station's quests once, because the server copies
 their row format. Publish again after someone has joined.</li>
 <li><b>The quest doesn't turn green</b>: checkpoint runs need the player to reach every checkpoint in order, within the
-touch distance. Red coin runs need every coin before the timer ends.</li>
+touch distance. Red coin runs need every coin before the timer ends. The server stores the completion in the player's
+progression the same way their saved quests are loaded, so it shows as done.</li>
 <li><b>The kiosk is empty</b>: its Target Quests must be quests the player has, meaning published and not deleted.</li>
 </ul>
 """),

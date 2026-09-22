@@ -1,0 +1,10 @@
+log QG3 start
+enter
+wait 3
+qpub pkrg 250 0 Green Test
+wait 6
+qprog 43DFD1E1B1B800448560480E92107711
+raw SE|QCOMPLETE|pkrg
+wait 8
+qprog 43DFD1E1B1B800448560480E92107711
+log QG3 done

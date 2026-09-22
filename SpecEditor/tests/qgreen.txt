@@ -1,0 +1,6 @@
+log QG start
+enter
+wait 3
+raw SE|TESTQUEST|pkrgreen1
+wait 20
+log QG done

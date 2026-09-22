@@ -1,0 +1,11 @@
+log CK start
+enter
+wait 3
+spawnat LE_BP_RedCoin_C 0 -3000 -27000 0
+wait 8
+clickat 0 -3000 -27000
+move 0 0 150
+wait 4
+clickat 0 -3000 -26850
+expectat 0 -3000 -26850
+log CK done

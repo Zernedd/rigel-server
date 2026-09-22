@@ -1,0 +1,22 @@
+log SC start
+enter
+wait 3
+spawnat BP_GolfTee_C 300 -2600 -27000 0
+wait 8
+spawnat LE_BP_LightSwitch_C -300 -2600 -27000 0
+wait 8
+luaufile LightSwitch
+wait 8
+luauref LightSwitch Switch ToggleableComponent self
+wait 6
+luauref LightSwitch Target PhysicalComponent BP_GolfTee_C 300 -2600 -27000
+wait 8
+data
+wait 3
+datadump
+luauref LightSwitch Target PhysicalComponent -
+wait 8
+data
+wait 3
+datadump
+log SC done

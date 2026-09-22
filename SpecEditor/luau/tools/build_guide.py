@@ -265,7 +265,8 @@ from the top, <code>BeginPlay</code> included;</li>
 
 <h3>Scripts already on an object</h3>
 <p>Selecting any object, including the station's own, lists its scripts in <b>Game data</b> as
-<i>Script &lt;name&gt;.luau</i>. <b>Replace</b> swaps in a file from your folder. On objects you placed this
+<i>Script &lt;name&gt;.luau</i>. <b>Replace</b> swaps in a file from your folder, and <b>Remove</b> takes the
+script off an object you placed (the object is rebuilt without it). On objects you placed this
 happens right away. On the station's objects, players who join from then on get the new code.</p>
 
 <h3>Borrowing from the game's scripts</h3>

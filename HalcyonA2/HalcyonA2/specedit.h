@@ -273,6 +273,8 @@ static bool SeSandboxXform(SDK::AActor* a, const double* loc, const double* rot,
 static bool SeSandboxDelete(SDK::AActor* a);   // below
 static bool SbOwnedXform(const std::string& ident, const std::string& locs, const std::string& rots, const std::string& scls);   // below
 static bool SbOwnedDelete(const std::string& ident);   // below
+static void SeError(SDK::UObject* caller, const std::string& title, const std::string& text);   // below
+static void SbOwnedForget(const std::string& idx);     // below
 static std::string g_sbSpawnCls;   // the editor class of the sandbox spawn in flight (for SbOwned)
 static std::string g_sbSpawnPath;  // ...and the palette path it was asked for (saved levels reload by it)
 static std::vector<std::string> g_sbPendingScripts;   // custom Luau script names for the spawn in flight
@@ -575,7 +577,15 @@ static void SeDelete(const std::string& name)
 {
     SDK::AActor* a = SeFindEditorActor(name);
     if (!a) { SbOwnedDelete(name); return; }             // a node the server never built an actor for
-    if (SeSandboxDelete(a)) { SeDropProxies(a); return; }   // a sandbox object: remove its node, every machine follows
+    std::string idx;
+    if (SDK::UObject* pc = SbPrefabOf(a)) idx = FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(pc) + 0x248));
+    if (SeSandboxDelete(a))                              // a sandbox object: remove its node, every machine follows
+    {
+        SeDropProxies(a);
+        SbOwnedForget(idx);
+        return;
+    }
+    if (SbOwnedDelete(name)) { SeDropProxies(a); return; }   // ours, but the actor path failed: remove the node
     SeDropProxies(a);
     a->K2_DestroyActor();
     HxLog("[HalcyonA2][SPECEDIT] destroyed %s\n", name.c_str());
@@ -760,6 +770,50 @@ static void SeSendAuthored(void* comp)
     HxLog("[HalcyonA2][SPECEDIT] sent %d authored quest(s) to comp=%p\n", n, comp);
 }
 
+// Register the authored quests with the SERVER's own quest table, through the game's
+// UA2PlayerQuestComponent::Server_SetQuests_Impl(comp, bundle, bIsRemoving) (0x46902F0 -- the path a client's
+// bundle takes). Sending rows to players alone isn't enough: Server_SetProgress ignores a quest id the server
+// doesn't know, so completions were never stored and the quest never turned green. On every change the
+// previous registration is removed first (same bundle id), then the current one added. Buffers are kept
+// alive for good: the server may keep pointers into them.
+struct SeSrvBundle { std::vector<uint8_t> rows, folders; uint8_t bundle[0x40]{}; };
+static std::deque<SeSrvBundle> g_seSrvBundles;
+static SeSrvBundle* g_seSrvLast = nullptr;
+static bool g_seRegistering = false;
+static void SeCallSetQuests(void* comp, void* bundle, unsigned char removing)
+{
+    __try { reinterpret_cast<__int64(__fastcall*)(void*, void*, unsigned char)>(GetBase() + 0x46902F0)(comp, bundle, removing); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { HxLog("[HalcyonA2][SPECEDIT] server quest registration FAULTED\n"); }
+}
+static void SeRegisterOnServer()
+{
+    void* comp = nullptr;
+    for (auto* c : g_seQuestComps) if (SeAlive(c)) { comp = c; break; }
+    if (!comp || g_seRegistering) return;                  // no player yet: done when the first one joins
+    g_seSrvBundles.emplace_back();
+    SeSrvBundle& b = g_seSrvBundles.back();
+    int n = 0, nf = 0;
+    for (const auto& q : g_seAuthored)
+    {
+        if (q.deleted) continue;
+        if (q.isFolder) { b.folders.insert(b.folders.end(), q.folder, q.folder + sizeof(q.folder)); ++nf; continue; }
+        if (!*reinterpret_cast<const void* const*>(q.row + 0xF0)) continue;
+        b.rows.insert(b.rows.end(), q.row, q.row + 0x120);
+        ++n;
+    }
+    *reinterpret_cast<const wchar_t**>(b.bundle) = kSeBundleId;
+    *reinterpret_cast<int32_t*>(b.bundle + 8)  = static_cast<int32_t>(wcslen(kSeBundleId) + 1);
+    *reinterpret_cast<int32_t*>(b.bundle + 12) = static_cast<int32_t>(wcslen(kSeBundleId) + 1);
+    SetTArray(b.bundle + 0x20, b.rows.data(), n);
+    SetTArray(b.bundle + 0x30, b.folders.data(), nf);
+    g_seRegistering = true;
+    if (g_seSrvLast) SeCallSetQuests(comp, g_seSrvLast->bundle, 1);
+    if (n || nf) SeCallSetQuests(comp, b.bundle, 0);
+    g_seRegistering = false;
+    g_seSrvLast = &b;
+    HxLog("[HalcyonA2][SPECEDIT] registered %d authored quest(s) + %d group(s) with the server's quest table\n", n, nf);
+}
+
 // Every quest the game has sent any player (id, title, icon): the editor is a spectator and never gets a
 // bundle of its own, so its quest pickers were empty -- it asks the server for this list (SE|QLIST).
 struct SeCatQuest { std::string id, title, glyph; };
@@ -767,6 +821,8 @@ static std::vector<SeCatQuest> g_seCatalogue;
 static void SeCatalogueAdd(void* bundle)
 {
     if (!bundle) return;
+    if (const wchar_t* uid = *reinterpret_cast<const wchar_t* const*>(bundle))
+        if (wcscmp(uid, kSeBundleId) == 0) return;          // ours (sent or registered): not a station quest
     const uint8_t* rows = *reinterpret_cast<uint8_t* const*>(reinterpret_cast<uint8_t*>(bundle) + 0x20);
     const int n = *reinterpret_cast<const int32_t*>(reinterpret_cast<uint8_t*>(bundle) + 0x28);
     if (!rows || n <= 0 || n > 4096) return;
@@ -827,6 +883,7 @@ static void SeOnQuestsSent(void* comp, void* bundle)
     if (std::find(g_seQuestComps.begin(), g_seQuestComps.end(), c) != g_seQuestComps.end()) return;
     if (g_seQuestComps.size() < 256) g_seQuestComps.push_back(c);
     SeSendAuthored(comp);
+    if (!g_seSrvLast && !g_seAuthored.empty()) SeRegisterOnServer();
 }
 
 // Point every A2QuestProgressComponent on `actor` at the authored quest.
@@ -936,6 +993,7 @@ static void SeQuest(const std::string& questId, const std::string& title, const 
     int sent = 0;
     for (auto* c : g_seQuestComps)
         if (SeAlive(c)) { SeSendAuthored(c); ++sent; }
+    SeRegisterOnServer();                                // so completions are stored (and it turns green)
 
     HxLog("[HalcyonA2][SPECEDIT] quest %s '%s' id=%08X%08X%08X%08X: row %s, %d checkpoint(s) (%d not found), radius %.0fcm, "
           "time limit %ds, %zu child quest(s), pushed to %d player(s)\n",
@@ -992,6 +1050,7 @@ static int SeQuestResendAll(const std::vector<const SeAuthoredQuest*>& gone = {}
     int sent = 0;
     for (auto* c : g_seQuestComps)
         if (SeAlive(c)) { SeSendRemoval(c, gone); SeSendAuthored(c); ++sent; }
+    SeRegisterOnServer();
     return sent;
 }
 static void SeCoinRunRemove(const std::string& questRef);   // below
@@ -1025,26 +1084,135 @@ static void SeQuestDelete(SDK::UObject* ctx, const std::string& questId)
 // Five times a second: every player pawn's position (the server's working copy of its root,
 // AVRPawn.Entity@0x928 -> +0x100, the same cheap read the Deathrun finish detector uses) against each
 // published quest's next checkpoint. Reaching the last one completes the quest THROUGH THE GAME'S OWN PATH:
-// A player's stored progress for one quest: QuestProgression TMap<FGuid, FA2QuestStorage> at comp+0x120,
-// read raw (the SDK set iterator faulted on this map): 56-byte elements = key FGuid + storage {ID, Progress
-// @+32, CompletedVersion @+36, CompletedTime @+40} + hash links. A quest shows green once
-// CompletedVersion == the row's VersionNumber (1).
-static void SeReadStoredQuest(void* qc, const uint32_t id[4], int* progress, int* completedVersion)
+// A player's stored progress: UA2PlayerQuestComponent.QuestProgression (FA2QuestProgression, Net) at comp+0x120 =
+// { FDateTime LastUpdate; TArray<FA2QuestStorage> Quests @+0x128 (count @+0x130); int32 SavedVersion @+0x138 }.
+// FA2QuestStorage (0x20): FGuid ID, uint8 Progress @+0x10, int32 CompletedVersion @+0x14, FDateTime @+0x18.
+// A quest shows green once CompletedVersion == the row's VersionNumber (1). Returns the array count (-1 on fault).
+static int SeReadStoredQuest(void* qc, const uint32_t id[4], int* progress, int* completedVersion)
 {
     __try
     {
-        const uint8_t* data = *reinterpret_cast<uint8_t* const*>(reinterpret_cast<uintptr_t>(qc) + 0x120);
-        const int n = *reinterpret_cast<const int32_t*>(reinterpret_cast<uintptr_t>(qc) + 0x128);
+        const uint8_t* data = *reinterpret_cast<uint8_t* const*>(reinterpret_cast<uintptr_t>(qc) + 0x128);
+        const int n = *reinterpret_cast<const int32_t*>(reinterpret_cast<uintptr_t>(qc) + 0x130);
         for (int i = 0; data && i < n && i < 4096; ++i)
         {
-            const uint8_t* e = data + static_cast<size_t>(i) * 56;
+            const uint8_t* e = data + static_cast<size_t>(i) * 0x20;
             if (memcmp(e, id, 16) != 0) continue;
-            *progress = e[32];
-            *completedVersion = *reinterpret_cast<const int32_t*>(e + 36);
-            return;
+            *progress = e[0x10];
+            *completedVersion = *reinterpret_cast<const int32_t*>(e + 0x14);
+            break;
+        }
+        return n;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+}
+
+// Store "completed" in the player's progression through the game's own register worker (sub_468BE60 --
+// SafeRegisterQuest, the call that loads each player's saved quests on join and that the client picks up
+// through the replicated QuestProgression). Server_SetProgress alone stored nothing for editor quests.
+// The progression passed in = the player's current Quests + this quest {Progress 255, CompletedVersion 1}.
+static int SeCommitCompleted(void* qc, const uint32_t id[4])
+{
+    static SDK::UClass* spCls = nullptr;
+    if (!spCls) spCls = SDK::UObject::FindClassFast("ServerProgression");
+    static SDK::UObject* sp = nullptr;
+    if (!sp || !SeAlive(sp))
+    {
+        sp = nullptr;
+        const int32_t n = SDK::UObject::GObjects->Num();
+        for (int32_t i = 0; spCls && i < n && !sp; ++i)
+        {
+            SDK::UObject* o = SDK::UObject::GObjects->GetByIndex(i);
+            if (o && !o->IsDefaultObject() && o->IsA(spCls)) sp = o;
         }
     }
-    __except (EXCEPTION_EXECUTE_HANDLER) {}
+    if (!sp || !qc) return -1;
+    static std::vector<uint8_t> entries;                  // the register deep-copies; reused
+    static uint8_t prog[0x20];
+    entries.clear();
+    const uint8_t* cur = *reinterpret_cast<uint8_t* const*>(reinterpret_cast<uintptr_t>(qc) + 0x128);
+    const int n = *reinterpret_cast<const int32_t*>(reinterpret_cast<uintptr_t>(qc) + 0x130);
+    FILETIME ft; GetSystemTimeAsFileTime(&ft);
+    const int64_t nowTicks = static_cast<int64_t>((static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime) + 504911232000000000LL;
+    bool found = false;
+    for (int i = 0; cur && i < n && i < 4096; ++i)
+    {
+        uint8_t e[0x20];
+        memcpy(e, cur + static_cast<size_t>(i) * 0x20, 0x20);
+        if (memcmp(e, id, 16) == 0)
+        {
+            e[0x10] = 0xFF;
+            *reinterpret_cast<int32_t*>(e + 0x14) = 1;
+            *reinterpret_cast<int64_t*>(e + 0x18) = nowTicks;
+            found = true;
+        }
+        entries.insert(entries.end(), e, e + 0x20);
+    }
+    if (!found)
+    {
+        uint8_t e[0x20] = {};
+        memcpy(e, id, 16);
+        e[0x10] = 0xFF;
+        *reinterpret_cast<int32_t*>(e + 0x14) = 1;             // == the row's VersionNumber: shows as done (green)
+        *reinterpret_cast<int64_t*>(e + 0x18) = nowTicks;
+        entries.insert(entries.end(), e, e + 0x20);
+    }
+    memset(prog, 0, sizeof(prog));
+    *reinterpret_cast<int64_t*>(prog + 0x00) = nowTicks;                          // LastUpdate
+    *reinterpret_cast<void**>(prog + 0x08) = entries.data();                       // Quests
+    *reinterpret_cast<int32_t*>(prog + 0x10) = static_cast<int32_t>(entries.size() / 0x20);
+    *reinterpret_cast<int32_t*>(prog + 0x14) = static_cast<int32_t>(entries.size() / 0x20);
+    *reinterpret_cast<int32_t*>(prog + 0x18) = *reinterpret_cast<const int32_t*>(reinterpret_cast<uintptr_t>(qc) + 0x138);   // saved version
+    SafeRegisterQuest(sp, qc, prog);
+    return static_cast<int>(entries.size() / 0x20);
+}
+
+// Complete an authored quest for one player (the pawn). See the notes inside for why it takes two calls.
+static void SeGrantQuest(SDK::UObject* o, const SeAuthoredQuest& q)
+{
+    char guid[40];
+    snprintf(guid, sizeof(guid), "%08X%08X%08X%08X", q.id[0], q.id[1], q.id[2], q.id[3]);
+    const std::wstring w(guid, guid + 32);
+    static_cast<SDK::AVRPawn*>(o)->Client_SetQuestCompleted(SDK::FString(w.c_str()));
+    // That RPC only sets the client's progress byte; a quest shows as done (green) only once its
+    // stored CompletedVersion matches, which the game writes when progress is committed through
+    // the player's quest component. Commit it server-side too, so it turns green and is saved.
+    if (auto* qc = *reinterpret_cast<SDK::UA2PlayerQuestComponent**>(reinterpret_cast<uintptr_t>(o) + 0x1E70))
+    {
+        SDK::FGuid gid{};
+        memcpy(&gid, q.id, sizeof(gid));
+        int prog0 = -1, cver0 = -1;
+        const int before = SeReadStoredQuest(qc, q.id, &prog0, &cver0);
+        qc->Server_SetProgress(gid, 0xFF);
+        if (prog0 != 0xFF || cver0 != 1) SeCommitCompleted(qc, q.id);   // store it the way saved progress is loaded
+        int prog = -1, cver = -1;
+        const int stored = SeReadStoredQuest(qc, q.id, &prog, &cver);
+        HxLog("[HalcyonA2][SPECEDIT] quest %s: Server_SetProgress(255) for %s -> stored quests %d -> %d; this one: progress=%d completedVersion=%d\n",
+              q.questId.c_str(), o->GetName().c_str(), before, stored, prog, cver);
+    }
+}
+
+// SE|QCOMPLETE|<questId> (local test): complete it for every connected player, as the checkpoint tracker does.
+static void SeTestCompleteQuest(const std::string& questId)
+{
+    if (!g_seLocalTest) return;
+    SeAuthoredQuest* q = nullptr;
+    for (auto& e : g_seAuthored) if (e.questId == questId && !e.deleted) q = &e;
+    if (!q) { HxLog("[HalcyonA2][SPECEDIT] QCOMPLETE %s: no such quest\n", questId.c_str()); return; }
+    static SDK::UClass* pawnCls = nullptr;
+    if (!pawnCls) pawnCls = SDK::UObject::FindClassFast("VRPawn");
+    int seen = 0, granted = 0;
+    const int32_t n = SDK::UObject::GObjects->Num();
+    for (int32_t i = 0; pawnCls && i < n; ++i)
+    {
+        SDK::UObject* o = SDK::UObject::GObjects->GetByIndex(i);
+        if (!o || o->IsDefaultObject() || !o->IsA(pawnCls)) continue;
+        ++seen;
+        if (!*reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(o) + 0x1E70)) continue;  // no quest component
+        SeGrantQuest(o, *q);
+        ++granted;
+    }
+    HxLog("[HalcyonA2][SPECEDIT] QCOMPLETE %s: %d pawn(s), granted to %d\n", questId.c_str(), seen, granted);
 }
 
 // AVRPawn::Client_SetQuestCompleted(FString) -- the RPC the sandbox's SetQuestCompletedForAllPlayers uses.
@@ -1111,23 +1279,9 @@ static void SeQuestTick()
                   q.questId.c_str(), o->GetName().c_str(), run.next, q.checkpoints.size());
             if (run.next < static_cast<int>(q.checkpoints.size())) continue;
 
+            SeGrantQuest(o, q);
             char guid[40];
             snprintf(guid, sizeof(guid), "%08X%08X%08X%08X", q.id[0], q.id[1], q.id[2], q.id[3]);
-            const std::wstring w(guid, guid + 32);
-            static_cast<SDK::AVRPawn*>(o)->Client_SetQuestCompleted(SDK::FString(w.c_str()));
-            // That RPC only sets the client's progress byte; a quest shows as done (green) only once its
-            // stored CompletedVersion matches, which the game writes when progress is committed through
-            // the player's quest component. Commit it server-side too, so it turns green and is saved.
-            if (auto* qc = *reinterpret_cast<SDK::UA2PlayerQuestComponent**>(reinterpret_cast<uintptr_t>(o) + 0x1E70))
-            {
-                SDK::FGuid gid{};
-                memcpy(&gid, q.id, sizeof(gid));
-                qc->Server_SetProgress(gid, 0xFF);
-                int prog = -1, cver = -1;
-                SeReadStoredQuest(qc, q.id, &prog, &cver);
-                HxLog("[HalcyonA2][SPECEDIT] quest %s: Server_SetProgress(255) for %s -> stored progress=%d completedVersion=%d\n",
-                      q.questId.c_str(), o->GetName().c_str(), prog, cver);
-            }
             run.next = 0;
             run.doneAt = now;
             q.completedBy.push_back(who);
@@ -1439,6 +1593,11 @@ struct SbOwned
     std::vector<std::array<std::string, 4>> refs;                // script slots {script, slot, target idx, key}
 };
 static std::vector<SbOwned> g_sbOwned;
+static void SbOwnedForget(const std::string& idx)      // the object is gone: stop tracking (and saving) it
+{
+    for (size_t i = 0; !idx.empty() && i < g_sbOwned.size(); ++i)
+        if (g_sbOwned[i].idx == idx) { g_sbOwned.erase(g_sbOwned.begin() + i); return; }
+}
 
 static SbOwned* SbOwnedFind(const std::string& ident)
 {
@@ -1731,8 +1890,11 @@ static SDK::AActor* SbActorForIdx(const std::string& idx)
     {
         SDK::UObject* o = SDK::UObject::GObjects->GetByIndex(i);
         if (!o || o->IsDefaultObject() || !o->IsA(pcCls)) continue;
-        if (FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(o) + 0x248)) == idx)
-            return static_cast<SDK::AActor*>(o->Outer);
+        if (FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(o) + 0x248)) != idx) continue;
+        auto* act = static_cast<SDK::AActor*>(o->Outer);
+        if (!act || (*(reinterpret_cast<const uint8_t*>(act) + 0x65) & 0x01)) continue;   // being destroyed
+        if (!SbNodeOf(reinterpret_cast<uint8_t*>(o) + 0x3A0)) continue;                    // its node is gone
+        return act;
     }
     return nullptr;
 }
@@ -1915,7 +2077,8 @@ static void SbTreeWalk(uint8_t* n, int depth, std::string& out);   // below
 static void SbLgmDescImpl(const std::string& slot0, std::string* out)
 {
     const bool all = slot0.size() > 4 && slot0.compare(slot0.size() - 4, 4, ":all") == 0;   // every object, desc only
-    const std::string slot = all ? slot0.substr(0, slot0.size() - 4) : slot0;
+    const bool tree = slot0.size() > 5 && slot0.compare(slot0.size() - 5, 5, ":tree") == 0; // every object, desc + tree
+    const std::string slot = all ? slot0.substr(0, slot0.size() - 4) : tree ? slot0.substr(0, slot0.size() - 5) : slot0;
     auto* cls = SDK::UObject::FindClassFast("LoadedGameMode");
     const int32_t n = SDK::UObject::GObjects->Num();
     for (int32_t i = 0; cls && i < n; ++i)
@@ -1934,6 +2097,7 @@ static void SbLgmDescImpl(const std::string& slot0, std::string* out)
             char buf[2048];
             SbDescDumpCore(reinterpret_cast<uintptr_t>(arr[k]), buf, sizeof(buf));
             if (all) { *out += std::string(buf) + "\n"; continue; }
+            if (tree) { *out += std::string(buf) + "\n"; SbTreeWalk(arr[k], 0, *out); continue; }
             if (strstr(buf, "script=") && !strstr(buf, "comps=0"))
             {
                 *out += std::string(buf) + "\n";
@@ -2413,6 +2577,7 @@ static std::string SeSandboxSpawn(const std::string& uniqueId, const double* loc
         g_sbPendingProps.clear();
     }
     if (!g_sbPendingScripts.empty()) g_sbScripts[idxA] = g_sbPendingScripts;
+    else g_sbScripts.erase(idxA);                          // a rebuild keeps the id: don't bring back removed scripts
     const int ncomp = SbFillComponents(desc, idxA);
     if (ncomp) HxLog("[HalcyonA2][SPECEDIT] sandbox spawn %s: %d component override(s)\n", idxA.c_str(), ncomp);
     const int before = SbObjectMapCount(sb);
@@ -2613,10 +2778,46 @@ static std::unordered_map<std::string, std::string> SbFieldClasses(SDK::AActor* 
                 SDK::UObject* st = *reinterpret_cast<SDK::UObject* const*>(reinterpret_cast<uintptr_t>(fp) + 0x78);
                 if (st) cls += ":" + st->GetName();
             }
+            else if (cls == "ArrayProperty")                 // FArrayProperty::Inner @0x78
+            {
+                const SDK::FField* in = *reinterpret_cast<SDK::FField* const*>(reinterpret_cast<uintptr_t>(fp) + 0x78);
+                if (in && in->ClassPrivate)
+                {
+                    std::string ic = in->ClassPrivate->Name.ToString();
+                    if (ic == "StructProperty")
+                        if (SDK::UObject* st = *reinterpret_cast<SDK::UObject* const*>(reinterpret_cast<uintptr_t>(in) + 0x78)) ic += ":" + st->GetName();
+                    cls += ":" + ic;
+                }
+            }
             out[name] = cls;
         }
     }
     return out;
+}
+
+// The type header of a Properties blob (02 01 <type desc>) for each field class -- needed to write a field the
+// object has never stored (a fresh kiosk has no TargetQuests leaf yet). Seeded with the headers verified in
+// earlier sessions, and learned from every stored leaf we read (SeSbData), never guessed.
+static std::unordered_map<std::string, std::vector<uint8_t>> g_sbPrefix = {
+    { "FloatProperty",                        { 0x02, 0x01, 0x02 } },
+    { "StrProperty",                          { 0x02, 0x01, 0x06 } },
+    { "StructProperty:Guid",                  { 0x02, 0x01, 0x3D, 0x00 } },
+    { "EnumProperty",                         { 0x02, 0x01, 0x3F, 0x00 } },
+    { "ArrayProperty:StructProperty:Guid",    { 0x02, 0x01, 0x0A } },
+};
+// The editor kind (and empty value) for a field class, or "" if we can't edit that class.
+static std::string SbKindFor(const std::string& cls, std::string* empty)
+{
+    *empty = "";
+    if (cls == "FloatProperty") { *empty = "0"; return "float"; }
+    if (cls == "DoubleProperty") { *empty = "0"; return "double"; }
+    if (cls == "IntProperty") { *empty = "0"; return "int"; }
+    if (cls == "ByteProperty" || cls == "EnumProperty") { *empty = "0"; return "byte"; }
+    if (cls == "BoolProperty") { *empty = "0"; return "bool"; }
+    if (cls == "StrProperty" || cls == "NameProperty" || cls == "TextProperty") return "text";
+    if (cls == "StructProperty:Guid") return "guid";
+    if (cls == "ArrayProperty:StructProperty:Guid") return "guids";
+    return std::string();
 }
 
 // Where the value starts in a Properties blob (after 02 01 <type desc>), and its encoded size, by class.
@@ -2822,6 +3023,7 @@ static void SeSbData(SDK::UObject* ctx, const std::string& ident)
     SbListCore(reinterpret_cast<uint8_t*>(SbNodeOf(handle)), &raw);
     const auto fields = SbFieldClasses(a);
     std::string entries;
+    std::unordered_set<std::string> listed;
     auto add = [&](const std::string& path, const std::string& kind, const std::string& value) {
         if (!entries.empty()) entries += '\x1E';
         entries += path + '\x1F' + kind + '\x1F' + value;
@@ -2846,8 +3048,13 @@ static void SeSbData(SDK::UObject* ctx, const std::string& ident)
             int off = 0, vlen = 0;
             std::string kind = "hex", value = f[3];
             if (!cls.empty() && SbBlobValue(cls, d.data(), static_cast<int>(d.size()), &off, &vlen))
+            {
                 value = SbDecode(cls, d.data() + off, vlen, &kind);
+                if (kind != "hex" && off >= 3 && off <= 8 && !g_sbPrefix.count(cls))   // learn this class's header
+                    g_sbPrefix[cls] = std::vector<uint8_t>(d.begin(), d.begin() + off);
+            }
             add("props/" + name, kind, value);
+            listed.insert(name);
             continue;
         }
         // serverData / gameData scalar leaves, read through the replicated API
@@ -2869,6 +3076,14 @@ static void SeSbData(SDK::UObject* ctx, const std::string& ident)
         }
         NvWalkRelease(&w);
         add((f[0] == "S" ? "sd/" : "gd/") + name, type == NvNative::TBool ? "bool" : type == NvNative::TNumber ? "num" : "str", value);
+    }
+    // Fields the object has never stored (a fresh kiosk's TargetQuests): listed empty, so they can be set.
+    for (const auto& [fname, cls] : fields)
+    {
+        if (listed.count(fname) || !g_sbPrefix.count(cls)) continue;
+        std::string empty;
+        const std::string kind = SbKindFor(cls, &empty);
+        if (!kind.empty()) add("props/" + fname, kind, empty);
     }
     for (const auto& sn : SbObjectScripts(handle)) add("script/" + sn, "script", sn);
     if (SbOwned* own = SbOwnedByIdx(FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(pc) + 0x248))))
@@ -2897,7 +3112,18 @@ static void SeSbSet(SDK::UObject* ctx, const std::string& ident, const std::stri
         const size_t at = raw.find(key);
         const auto fields = SbFieldClasses(a);
         auto it = fields.find(name);
-        if (at != std::string::npos && it != fields.end())
+        if (at == std::string::npos && it != fields.end() && g_sbPrefix.count(it->second))
+        {
+            // Never stored on this object: header for its class + the value.
+            const std::vector<uint8_t> val = SbEncode(kind, value);
+            if (!val.empty())
+            {
+                std::vector<uint8_t> blob = g_sbPrefix[it->second];
+                blob.insert(blob.end(), val.begin(), val.end());
+                ok = SbWriteLeaves(a, { { true, name, blob } });
+            }
+        }
+        else if (at != std::string::npos && it != fields.end())
         {
             const size_t e = raw.find('\n', at);
             const std::string hex = raw.substr(at + key.size(), e - at - key.size());
@@ -3205,24 +3431,20 @@ static bool SeLuauPutSource(SDK::UObject* lgm, const std::string& name, const st
     return r == 1;
 }
 // Attach `name` (source already in the gamemode) to the object: rebuild it with the script component.
-static std::string SeLuauAttach(SDK::AActor* a, const std::string& name, const std::string& src)
+// Rebuild one of our objects from `keep` (same id, same gamemode, same Game data): how a script change reaches
+// every machine. The old node goes first -- by actor, else directly by id, so two nodes never share an id.
+static std::string SbRespawnKeep(SDK::AActor* a, const SbOwned& keep, const char* why)
 {
-    SDK::UObject* pc = SbPrefabOf(a);
-    if (!pc) return std::string();
-    SbOwned* o = SbOwnedByIdx(FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(pc) + 0x248)));
-    if (!o || o->uniqueId.empty()) return std::string();
-    SbOwned keep = *o;                                    // the respawn gets a new idx: carry everything over
-    bool had = false;
-    for (auto& s2 : keep.scripts) if (s2.first == name) { s2.second = src; had = true; }
-    if (!had) keep.scripts.push_back({ name, src });
     const std::string oldIdx = keep.idx;
-    SeSandboxDelete(a);
-    for (size_t i = 0; i < g_sbOwned.size(); ++i) if (g_sbOwned[i].idx == oldIdx) { g_sbOwned.erase(g_sbOwned.begin() + i); break; }
-    // The new object's idx is minted inside SeSandboxSpawn; register its scripts under a placeholder the
-    // fill step reads (g_sbPendingScripts), then move them to the real idx.
+    if (!(a && SeSandboxDelete(a)))
+    {
+        SbOwned tmp = keep;
+        if (!SbOwnedApply(tmp, true)) { HxLog("[HalcyonA2][SPECEDIT] rebuild %s (%s): could not remove the old copy\n", oldIdx.c_str(), why); return std::string(); }
+    }
+    SbOwnedForget(oldIdx);
     std::vector<std::string> names;
     for (const auto& s2 : keep.scripts) names.push_back(s2.first);
-    g_sbPendingScripts = names;
+    g_sbPendingScripts = names;                             // Desc component entries for the scripts
     g_sbPendingLeaves = SbRefLeaves(keep.refs);             // script slots -> references/<script> blobs
     g_sbForceLgm = keep.lgm;                                // stay in the same slot (targets live there)
     g_sbForceIdx = oldIdx;                                  // and keep the id (slots that point at it)
@@ -3237,8 +3459,49 @@ static std::string SeLuauAttach(SDK::AActor* a, const std::string& name, const s
     g_sbForceIdx.clear();
     if (SbOwned* n = idx.empty() ? nullptr : SbOwnedByIdx(idx)) { n->data = keep.data; n->scripts = keep.scripts; n->refs = keep.refs; }
     if (!idx.empty()) if (SDK::AActor* na = SbActorForIdx(idx)) for (const auto& d : keep.data) SeSbSet(nullptr, SeLvIdent(na), d[0], d[1], d[2]);
-    HxLog("[HalcyonA2][SPECEDIT] luau %s attached: %s -> %s\n", name.c_str(), oldIdx.c_str(), idx.empty() ? "FAILED" : idx.c_str());
+    HxLog("[HalcyonA2][SPECEDIT] rebuild (%s): %s -> %s\n", why, oldIdx.c_str(), idx.empty() ? "FAILED" : idx.c_str());
     return idx;
+}
+
+static std::string SeLuauAttach(SDK::AActor* a, const std::string& name, const std::string& src)
+{
+    SDK::UObject* pc = SbPrefabOf(a);
+    if (!pc) return std::string();
+    SbOwned* o = SbOwnedByIdx(FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(pc) + 0x248)));
+    if (!o || o->uniqueId.empty()) return std::string();
+    SbOwned keep = *o;
+    bool had = false;
+    for (auto& s2 : keep.scripts) if (s2.first == name) { s2.second = src; had = true; }
+    if (!had) keep.scripts.push_back({ name, src });
+    const std::string idx = SbRespawnKeep(a, keep, "attach script");
+    HxLog("[HalcyonA2][SPECEDIT] luau %s attached: %s -> %s\n", name.c_str(), keep.idx.c_str(), idx.empty() ? "FAILED" : idx.c_str());
+    return idx;
+}
+
+// SE|LUAUDEL|<ident>|<script>: take a script off an object we placed (and its slot wiring); the object is
+// rebuilt without it, on every machine.
+static void SeLuauRemove(SDK::UObject* ctx, const std::string& ident, const std::string& script)
+{
+    SDK::UObject* caller = SeCallerPC(ctx);
+    SDK::AActor* a = SeFindEditorActor(ident);
+    SDK::UObject* pc = SbPrefabOf(a);
+    SbOwned* o = pc ? SbOwnedByIdx(FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(pc) + 0x248))) : nullptr;
+    const std::string name = SeLuauName(script);
+    if (!o)
+    {
+        SeError(caller, "Can't remove that script", "Scripts can only be removed from objects you placed with the editor. "
+                "This one belongs to the station. To change what it does, use Replace with a file from your folder.");
+        return;
+    }
+    SbOwned keep = *o;
+    const size_t before = keep.scripts.size();
+    keep.scripts.erase(std::remove_if(keep.scripts.begin(), keep.scripts.end(), [&](const auto& s2) { return s2.first == name; }), keep.scripts.end());
+    keep.refs.erase(std::remove_if(keep.refs.begin(), keep.refs.end(), [&](const std::array<std::string, 4>& r) { return r[0] == name; }), keep.refs.end());
+    if (keep.scripts.size() == before) { if (caller) SeBroadcast("SE|NOTE|" + name + " isn't on that object.", caller); return; }
+    const std::string idx = SbRespawnKeep(a, keep, "remove script");
+    HxLog("[HalcyonA2][SPECEDIT] luau %s removed from %s: %s\n", name.c_str(), keep.idx.c_str(), idx.empty() ? "FAILED" : "ok");
+    if (caller) SeBroadcast(idx.empty() ? "SE|NOTE|Removing " + name + " failed - see the server log."
+                                        : "SE|NOTE|Removed " + name + " (the object was rebuilt without it).", caller);
 }
 static void SeLuauPart(const std::string& rawName, const std::string& hex)
 {
@@ -3438,6 +3701,7 @@ static void SeLuauRef(SDK::UObject* ctx, const std::string& ident, const std::st
     SbOwned* o = pc ? SbOwnedByIdx(FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(pc) + 0x248))) : nullptr;
     const std::string sname = SeLuauName(script);
     if (!o || sname.empty()) { note("Wire slots on an object you placed that runs the script."); return; }
+    const std::string myIdx = o->idx;                    // g_sbOwned may reallocate below: find it again by id
     o->refs.erase(std::remove_if(o->refs.begin(), o->refs.end(), [&](const std::array<std::string, 4>& r) { return r[0] == sname && r[1] == slot; }),
                   o->refs.end());
     std::string targetName = "nothing";
@@ -3469,15 +3733,17 @@ static void SeLuauRef(SDK::UObject* ctx, const std::string& ident, const std::st
         uint32_t b, c, d;
         if (to->lgm != o->lgm || !SbGuidParts(tidx, &b, &c, &d)) tidx = SbRehost(*to, o->lgm);   // same slot, GUID id
         // SbRehost may have reallocated g_sbOwned: look the scripted object up again
-        o = nullptr;
-        for (auto& e : g_sbOwned) for (const auto& sc : e.scripts) if (sc.first == sname && SbActorForIdx(e.idx) == a) o = &e;
-        if (!o || tidx.empty()) { note("Wiring failed - see the server log."); return; }
+        o = SbOwnedByIdx(myIdx);
+        if (!o || tidx.empty())
+        {
+            SeError(caller, "Wiring " + slot + " failed", "The object couldn't be moved into the scripted object's gamemode area. "
+                    "Place the object closer to the scripted one (in the same game area) and try again.");
+            return;
+        }
         o->refs.push_back({ sname, slot, tidx, key });
         targetName = t && t->Class ? t->Class->GetName() : tidx;
     }
-    SbOwned* cur = nullptr;
-    for (auto& e : g_sbOwned) for (const auto& r : e.refs) if (r[0] == sname && r[1] == slot) cur = &e;
-    if (!cur) for (auto& e : g_sbOwned) for (const auto& sc : e.scripts) if (sc.first == sname) cur = &e;
+    SbOwned* cur = SbOwnedByIdx(myIdx);                   // rebuild THIS object (it's the one whose wiring changed)
     const std::string idx = cur ? SbRebuildScripted(*cur) : std::string();
     HxLog("[HalcyonA2][SPECEDIT] script slot %s.%s (%s) -> %s: %s\n", sname.c_str(), slot.c_str(), type.c_str(), targetName.c_str(),
           idx.empty() ? "FAILED" : idx.c_str());
@@ -3784,7 +4050,10 @@ static void SeLvUnload(const std::string& name)
     {
         SbOwned& o = g_sbOwned[i];
         if (o.level != name) { ++i; continue; }
-        if (SDK::AActor* a = SbActorForIdx(o.idx)) SeSandboxDelete(a); else SbOwnedApply(o, true);
+        // By actor when there is one; otherwise -- or if that fails (a scripted object that was just rebuilt) --
+        // by removing its node directly, so nothing a level placed is ever left behind.
+        SDK::AActor* a = SbActorForIdx(o.idx);
+        if (!(a && SeSandboxDelete(a))) SbOwnedApply(o, true);
         g_sbOwned.erase(g_sbOwned.begin() + i);
         ++n;
     }
@@ -4002,6 +4271,8 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
     else if (op == "SBTREE" && p.size() >= 3) SeSandboxTree(p[2]);
     else if (op == "QLIST") SeQuestList(pawn);
     else if (op == "QDEL" && p.size() >= 3) SeQuestDelete(pawn, p[2]);
+    else if (op == "LUAUDEL" && p.size() >= 4) SeLuauRemove(pawn, p[2], p[3]);
+    else if (op == "QCOMPLETE" && p.size() >= 3) SeTestCompleteQuest(p[2]);
     else if (op == "LVSAVE" && p.size() >= 3) SeLvSave(pawn, p[2]);
     else if (op == "LVLIST") SeLvList(pawn);
     else if (op == "LVLOAD" && p.size() >= 3) SeLvSetLoaded(pawn, p[2], true);

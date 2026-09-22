@@ -1,0 +1,30 @@
+log F1 start
+enter
+wait 3
+qpub pkrg 250 0 Green Test
+wait 6
+raw SE|QCOMPLETE|pkrg
+wait 4
+spawnat QuestDisplayKiosk 0 -3000 -27000 0
+wait 8
+data
+wait 3
+datadump
+dataset props/TargetQuests guids 43DFD1E1B1B800448560480E92107711
+wait 4
+data
+wait 3
+datadump
+spawnat LE_BP_LightSwitch_C -300 -3400 -27000 0
+wait 8
+luaufile LightSwitch
+wait 8
+data
+wait 3
+datadump
+luaudel LightSwitch
+wait 8
+data
+wait 3
+datadump
+log F1 done

@@ -1,0 +1,10 @@
+log CN start
+enter
+wait 3
+spawnat LE_BP_RedCoin_C 0 -3000 -27000 0
+wait 8
+spawnat LE_BP_RedCoin_C 200 -3000 -27000 0
+wait 6
+move 0 0 150
+wait 4
+log CN done

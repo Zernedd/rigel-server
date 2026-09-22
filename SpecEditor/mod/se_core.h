@@ -110,6 +110,8 @@ struct Snapshot
     struct SlotCand { std::string handle, comp; };
     std::string               slotCandType;
     std::vector<SlotCand>     slotCands;
+    // Coins placed by clicking (construction mode): where each landed, in order.
+    std::vector<Vec3>         clickPlaced;
 };
 
 // ── commands: render thread -> game thread ───────────────────────────────────────────────────
@@ -135,6 +137,9 @@ enum class CmdType
     DataSet,          // str = handle, str2 = path, str3 = kind, str4 = value
     LuauAttach,       // str = handle, str2 = script name, str3 = source
     LuauUpdate,       // str2 = script name, str3 = source: re-send to every object running it (file saved)
+    PlaceTraced,      // str = palette path, loc = ray origin, dir = ray: place on the surface it hits (+60 cm);
+                      // the spot is reported back in Snapshot::clickPlaced
+    LuauRemove,       // str = object, str2 = script name: take the script off (the object is rebuilt without it)
     SlotScan,         // str = Luau component type: list the objects that have one (Snapshot::slotCands)
     LuauRef,          // str = scripted object, str2 = script, str3 = slot, str4 = Luau type, str5 = target ("" clears)
     ScanScripts,      // collect the game's own Luau scripts (for the script viewer)
@@ -200,6 +205,8 @@ struct PickState
     bool        valid = false;      // the mouse is over the bare viewport
     Vec3        eye, dir;
     std::string hovered;            // answer: handle of the object under the cursor ("" = none)
+    bool        hasHit = false;     // answer: where the ray meets the world (construction mode's marker)
+    Vec3        hit;
 };
 PickState& Pick();
 
@@ -300,6 +307,7 @@ void ScriptCoinPreview(const Snapshot& snap, const std::string& title, int coins
 int  ScriptCoinPreviewAdopted();
 bool ScriptAttachFile(const std::string& handle, const std::string& name);   // test scripts: attach a RigelScripts file
 void ScriptCoinPreviewPublish();
+void ScriptConstructClick(const Snapshot& snap, const Vec3& target);   // test scripts: a construction-mode click
 
 extern bool g_uiVisible;      // F12 (or Insert) toggles
 extern DWORD g_mainThread;    // UE's game thread = the process main thread (recorded in DllMain)

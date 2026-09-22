@@ -1,0 +1,9 @@
+log PC start
+enter
+wait 3
+placeclick 0 -3000 -28500
+wait 5
+placeclick 300 -3000 -28500
+wait 6
+qprevcheck 2
+log PC done

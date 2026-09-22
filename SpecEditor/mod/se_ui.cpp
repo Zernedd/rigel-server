@@ -470,6 +470,8 @@ void DrawBox(ImDrawList* dl, const View& v, const Vec3& c, const Vec3& h, ImU32 
 std::string PrettyName(const std::string& cls);
 
 bool SlotPickTake(const std::string& h);   // below (Outliner)
+extern int g_coinPlaceQuest;                // construction mode (below, with the coin run editor)
+const PaletteItem* FindItem(const Snapshot& snap, const std::string& byPathOrName);
 
 void DrawViewportMarkers(const Snapshot& snap)
 {
@@ -508,6 +510,28 @@ void DrawViewportMarkers(const Snapshot& snap)
         dl->AddText(ImVec2(mouse.x + 16, mouse.y + 8), IM_COL32(230, 230, 230, 220), tip.c_str());
     }
 
+    if (g_coinPlaceQuest >= 0 && canPick)
+    {
+        bool hasHit = false;
+        Vec3 hit;
+        { PickState& ps = Pick(); std::lock_guard<std::mutex> lk(ps.mx); hasHit = ps.hasHit; hit = ps.hit; }
+        ImVec2 sp;
+        if (hasHit && W2S(v, Vec3{ hit.x, hit.y, hit.z + 60.0 }, sp))
+        {
+            dl->AddCircle(sp, 12.0f, IM_COL32(255, 70, 60, 255), 24, 2.5f);
+            dl->AddCircleFilled(sp, 4.0f, IM_COL32(255, 70, 60, 255));
+        }
+        dl->AddText(ImVec2(mouse.x + 16, mouse.y + 8), IM_COL32(255, 200, 190, 230), "Click to place a coin   (Esc: stop)");
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+        {
+            const PaletteItem* coin = FindItem(snap, "LE_BP_RedCoin_C");
+            if (coin)
+            {
+                Command c{ CmdType::PlaceTraced }; c.str = coin->path; c.loc = v.eye; c.dir = ScreenRay(v, mouse); State().Push(c);
+            }
+        }
+        return;
+    }
     if (!canPick || !ImGui::IsMouseClicked(ImGuiMouseButton_Left)) return;
     if (hovered && SlotPickTake(hovered->handle)) return;
     if (hovered)
@@ -1231,6 +1255,10 @@ Vec3 InFront(const Snapshot& snap, double dist)
     return Add(snap.cameraPos, Mul(fwd, dist));
 }
 
+// Construction mode (red coin runs): clicks in the viewport place coins on what they hit, for this quest.
+int g_coinPlaceQuest = -1;                              // index into g_quests, -1 = off
+size_t g_clickPlacedSeen = 0;
+
 // Delete one of your quests: the server takes it out of every player's list (SE|QDEL) and removes its coin
 // run; its unpublished preview coins go, and groups that listed it drop it.
 void DeleteQuest(int i)
@@ -1350,6 +1378,16 @@ void PublishQuest(QuestDraft& q)
 // Runs every frame for every quest, whichever tab is open, so no coin is ever left orphaned.
 void AdoptPreviewCoins(const Snapshot& snap)
 {
+    if (g_coinPlaceQuest >= (int)g_quests.size() || (g_coinPlaceQuest >= 0 && g_quests[g_coinPlaceQuest].kind != 1)) g_coinPlaceQuest = -1;
+    while (g_clickPlacedSeen < snap.clickPlaced.size())       // construction-mode coins: this quest's previews
+    {
+        const Vec3 at = snap.clickPlaced[g_clickPlacedSeen++];
+        if (g_coinPlaceQuest >= 0)
+        {
+            g_quests[g_coinPlaceQuest].pendingCoins.push_back({ at, ImGui::GetTime() });
+            g_quests[g_coinPlaceQuest].dirty = true;
+        }
+    }
     for (auto& q : g_quests)
     {
         if (q.pendingCoins.empty()) continue;
@@ -1493,6 +1531,17 @@ void DrawCoinRun(const Snapshot& snap, QuestDraft& q, float lw)
     const int total = (int)(q.coinObjs.size() + q.pendingCoins.size());
     ImGui::BeginDisabled(total >= 30 || (!editing && !q.coins.empty()));
     if (ImGui::Button("Add coin here", ImVec2(-1, 0))) { placeCoin(InFront(snap, 250.0)); q.dirty = true; }
+    const int qi = static_cast<int>(&q - g_quests.data());
+    const bool constructing = g_coinPlaceQuest == qi;
+    if (constructing) ImGui::PushStyleColor(ImGuiCol_Button, kSelBlue);
+    if (ImGui::Button(constructing ? "Placing by clicking - click here or press Esc to stop" : "Place coins by clicking (construction mode)", ImVec2(-1, 0)))
+    {
+        g_coinPlaceQuest = constructing ? -1 : qi;
+        g_clickPlacedSeen = snap.clickPlaced.size();
+    }
+    if (constructing) ImGui::PopStyleColor();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Click in the world to drop a coin where you click (it floats at pickup height above the surface).\n"
+                                                  "Right-drag still flies the camera. Esc stops.");
     ImGui::EndDisabled();
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
         ImGui::SetTooltip(total >= 30 ? "30 coins is the most one run can hold." :
@@ -2435,7 +2484,7 @@ void DrawGameData(const Snapshot& snap, const SceneObject* sel)
             // A script this object already runs (the game's own, or one attached earlier): replace its code
             // with a file from RigelScripts.
             ImGui::NewLine();
-            ImGui::SetNextItemWidth(-90);
+            ImGui::SetNextItemWidth(-160);
             static int pick = -1;
             const ScriptFile* sf = ScriptCombo("##rep", pick);
             ImGui::SameLine();
@@ -2445,6 +2494,21 @@ void DrawGameData(const Snapshot& snap, const SceneObject* sel)
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                 ImGui::SetTooltip("Sends the file's code as %s. Objects you placed are rebuilt with it right away; "
                                   "station objects give it to players who join from now on.", e.value.c_str());
+            ImGui::SameLine();
+            if (ImGui::Button("Remove")) ImGui::OpenPopup("##rmscript");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Take %s off this object (it is rebuilt without it, for everyone).", e.value.c_str());
+            if (ImGui::BeginPopup("##rmscript"))
+            {
+                ImGui::Text("Remove %s from this object?", e.value.c_str());
+                if (ImGui::Button("Remove##yes"))
+                {
+                    Command c{ CmdType::LuauRemove }; c.str = sel->handle; c.str2 = e.value; State().Push(c);
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+                ImGui::EndPopup();
+            }
             DrawScriptSlots(snap, sel, e.value);
         }
         else if (e.kind == "hex")
@@ -2912,6 +2976,7 @@ void HandleShortcuts()
     if (ImGui::IsKeyPressed(ImGuiKey_E)) g_gizmo = GizmoMode::Rotate;
     if (ImGui::IsKeyPressed(ImGuiKey_R)) g_gizmo = GizmoMode::Scale;
     if (g_slotPick.on && ImGui::IsKeyPressed(ImGuiKey_Escape)) { g_slotPick.on = false; return; }   // cancel "click an object"
+    if (g_coinPlaceQuest >= 0 && ImGui::IsKeyPressed(ImGuiKey_Escape)) { g_coinPlaceQuest = -1; return; }   // leave construction mode
     if (ImGui::IsKeyPressed(ImGuiKey_Escape) && !g_selected.empty())
     {
         Command c{ CmdType::DeselectObject }; c.str = g_selected; State().Push(c);
@@ -3032,6 +3097,19 @@ int ScriptCoinPreviewAdopted()
 void ScriptCoinPreviewPublish()
 {
     if (!g_quests.empty()) PublishQuest(g_quests.back());
+}
+// Test-script entry: construction mode on the last red coin run draft, and one click aimed at `target`
+// (the same command a real click pushes).
+void ScriptConstructClick(const Snapshot& snap, const Vec3& target)
+{
+    if (g_quests.empty() || g_quests.back().kind != 1) ScriptCoinPreview(snap, "Construction test", 0);
+    if (g_coinPlaceQuest != (int)g_quests.size() - 1) { g_coinPlaceQuest = (int)g_quests.size() - 1; g_clickPlacedSeen = snap.clickPlaced.size(); }
+    const PaletteItem* coin = FindItem(snap, "LE_BP_RedCoin_C");
+    Vec3 d = Sub(target, snap.cameraPos);
+    const double len = std::sqrt(Dot(d, d));
+    if (!coin || len < 1.0) return;
+    d = { d.x / len, d.y / len, d.z / len };
+    Command c{ CmdType::PlaceTraced }; c.str = coin->path; c.loc = snap.cameraPos; c.dir = d; State().Push(c);
 }
 
 // Test-script entry: attach <RigelScripts>/<name>.luau to an object, exactly like the Attach button.

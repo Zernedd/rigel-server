@@ -1,0 +1,27 @@
+log UL start
+enter
+wait 3
+spawnat LE_BP_RedCoin_C 200 -3000 -27000 0
+wait 6
+comps
+spawnat LE_BP_LightSwitch_C -300 -3000 -27000 0
+wait 8
+luaufile LightSwitch
+wait 8
+luauref LightSwitch Switch ToggleableComponent self
+wait 8
+raw SE|LVSAVE|UnloadTest
+wait 5
+raw SE|LVUNLOAD|UnloadTest
+wait 20
+pickat LE_BP_LightSwitch_C -300 -3000 -27000
+log UL after-unload-1
+raw SE|LVLOAD|UnloadTest
+wait 25
+pickat LE_BP_LightSwitch_C -300 -3000 -27000
+log UL after-load
+raw SE|LVUNLOAD|UnloadTest
+wait 20
+pickat LE_BP_LightSwitch_C -300 -3000 -27000
+log UL after-unload-2
+log UL done
