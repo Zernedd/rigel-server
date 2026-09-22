@@ -3,6 +3,6 @@ enter
 wait 3
 raw SE|SLOTS|0,-2600,-27000
 wait 2
-raw SE|SLOTS|-450,2060,-28625
+raw SE|SLOTBOX
 wait 3
 log SLOTS done

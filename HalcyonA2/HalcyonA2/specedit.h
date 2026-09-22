@@ -280,6 +280,7 @@ static std::string SbRespawnKeep(SDK::AActor* a, const SbOwned& keep, const char
 static SDK::AActor* SbActorForIdx(const std::string& idx);                                  // below
 static double g_sbHostOutsideCm = 0;   // set by SbHostGamemode: how far outside every importance volume (cm; 0 inside)
 static void SbMoveFlush();                                                                  // below (moves settle)
+static void SbEditorSlotTick(ULONGLONG now);                                                // below (editor-made slot)
 static std::string g_sbSpawnCls;   // the editor class of the sandbox spawn in flight (for SbOwned)
 static std::string g_sbSpawnPath;  // ...and the palette path it was asked for (saved levels reload by it)
 static std::vector<std::string> g_sbPendingScripts;   // custom Luau script names for the spawn in flight
@@ -563,6 +564,7 @@ static void SpecEditTick()
     SbMoveFlush();
     const ULONGLONG now = GetTickCount64();
     SeProxyWantTick(now);
+    SbEditorSlotTick(now);
     if (g_seProxies.empty()) return;
     static ULONGLONG s_last = 0;
     if (now - s_last < 100) return;
@@ -2778,13 +2780,43 @@ static void SeSlotsDump(const std::string& at)
         if (SDK::UBoxComponent* box = SbImportanceBox(slot))
         {
             const SDK::FVector c = box->K2_GetComponentLocation(), e = box->GetScaledBoxExtent();
+            const SDK::FVector u = box->GetUnscaledBoxExtent(), cs = box->K2_GetComponentScale(), as = slot->GetActorScale3D();
+            snprintf(b, sizeof(b), "IMPORTANCE box centre (%.0f,%.0f,%.0f) half-size (%.0f,%.0f,%.0f) [unscaled %.0f,%.0f,%.0f comp scale %.2f,%.2f,%.2f actor scale %.2f]%s",
+                     c.X, c.Y, c.Z, e.X, e.Y, e.Z, u.X, u.Y, u.Z, cs.X, cs.Y, cs.Z, as.X,
+                     havePt ? (" -- point " + std::to_string(static_cast<int>(SbOutsideBox(box, p))) + "cm outside").c_str() : "");
+            boxs = b;
+        }
+        const wchar_t* sid = *reinterpret_cast<const wchar_t**>(reinterpret_cast<uintptr_t>(slot) + 0x390);   // SlotID
+        const wchar_t* gmp = *reinterpret_cast<const wchar_t**>(reinterpret_cast<uintptr_t>(slot) + 0x418);   // DefaultGamemodePath
+        const std::wstring wsid = sid ? sid : L"", wgmp = gmp ? gmp : L"";
+        snprintf(b, sizeof(b), "SLOT %s (%s): %s %s id '%s' path '%s' at (%.0f,%.0f,%.0f), %d sandbox object(s); %s",
+                 l->GetName().c_str(), mode.c_str(), slot->Class->GetName().c_str(), slot->GetName().c_str(),
+                 std::string(wsid.begin(), wsid.end()).c_str(), std::string(wgmp.begin(), wgmp.end()).c_str(), sl.X, sl.Y, sl.Z,
+                 hosted.count(l) ? hosted[l] : 0, boxs.c_str());
+        HxLog("[HalcyonA2][SPECEDIT] %s\n", b);
+    }
+    // Slots with NO game area loaded (map-placed, so every client has them with their real IDs and boxes).
+    auto* slotCls = SDK::UObject::FindClassFast("ModuleSlot");
+    for (int32_t i = 0; slotCls && i < n; ++i)
+    {
+        SDK::UObject* o = SDK::UObject::GObjects->GetByIndex(i);
+        if (!o || o->IsDefaultObject() || !o->IsA(slotCls)) continue;
+        if (*reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(o) + 0x440)) continue;   // has a LoadedGameMode
+        auto* slot = static_cast<SDK::AActor*>(o);
+        const wchar_t* sid = *reinterpret_cast<const wchar_t**>(reinterpret_cast<uintptr_t>(o) + 0x390);
+        const std::wstring wsid = sid ? sid : L"";
+        const SDK::FVector sl = slot->K2_GetActorLocation();
+        char b[400];
+        std::string boxs = "no importance volume";
+        if (SDK::UBoxComponent* box = SbImportanceBox(slot))
+        {
+            const SDK::FVector c = box->K2_GetComponentLocation(), e = box->GetScaledBoxExtent();
             snprintf(b, sizeof(b), "IMPORTANCE box centre (%.0f,%.0f,%.0f) half-size (%.0f,%.0f,%.0f)%s", c.X, c.Y, c.Z, e.X, e.Y, e.Z,
                      havePt ? (" -- point " + std::to_string(static_cast<int>(SbOutsideBox(box, p))) + "cm outside").c_str() : "");
             boxs = b;
         }
-        snprintf(b, sizeof(b), "SLOT %s (%s): %s %s at (%.0f,%.0f,%.0f), %d sandbox object(s); %s",
-                 l->GetName().c_str(), mode.c_str(), slot->Class->GetName().c_str(), slot->GetName().c_str(), sl.X, sl.Y, sl.Z,
-                 hosted.count(l) ? hosted[l] : 0, boxs.c_str());
+        snprintf(b, sizeof(b), "EMPTY SLOT '%s': %s %s at (%.0f,%.0f,%.0f); %s", std::string(wsid.begin(), wsid.end()).c_str(),
+                 slot->Class->GetName().c_str(), slot->GetName().c_str(), sl.X, sl.Y, sl.Z, boxs.c_str());
         HxLog("[HalcyonA2][SPECEDIT] %s\n", b);
     }
 }
@@ -2798,6 +2830,119 @@ static void SeSlotsDump(const std::string& at)
 //   2. the importance box the spot is nearest to (it will be culled out there: the editor is told);
 //   3. no importance slot at all: the nearest slot origin.
 // Only gamemodes that already host sandbox objects are candidates (they carry the "objects" container).
+// SE|SLOTBOX (local test): the importance box a RUNTIME-spawned slot gets (class defaults -- what every client
+// uses, since the box size doesn't replicate). Spawned server-only, measured, destroyed.
+static void SeSlotBoxProbe()
+{
+    if (!g_seLocalTest) return;
+    auto* cls = SDK::UObject::FindClassFast("BP_ModuleSlotWithImportanceVolume_C");
+    auto* world = SDK::UWorld::GetWorld();
+    if (!cls || !world) return;
+    SDK::FTransform xf{}; xf.Rotation = SDK::FQuat{ 0, 0, 0, 1 }; xf.Translation = SDK::FVector{ 0, 0, 100000 }; xf.Scale3D = SDK::FVector{ 1, 1, 1 };
+    SDK::AActor* s = SDK::UGameplayStatics::BeginDeferredActorSpawnFromClass(world, cls, xf, SDK::ESpawnActorCollisionHandlingMethod::AlwaysSpawn,
+                                                                           nullptr, SDK::ESpawnActorScaleMethod::MultiplyWithRoot);
+    if (!s) { HxLog("[HalcyonA2][SPECEDIT] SLOTBOX: spawn failed\n"); return; }
+    SDK::UGameplayStatics::FinishSpawningActor(s, xf, SDK::ESpawnActorScaleMethod::MultiplyWithRoot);
+    if (SDK::UBoxComponent* box = SbImportanceBox(s))
+    {
+        const SDK::FVector u = box->GetUnscaledBoxExtent(), e = box->GetScaledBoxExtent(), c = box->K2_GetComponentLocation();
+        HxLog("[HalcyonA2][SPECEDIT] SLOTBOX default importance box: unscaled (%.0f,%.0f,%.0f) scaled (%.0f,%.0f,%.0f), centre offset (%.0f,%.0f,%.0f)\n",
+              u.X, u.Y, u.Z, e.X, e.Y, e.Z, c.X, c.Y, c.Z - 100000);
+    }
+    else HxLog("[HalcyonA2][SPECEDIT] SLOTBOX: spawned slot has no importance box\n");
+    s->K2_DestroyActor();
+}
+
+// ---- an editor-made module slot, for building outside every importance volume ---------------------------
+// Spawned like the deathrun runtime slot (SpawnSlotAndLoad): a replicated BP_ModuleSlotWithImportanceVolume_C
+// loaded through GamemodesManager.AddSlot. Two limits come from the game: a runtime slot's SlotID and box size
+// don't replicate -- every client sees SlotID "defaultslot" and the class-default box (~78 x 95 x 19 m) -- so
+// there can be ONE such slot, and its box is that default size, centred on the spot it was made for.
+static SDK::AActor* g_seEditorSlot = nullptr;
+static int          g_seEditorSlotState = 0;      // 0 none, 1 loading, 2 ready, -1 failed
+static ULONGLONG    g_seEditorSlotAt = 0;
+static wchar_t      g_seEditorSlotPath[96] = L"";  // persistent: the slot's FString points at it
+static const double kSlotBoxOffset[3] = { -38.0, 340.0, 434.0 };   // default box centre relative to the slot (measured)
+static SDK::UObject* SbGamemodesManager()
+{
+    static SDK::UClass* cls = nullptr;
+    if (!cls) cls = SDK::UObject::FindClassFast("GamemodesManager");
+    const int32_t n = SDK::UObject::GObjects->Num();
+    for (int32_t i = 0; cls && i < n; ++i)
+    {
+        SDK::UObject* o = SDK::UObject::GObjects->GetByIndex(i);
+        if (o && !o->IsDefaultObject() && o->IsA(cls)) return o;
+    }
+    return nullptr;
+}
+static bool SbCreateEditorSlot(const double* at, const std::string& path)
+{
+    if (g_seEditorSlot || g_seEditorSlotState != 0) return false;
+    auto* cls = SDK::UObject::FindClassFast("BP_ModuleSlotWithImportanceVolume_C");
+    auto* world = SDK::UWorld::GetWorld();
+    SDK::UObject* mgr = SbGamemodesManager();
+    if (!cls || !world || !mgr) { HxLog("[HalcyonA2][SPECEDIT] editor slot: not ready (cls=%p world=%p mgr=%p)\n", cls, world, mgr); return false; }
+    SDK::FTransform xf{};
+    xf.Rotation = SDK::FQuat{ 0, 0, 0, 1 };
+    xf.Translation = SDK::FVector{ at[0] - kSlotBoxOffset[0], at[1] - kSlotBoxOffset[1], at[2] - kSlotBoxOffset[2] };
+    xf.Scale3D = SDK::FVector{ 1, 1, 1 };
+    SDK::AActor* slot = SDK::UGameplayStatics::BeginDeferredActorSpawnFromClass(world, cls, xf, SDK::ESpawnActorCollisionHandlingMethod::AlwaysSpawn,
+                                                                              nullptr, SDK::ESpawnActorScaleMethod::MultiplyWithRoot);
+    if (!slot) { HxLog("[HalcyonA2][SPECEDIT] editor slot: spawn failed\n"); return false; }
+    SDK::UGameplayStatics::FinishSpawningActor(slot, xf, SDK::ESpawnActorScaleMethod::MultiplyWithRoot);
+    const uintptr_t s = reinterpret_cast<uintptr_t>(slot);
+    if (auto* fn = slot->Class->GetFunction("Actor", "SetReplicates")) { struct { bool b; } rp{ true }; SafeProcessEvent(slot, fn, &rp); }
+    *reinterpret_cast<uint8_t*>(s + 0x60) |= 0x08 | 0x10;                 // bAlwaysRelevant | bReplicateMovement
+    *reinterpret_cast<float*>(s + 0x170) = 1.0e12f;                        // NetCullDistanceSquared: never cull the slot itself
+    if (auto* fn = slot->Class->GetFunction("Actor", "ForceNetUpdate")) SafeProcessEvent(slot, fn, nullptr);
+    if (auto* fn = slot->Class->GetFunction("ModuleSlot", "PushNetVars")) SafeProcessEvent(slot, fn, nullptr);
+    const std::wstring wp(path.begin(), path.end());
+    wcsncpy_s(g_seEditorSlotPath, wp.c_str(), _TRUNCATE);
+    SetSlotFString(slot, 0x418, g_seEditorSlotPath);                       // DefaultGamemodePath
+    auto* addFn = mgr->Class->GetFunction("GamemodesManager", "AddSlot");
+    if (!addFn) { HxLog("[HalcyonA2][SPECEDIT] editor slot: AddSlot not found\n"); slot->K2_DestroyActor(); return false; }
+    void* parms = slot;
+    SafeProcessEvent(mgr, addFn, &parms);
+    g_seEditorSlot = slot; g_seEditorSlotState = 1; g_seEditorSlotAt = GetTickCount64();
+    HxLog("[HalcyonA2][SPECEDIT] editor slot: spawned at (%.0f,%.0f,%.0f) for a box centred on (%.0f,%.0f,%.0f), loading '%s'\n",
+          xf.Translation.X, xf.Translation.Y, xf.Translation.Z, at[0], at[1], at[2], path.c_str());
+    return true;
+}
+// Tick: once the load binds a LoadedGameMode, push the slot's and gamemode's netvars so clients build it.
+static void SbEditorSlotTick(ULONGLONG now)
+{
+    if (g_seEditorSlotState != 1 || !g_seEditorSlot) return;
+    const uintptr_t s = reinterpret_cast<uintptr_t>(g_seEditorSlot);
+    SDK::UObject* lgm = *reinterpret_cast<SDK::UObject**>(s + 0x440);
+    if (!lgm)
+    {
+        static ULONGLONG s_diag = 0;
+        if (now - g_seEditorSlotAt > 3000 && now - s_diag > 8000)
+        {
+            s_diag = now;
+            if (SDK::UObject* mgr = SbGamemodesManager())
+            {
+                const uintptr_t m = reinterpret_cast<uintptr_t>(mgr);
+                auto mapNum = [&](uint32_t off) { return *reinterpret_cast<int32_t*>(m + off + 8) - *reinterpret_cast<int32_t*>(m + off + 0x34); };
+                HxLog("[HalcyonA2][SPECEDIT] editor slot: waiting -- mgr knownSlots=%d waitingForSlots=%d loadedSlots=%d loadedGamemodes=%d "
+                      "slot.ModuleState=%p slot.SlotID='%ls'\n", mapNum(0x68), mapNum(0x2B0), mapNum(0x310), *reinterpret_cast<int32_t*>(m + 0x368 + 8),
+                      *reinterpret_cast<void**>(s + 0x300), *reinterpret_cast<const wchar_t**>(s + 0x390));
+            }
+        }
+        if (now - g_seEditorSlotAt > 30000) { g_seEditorSlotState = -1; HxLog("[HalcyonA2][SPECEDIT] editor slot: its game area never loaded\n"); }
+        return;
+    }
+    if (auto* fn = g_seEditorSlot->Class->GetFunction("ModuleSlot", "PushNetVars")) SafeProcessEvent(g_seEditorSlot, fn, nullptr);
+    if (auto* fn = lgm->Class->GetFunction("LoadedGameMode", "PushNetVars")) SafeProcessEvent(lgm, fn, nullptr);
+    if (auto* fn = g_seEditorSlot->Class->GetFunction("Actor", "ForceNetUpdate")) SafeProcessEvent(g_seEditorSlot, fn, nullptr);
+    uint8_t* root = reinterpret_cast<uint8_t*>(SbNodeOf(reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(lgm) + 0x218)));
+    uint8_t* objs = nullptr;
+    const bool hasObjects = root && SbFindChildRaw(root, NvNameBits(NvName("objects")), &objs) >= 0;
+    g_seEditorSlotState = hasObjects ? 2 : -1;
+    HxLog("[HalcyonA2][SPECEDIT] editor slot: game area %s loaded (%s), objects container: %s\n", lgm->GetName().c_str(),
+          root ? reinterpret_cast<SDK::FName*>(root + 48)->ToString().c_str() : "?", hasObjects ? "yes -- ready" : "NO -- can't hold objects");
+}
+
 static SDK::UObject* SbHostGamemode(const std::string& uniqueId, const double* loc)
 {
     static SDK::UClass* exactCls = nullptr;
@@ -4661,6 +4806,8 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
     else if (op == "LGMDESC" && p.size() >= 3) SeLgmDesc(p[2]);
     else if (op == "LUAUDUMP") SeLuauDump(p.size() >= 3 ? p[2] : std::string());
     else if (op == "SLOTS") SeSlotsDump(p.size() >= 3 ? p[2] : std::string());
+    else if (op == "SLOTBOX") SeSlotBoxProbe();
+    else if (op == "MKSLOT" && g_seLocalTest && p.size() >= 4) { double at[3]; if (SeVec(p[2], at)) SbCreateEditorSlot(at, p[3] == "-" ? std::string() : p[3]); }
     else if (op == "NODEMOVE" && p.size() >= 4) SeTestNodeMove(p[2], p[3]);
     else if (op == "ACTORS" && p.size() >= 3) SeActorClasses(p[2]);
     else if (op == "SBDATA" && p.size() >= 3) SeSbData(pawn, p[2]);
