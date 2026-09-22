@@ -2650,15 +2650,21 @@ static bool SeSandboxClassOk(const std::string& className)
     return g_seSandbox && !SbTypeFor(className).empty();
 }
 
-// The loaded gamemode that hosts the station's own sandbox objects: the GameMode of any live UPrefabComponent.
-// Which loaded gamemode should host a new object of this prefab type. A prefab whose behaviour comes from a
-// Luau script only works in a gamemode whose project carries that script, and the safe way to get that is
-// the gamemode an existing instance of the same type already lives in (the station's own light switches,
-// red-coin quests...). Otherwise any gamemode that hosts sandbox objects.
-static SDK::UObject* SbHostGamemode(const std::string& uniqueId)
+// Which loaded gamemode should host a new object -- decided by WHERE it is being placed.
+//
+// A game area only draws its own objects: one hosted by a different area shows up for a moment when it is
+// created and is hidden again as soon as the client settles, which looked like "items spawn in and vanish".
+// (Re-showing it with a script's SetVisible was the only way back.) It also split objects placed side by
+// side across areas, so wiring one to another was refused as cross-area.
+//
+// So: the area whose slot is nearest the spawn point wins. Among areas the same distance away -- the usual
+// case is one -- an area that already hosts this prefab type is preferred, because a prefab whose behaviour
+// comes from a Luau script needs a project that carries it.
+static SDK::UObject* SbHostGamemode(const std::string& uniqueId, const double* loc)
 {
     auto* pcCls = SDK::UObject::FindClassFast("PrefabComponent");
-    SDK::UObject* fallback = nullptr;
+    SDK::UObject* best = nullptr; double bestD2 = 1.0e30; bool bestType = false;
+    SDK::UObject* byType = nullptr;
     const int32_t n = SDK::UObject::GObjects->Num();
     for (int32_t i = 0; pcCls && i < n; ++i)
     {
@@ -2667,12 +2673,25 @@ static SDK::UObject* SbHostGamemode(const std::string& uniqueId)
         const uintptr_t pc = reinterpret_cast<uintptr_t>(o);
         SDK::UObject* lgm = *reinterpret_cast<SDK::UObject**>(pc + 0x440);
         if (!lgm) continue;
-        if (!fallback) fallback = lgm;
         SDK::UObject* def = *reinterpret_cast<SDK::UObject**>(pc + 0x278);                 // prefabDefinition
         SDK::UObject* st = def ? *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(def) + 0x38) : nullptr;
-        if (st && reinterpret_cast<SDK::FName*>(reinterpret_cast<uintptr_t>(st) + 0xF0)->ToString() == uniqueId) return lgm;
+        const bool sameType = st && reinterpret_cast<SDK::FName*>(reinterpret_cast<uintptr_t>(st) + 0xF0)->ToString() == uniqueId;
+        if (sameType && !byType) byType = lgm;
+
+        double d2 = 1.0e29;                                                                // no slot: last resort
+        if (SDK::AActor* slot = *reinterpret_cast<SDK::AActor**>(reinterpret_cast<uintptr_t>(lgm) + 0x320))
+        {
+            const SDK::FVector s = slot->GetTransform().Translation;
+            const double dx = s.X - loc[0], dy = s.Y - loc[1], dz = s.Z - loc[2];
+            d2 = dx * dx + dy * dy + dz * dz;
+        }
+        if (d2 < bestD2 - 1.0 || (d2 < bestD2 + 1.0 && sameType && !bestType))
+        { best = lgm; bestD2 = d2; bestType = sameType; }
     }
-    return fallback;
+    if (best && byType && best != byType)
+        HxLog("[HalcyonA2][SPECEDIT] host for %s: the nearest game area (%.0fm from its slot) is not the one that "
+              "already has this type -- placing it where it is being put\n", uniqueId.c_str(), sqrt(bestD2) / 100.0);
+    return best;
 }
 
 // Place `uniqueId` as a real sandbox object at a world transform. Every machine -- vanilla Quest included --
@@ -2680,7 +2699,7 @@ static SDK::UObject* SbHostGamemode(const std::string& uniqueId)
 static std::string SeSandboxSpawn(const std::string& uniqueId, const double* loc, const double* rot, const double* scl)
 {
     SDK::UObject* sb = SbEngine();
-    SDK::UObject* lgm = (g_sbForceLgm && SeAlive(g_sbForceLgm)) ? g_sbForceLgm : SbHostGamemode(uniqueId);
+    SDK::UObject* lgm = (g_sbForceLgm && SeAlive(g_sbForceLgm)) ? g_sbForceLgm : SbHostGamemode(uniqueId, loc);
     if (!sb || !lgm) { HxLog("[HalcyonA2][SPECEDIT] sandbox spawn: sandbox=%p gamemode=%p\n", sb, lgm); return std::string(); }
     SDK::AActor* slot = *reinterpret_cast<SDK::AActor**>(reinterpret_cast<uintptr_t>(lgm) + 0x320);
     SDK::FVector relLoc{ loc[0], loc[1], loc[2] };
@@ -3904,18 +3923,32 @@ static void SeLuauRef(SDK::UObject* ctx, const std::string& ident, const std::st
         }
         std::string tidx = to->idx;
         uint32_t b, c, d;
-        // Never move the target into another game area: an object only draws inside its own, so wiring one
-        // from somewhere else made it vanish where it was placed. Same area is required; within it, an object
-        // with an older-style id is re-created so it can be referenced at all.
+        // An object only draws inside the game area that hosts it, so wiring one in from somewhere else used
+        // to make it vanish where it stood. Two objects standing side by side belong in one area, though --
+        // older placements could land in different ones -- and moving such a target into the scripted
+        // object's area is exactly the repair. Only a target that really belongs elsewhere is refused.
         if (to->lgm != o->lgm)
         {
-            SeError(caller, "Those are in different game areas",
-                    "Slot '" + slot + "' can only point at an object in the same game area as the scripted object. "
-                    "Place " + tname + " next to the scripted object (same area) and wire it again.");
-            return;
+            if (SbHostGamemode(to->uniqueId, to->loc) != o->lgm)
+            {
+                SeError(caller, "Those are in different game areas",
+                        "Slot '" + slot + "' can only point at an object in the same game area as the scripted object. "
+                        "Place " + tname + " next to the scripted object (same area) and wire it again.");
+                return;
+            }
+            HxLog("[HalcyonA2][SPECEDIT] %s sits in the scripted object's area but is hosted elsewhere -- moving it there\n", tname.c_str());
+            tidx = SbRehost(*to, o->lgm);
+            if ((o = SbOwnedByIdx(myIdx)) == nullptr || tidx.empty())
+            {
+                SeError(caller, "Wiring " + slot + " failed",
+                        "Couldn't move " + tname + " into the scripted object's game area. Delete it, place it again "
+                        "next to the scripted object, and wire it.");
+                return;
+            }
         }
-        if (!SbGuidParts(tidx, &b, &c, &d)) tidx = SbRehost(*to, o->lgm);   // same area, older id: re-create it
-        // SbRehost may have reallocated g_sbOwned: look the scripted object up again
+        else if (!SbGuidParts(tidx, &b, &c, &d))
+            tidx = SbRehost(*to, o->lgm);                 // same area, older id: re-create it so it can be referenced
+        // A rehost re-created both the object and the vector holding it: nothing from before it still stands.
         o = SbOwnedByIdx(myIdx);
         if (!o || tidx.empty())
         {
@@ -3923,6 +3956,7 @@ static void SeLuauRef(SDK::UObject* ctx, const std::string& ident, const std::st
                     "Place the object closer to the scripted one (in the same game area) and try again.");
             return;
         }
+        t = SbActorForIdx(tidx);
         o->refs.push_back({ sname, slot, tidx, key });
         targetName = t && t->Class ? t->Class->GetName() : tidx;
     }

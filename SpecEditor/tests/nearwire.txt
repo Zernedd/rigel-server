@@ -1,0 +1,19 @@
+# Two objects placed side by side must end up in ONE game area, and wiring one to the other
+# must work (this is what "items vanish shortly after" and "can't assign when they're beside
+# each other" both came from: the host area used to be picked by prefab type, not by position).
+log NEARWIRE start
+enter
+wait 3
+spawnat BP_GolfTee_C -300 -2600 -27000 0
+wait 8
+expect 1
+spawnat LE_BP_LightSwitch_C -300 -2450 -27000 0
+wait 8
+expect 1
+luaufile LightSwitch
+wait 10
+luauref LightSwitch Target PhysicalComponent BP_GolfTee_C -300 -2600 -27000
+wait 10
+pickat BP_GolfTee_C -300 -2600 -27000
+expect 1
+log NEARWIRE done
