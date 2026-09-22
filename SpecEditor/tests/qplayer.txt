@@ -1,0 +1,11 @@
+log QP start
+wait 40
+qdefs Keep Me
+qdefs Delete Me
+qdefs Subquest
+log QP ready
+wait 45
+qdefs Keep Me
+qdefs Delete Me
+qdefs Subquest
+log QP done

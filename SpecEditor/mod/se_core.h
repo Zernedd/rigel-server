@@ -106,6 +106,10 @@ struct Snapshot
     int                       levelsSerial = 0;
     struct GameScript { std::string where, name, source; };
     std::vector<GameScript>   gameScripts;  // the station's Luau (read-only examples of the API)
+    // Objects that can fill a script slot of type slotCandType: each has a component of that type.
+    struct SlotCand { std::string handle, comp; };
+    std::string               slotCandType;
+    std::vector<SlotCand>     slotCands;
 };
 
 // ── commands: render thread -> game thread ───────────────────────────────────────────────────
@@ -130,6 +134,9 @@ enum class CmdType
     DataRequest,      // str = handle: ask the server for the object's Game data
     DataSet,          // str = handle, str2 = path, str3 = kind, str4 = value
     LuauAttach,       // str = handle, str2 = script name, str3 = source
+    LuauUpdate,       // str2 = script name, str3 = source: re-send to every object running it (file saved)
+    SlotScan,         // str = Luau component type: list the objects that have one (Snapshot::slotCands)
+    LuauRef,          // str = scripted object, str2 = script, str3 = slot, str4 = Luau type, str5 = target ("" clears)
     ScanScripts,      // collect the game's own Luau scripts (for the script viewer)
 };
 
@@ -208,6 +215,23 @@ struct Notice
 };
 Notice& Notes();
 
+// ── problems that need the user's attention (a popup that explains what went wrong and how to fix it) ──
+struct ProblemBox
+{
+    struct Item { std::string title, text, file; int line = 0; };
+    std::mutex        mx;
+    std::vector<Item> items;
+    void Push(const Item& it)
+    {
+        std::lock_guard<std::mutex> lk(mx);
+        for (const auto& e : items) if (e.title == it.title && e.text == it.text) return;   // no repeats
+        if (items.size() < 8) items.push_back(it);
+    }
+    bool Front(Item& out) { std::lock_guard<std::mutex> lk(mx); if (items.empty()) return false; out = items.front(); return true; }
+    void Pop() { std::lock_guard<std::mutex> lk(mx); if (!items.empty()) items.erase(items.begin()); }
+};
+ProblemBox& Problems();
+
 class EditorState
 {
 public:
@@ -274,9 +298,10 @@ void GameThreadPump();        // game thread; drains commands, republishes the s
 void ScriptCoinRun(const Snapshot& snap, const std::string& title, int seconds, int coins);   // test scripts: the red coin run publish
 void ScriptCoinPreview(const Snapshot& snap, const std::string& title, int coins);   // test scripts: coin previews
 int  ScriptCoinPreviewAdopted();
+bool ScriptAttachFile(const std::string& handle, const std::string& name);   // test scripts: attach a RigelScripts file
 void ScriptCoinPreviewPublish();
 
-extern bool g_uiVisible;      // INSERT toggles
+extern bool g_uiVisible;      // F12 (or Insert) toggles
 extern DWORD g_mainThread;    // UE's game thread = the process main thread (recorded in DllMain)
 
 }  // namespace se

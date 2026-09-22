@@ -1,0 +1,16 @@
+log ER start
+enter
+wait 3
+spawnat LE_BP_LightSwitch_C -300 -2200 -27000 0
+wait 8
+luaufile BadSyntax
+wait 8
+spawnat LE_BP_LightSwitch_C -300 -1800 -27000 0
+wait 8
+luaufile BadRuntime
+wait 8
+spawnat LE_BP_LightSwitch_C -300 -1400 -27000 0
+wait 8
+luaufile BadCall
+wait 8
+log ER done

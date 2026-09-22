@@ -1,0 +1,14 @@
+log CP start
+enter
+wait 3
+pick GolfHole
+comps
+pick PrimitiveCube
+comps
+spawnat BP_DebugCube_C 300 -2600 -27000 0
+wait 8
+comps
+spawnat LE_BP_LightSwitch_C -300 -2600 -27000 0
+wait 8
+comps
+log CP done

@@ -1,0 +1,166 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Rigel Quest Guide</title>
+<style>
+@page { size: A4; margin: 18mm 17mm 20mm 17mm;
+  @bottom-center { content: counter(page); font: 9pt 'Segoe UI', sans-serif; color: #888; } }
+@page :first { @bottom-center { content: none; } }
+:root { --ink:#1d2330; --muted:#5a6475; --accent:#3a5bd9; --accent2:#0d8f7a; --bg:#f4f6fb; --line:#dde2ee; }
+* { box-sizing: border-box; }
+body { font: 10pt/1.48 'Segoe UI', 'Helvetica Neue', Arial, sans-serif; color: var(--ink); margin: 0; }
+h1, h2, h3, h4 { font-family: 'Segoe UI Semibold', 'Segoe UI', sans-serif; line-height: 1.2; }
+h2 { font-size: 19pt; margin: 0 0 10px; padding-bottom: 6px; border-bottom: 2px solid var(--accent); break-after: avoid; }
+h2 .num { color: var(--accent); margin-right: 8px; }
+h3 { font-size: 12.5pt; margin: 18px 0 6px; color: #23304f; break-after: avoid; }
+h4 { font-size: 10pt; margin: 0 0 1px; }
+section.chapter { margin-top: 26px; }
+section.chapter.newpage { break-before: page; margin-top: 0; }
+p { margin: 6px 0 8px; }
+code { font: 9pt 'Cascadia Mono', Consolas, monospace; background: #eef1f8; padding: 0 3px; border-radius: 3px; }
+figure.code { margin: 8px 0 12px; border: 1px solid var(--line); border-radius: 6px; background: #fbfcfe; break-inside: avoid; }
+figure.code .cap { font: 8.5pt 'Segoe UI', sans-serif; color: var(--muted); padding: 4px 10px; border-bottom: 1px solid var(--line); background: var(--bg); border-radius: 6px 6px 0 0; }
+figure.code pre { margin: 0; padding: 6px 10px; font: 8.2pt/1.36 'Cascadia Mono', Consolas, monospace; white-space: pre-wrap; word-break: break-word; tab-size: 4; }
+figure.code pre code { background: none; padding: 0; }
+.k { color: #7a2bb8; font-weight: 600; } .s { color: #a3451b; } .c { color: #6b7a8c; font-style: italic; } .n { color: #0d7a68; }
+.note, .warn, .tip { border-left: 4px solid var(--accent); background: #eef2fd; padding: 8px 12px; margin: 10px 0; border-radius: 0 6px 6px 0; break-inside: avoid; }
+.warn { border-color: #d9822b; background: #fdf4ea; }
+.tip { border-color: var(--accent2); background: #e9f7f4; }
+.note b:first-child, .warn b:first-child, .tip b:first-child { display: block; margin-bottom: 2px; }
+ol.steps { padding-left: 0; counter-reset: s; list-style: none; }
+ol.steps > li { counter-increment: s; position: relative; padding: 4px 0 6px 36px; }
+ol.steps > li::before { content: counter(s); position: absolute; left: 0; top: 3px; width: 24px; height: 24px; border-radius: 50%; background: var(--accent); color: white; font-weight: 600; text-align: center; line-height: 24px; font-size: 10pt; }
+table.t { border-collapse: collapse; width: 100%; margin: 8px 0 12px; font-size: 9.4pt; break-inside: auto; }
+table.t th, table.t td { border: 1px solid var(--line); padding: 5px 7px; vertical-align: top; text-align: left; }
+table.t th { background: var(--bg); }
+table.t tr { break-inside: avoid; }
+.cover { height: 250mm; display: flex; flex-direction: column; justify-content: space-between; }
+.cover .band { background: linear-gradient(135deg, #1f2d5c, #3a5bd9 60%, #0d8f7a); color: white; padding: 38mm 14mm 16mm; border-radius: 10px; }
+.cover h1 { font-size: 34pt; margin: 0 0 6px; }
+.cover .sub { font-size: 14pt; opacity: .92; }
+.cover .meta { color: var(--muted); font-size: 10pt; }
+.toc { columns: 2; column-gap: 24px; font-size: 10.5pt; }
+.toc div { break-inside: avoid; padding: 2px 0; }
+.toc .n { display: inline-block; width: 26px; color: var(--accent); font-weight: 600; font-style: normal; }
+.apigrid { columns: 2; column-gap: 12px; }
+.api { border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px 4px; margin: 0 0 7px; break-inside: avoid; display: inline-block; width: 100%; }
+.api .origin { font-size: 7.3pt; color: var(--muted); margin-bottom: 3px; }
+.api .par { font-weight: 400; font-size: 9pt; color: var(--muted); }
+.api ul.methods { margin: 1px 0 2px; padding-left: 14px; font-size: 8pt; line-height: 1.3; }
+.api ul.methods li { margin: 0; }
+.api ul.methods code { font-size: 7.3pt; background: none; padding: 0; }
+.api .evs { font-size: 7.8pt; margin-top: 1px; line-height: 1.3; } .api .evs code { font-size: 7.2pt; background: none; padding: 0; }
+.more { color: var(--muted); font-style: italic; }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.linebyline { width: 100%; border-collapse: collapse; font-size: 9.4pt; margin: 6px 0 12px; }
+.linebyline td { border-bottom: 1px solid var(--line); padding: 4px 6px; vertical-align: top; }
+.linebyline td:first-child { width: 42%; }
+.linebyline td:first-child code { background: none; font-size: 8.4pt; }
+.diagram { display: flex; gap: 8px; align-items: stretch; margin: 10px 0 14px; }
+.diagram .box { flex: 1; border: 1px solid var(--line); border-radius: 8px; padding: 8px; text-align: center; background: var(--bg); font-size: 9.2pt; }
+.diagram .box b { display: block; color: var(--accent); margin-bottom: 3px; }
+.diagram .arrow { align-self: center; color: var(--muted); font-size: 16pt; }
+</style></head><body><section class="cover">
+  <div class="band">
+    <div style="font-size:11pt;letter-spacing:.14em;text-transform:uppercase;opacity:.85">Rigel &middot; Spec Editor</div>
+    <h1>Quest Guide</h1>
+    <div class="sub">Make quests, wire them to kiosks and buttons, and save them on the backend.</div>
+  </div>
+  <div><h3>Contents</h3><div class="toc"><div><span class="n">1</span>How quests work on Rigel</div><div><span class="n">2</span>Making a checkpoint run</div><div><span class="n">3</span>Making a red coin run</div><div><span class="n">4</span>Grouping quests</div><div><span class="n">5</span>Kiosks and start buttons</div><div><span class="n">6</span>Changing and deleting quests</div><div><span class="n">7</span>Saving quests on the backend</div><div><span class="n">8</span>Scripting quest logic</div><div><span class="n">9</span>Troubleshooting</div></div></div>
+  <div class="meta">Orion Drift build 22284 &middot; F12 shows the editor</div>
+</section><section class="chapter"><h2><span class="num">1</span>How quests work on Rigel</h2>
+<p>A quest is a row in the player's quest list: a name, an icon, a description and a progress bar. The editor
+publishes quests <b>to the server</b>, which sends them to every player, so they work for everyone,
+Quest headsets and unmodded PC players included. The server also decides when a quest is done: it
+watches where players are (checkpoint runs) or lets the game's own red coin run complete it, and then marks it
+completed through the game's own completion path, so the row turns green.</p>
+<ul>
+<li><b>Checkpoint run</b>: reach objects you placed, in order, optionally against the clock.</li>
+<li><b>Red coin run</b>: the TKB-style run. A start button starts it, and the player has a time limit to collect every
+coin.</li>
+<li><b>Quest group</b>: a folder that shows several quests together. Each quest keeps its own icon and completes
+on its own.</li>
+</ul>
+<p>Open the <b>Quests</b> tab next to Details (F12 shows and hides the editor).</p>
+</section><section class="chapter"><h2><span class="num">2</span>Making a checkpoint run</h2>
+<ol>
+<li>Click <b>+ New quest</b>, type a <b>Name</b> (what players see) and an optional <b>Description</b>.</li>
+<li>Pick an <b>Icon</b>. Every icon the game ships is in the list (climbing, red coin, racing and so on).</li>
+<li>Leave <b>Type</b> on <i>Checkpoint run</i>.</li>
+<li>Add checkpoints: fly to each spot and click <b>Place new checkpoint here</b>, or select any placed object and
+click <b>Add selected object</b>. Reorder them with the arrows; <b>Go</b> flies you to one, and <b>X</b> removes it.</li>
+<li>Set the <b>Touch distance</b> (how close counts as reached) and, if you want, tick <b>Time limit</b>; it counts from
+the first checkpoint.</li>
+<li>Click <b>Publish quest</b>. The quest appears in every player's list straight away. When you change it later, the
+list shows <i>(changed)</i>; publish again to update it in place. Players' progress is kept because the quest's id
+never changes.</li>
+</ol>
+</section><section class="chapter"><h2><span class="num">3</span>Making a red coin run</h2>
+<ol>
+<li><b>+ New quest</b>, then set <b>Type</b> to <i>Red coin run</i>.</li>
+<li><b>Place start button here</b> puts the button in front of you. <b>Move here</b> moves it later.</li>
+<li><b>Add coin here</b> places a real red coin at the spot in front of you. While you build the course the coins
+are real objects: select one and move it with the gizmo like anything else. <b>Select</b>, <b>Go</b> and <b>X</b> work
+on each coin in the list.</li>
+<li>Set the <b>run time</b> in seconds.</li>
+<li><b>Boosting</b>: <i>Allowed</i> means boost pads and thrusters work during the run. <i>Boosting fails the run</i> is the
+TKB rule.</li>
+<li>Click <b>Publish run</b>. The preview coins are replaced by the real run. <b>Edit coins (show them)</b> brings the preview
+back when you want to change the course.</li>
+</ol>
+<p class="note">Players press the start button, collect every coin before the timer ends, and the game completes the
+quest on their machine. Their thrusters are never locked after the run.</p>
+</section><section class="chapter"><h2><span class="num">4</span>Grouping quests</h2>
+<p>Publish the quests first. Then make a new quest with <b>Type</b> <i>Quest group</i>, add each quest with
+<b>Add a quest to the group...</b>, give the group a name and an icon, and click <b>Publish group</b>. Players see a folder with your quests inside, each with its own
+icon and progress.</p>
+<p class="note">A group only lists quests that are published. If you delete a quest, it leaves every group that
+listed it.</p>
+</section><section class="chapter"><h2><span class="num">5</span>Kiosks and start buttons</h2>
+<p>A <b>quest kiosk</b> (Quest Display Kiosk in the Place panel) is a board that shows chosen quests with their
+progress. To set one up:</p>
+<ol>
+<li>Place a kiosk, or select one already on the station.</li>
+<li>In <b>Details</b>, open <b>Game data (synced to everyone)</b>.</li>
+<li><b>Target Quests</b> is the kiosk's list. Add a quest with the searchable picker under the list (your
+published quests are marked <i>(editor)</i>, next to all the station's own quests). <b>X</b> removes a row, and
+the order here is the order on the board.</li>
+<li><b>Kiosk Header</b> is the title shown above the list.</li>
+</ol>
+<p>Changes go through the game's own synced values, so every player sees the new board immediately.</p>
+<p>A <b>Progression Button</b> works the same way. Its <b>Target Quest</b> field in Game data chooses which quest
+pressing it activates. That is how a red coin run's start button is wired, and you can point one at any quest.</p>
+<p class="note">Save the level (chapter 7) to keep kiosk setups. Saved levels record every Game data edit and
+put the quests back by name, so a kiosk still points at the right quest when the level is loaded on another
+server.</p>
+</section><section class="chapter"><h2><span class="num">6</span>Changing and deleting quests</h2>
+<ul>
+<li>Pick a quest in the list to edit it, then publish again.</li>
+<li><b>Delete quest</b> (under the list) removes it from every player's quest list, together with its start button and
+coins, and from any group.</li>
+<li>Quests published on this server that aren't in your list (made in an earlier session, or by a loaded
+level) are under <b>On the server, not in your list</b>, each with a <b>Delete</b> button.</li>
+</ul>
+</section><section class="chapter"><h2><span class="num">7</span>Saving quests on the backend</h2>
+<p>The <b>Levels</b> tab saves everything you built, including quests, red coin runs, kiosk settings, scripts and
+script slots, as a named level on the Rigel backend.</p>
+<ol>
+<li>Type a name and click <b>Save level</b>.</li>
+<li><b>Load</b> and <b>Unload</b> put a level on the current server or take it off. Unloading also removes its quests
+from players' lists.</li>
+<li>On the dashboard, the station's <b>Editor levels</b> tab lists every saved level. There you choose which levels
+are loaded now and which <b>load automatically when the server boots</b>. The game server checks every 15 seconds
+and applies your choices, with no restart needed.</li>
+</ol>
+<p class="note">Quests from a level are wired to their kiosks and buttons automatically when it loads: the level
+stores quest references by name and resolves them on the server it loads on.</p>
+</section><section class="chapter"><h2><span class="num">8</span>Scripting quest logic</h2>
+<p>For custom behaviour, such as completing a quest when a switch is flipped, attach a Luau script to an object. See the
+<i>Rigel Luau Scripting Guide</i> (Rigel-Luau-Guide.pdf in the same folder). Scripts can hold <b>slots</b>
+(<code>local Target: PhysicalComponent = nil</code>): click the slot in Details, then click the object to wire it.</p>
+</section><section class="chapter"><h2><span class="num">9</span>Troubleshooting</h2>
+<ul>
+<li><b>The quest doesn't show up</b>: a player must have received the station's quests once, because the server copies
+their row format. Publish again after someone has joined.</li>
+<li><b>The quest doesn't turn green</b>: checkpoint runs need the player to reach every checkpoint in order, within the
+touch distance. Red coin runs need every coin before the timer ends.</li>
+<li><b>The kiosk is empty</b>: its Target Quests must be quests the player has, meaning published and not deleted.</li>
+</ul>
+</section></body></html>

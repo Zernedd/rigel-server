@@ -1,0 +1,6 @@
+log LD2 start
+enter
+wait 3
+raw SE|LGMDESC|TKBGolf:all
+wait 3
+log LD2 done

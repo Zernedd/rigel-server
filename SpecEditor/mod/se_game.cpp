@@ -617,6 +617,9 @@ void PredictTransform(const std::string& handle, const Vec3& loc, const Rot& rot
 bool TraceWorld(const Vec3& from, const Vec3& dir, double maxDist, Vec3& hit);   // editor camera section
 void CameraFocus(const Vec3& p);
 
+std::string g_slotCandType;                             // SlotScan result (see Snapshot::slotCands)
+std::vector<Snapshot::SlotCand> g_slotCands;
+
 void HandleCommands()
 {
     for (const Command& c : State().Drain())
@@ -677,6 +680,49 @@ void HandleCommands()
             if (hex.empty()) SendToServer("SE|LUAUPART|" + c.str2 + "|");
             SendToServer("SE|LUAU|" + id + "|" + c.str2);
             Log("[luau] attach %s (%zu chars) to %s", c.str2.c_str(), c.str3.size(), id.c_str());
+            break;
+        }
+
+        case CmdType::SlotScan:
+        {
+            // Which listed objects have a component of this type? (their name is the slot's key)
+            g_slotCandType = c.str;
+            g_slotCands.clear();
+            SDK::UClass* want = SDK::UObject::FindClassFast(c.str);
+            if (!want) break;
+            std::unordered_map<SDK::UObject*, std::string> byActor;
+            for (const SceneObject& s : g_lastObjects) byActor[static_cast<SDK::UObject*>(s.ptr)] = s.handle;
+            const int32_t n = SDK::UObject::GObjects->Num();
+            for (int32_t i = 0; i < n && g_slotCands.size() < 512; ++i)
+            {
+                SDK::UObject* o = SDK::UObject::GObjects->GetByIndex(i);
+                if (!o || !o->Outer || o->IsDefaultObject() || !o->IsA(want)) continue;
+                auto it = byActor.find(o->Outer);
+                if (it != byActor.end()) g_slotCands.push_back({ it->second, o->GetName() });
+            }
+            break;
+        }
+
+        case CmdType::LuauRef:
+        {
+            const std::string id = IdentFor(c.str);
+            const std::string tid = c.str5.empty() ? std::string("-") : IdentFor(c.str5);
+            if (id.empty() || tid.empty()) break;
+            SendToServer("SE|LUAUREF|" + id + "|" + c.str2 + "|" + c.str3 + "|" + c.str4 + "|" + tid);
+            Log("[luau] slot %s.%s -> %s", c.str2.c_str(), c.str3.c_str(), tid.c_str());
+            break;
+        }
+
+        case CmdType::LuauUpdate:
+        {
+            if (c.str2.empty()) break;
+            std::string hex;
+            char hb[4];
+            for (unsigned char ch : c.str3) { snprintf(hb, sizeof(hb), "%02X", ch); hex += hb; }
+            for (size_t i = 0; i < hex.size(); i += 900) SendToServer("SE|LUAUPART|" + c.str2 + "|" + hex.substr(i, 900));
+            if (hex.empty()) SendToServer("SE|LUAUPART|" + c.str2 + "|");
+            SendToServer("SE|LUAUSRC|" + c.str2);
+            Log("[luau] re-sent %s (%zu chars)", c.str2.c_str(), c.str3.size());
             break;
         }
 
@@ -1356,6 +1402,34 @@ const SceneObject* FindLastSpawned()
     return best;
 }
 
+// TEST: count the quest definitions this client holds whose title contains `needle` (ClientProgression,
+// sub_1446849A0(world); Definitions TSet @+336: elements of FAAQuestEntry 0x120 + 8 bytes of hash links).
+int CountQuestDefsImpl(const wchar_t* needle, int* total)
+{
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    void* world = *reinterpret_cast<void**>(base + SDK::Offsets::GWorld);
+    if (!world) return -1;
+    auto* cp = reinterpret_cast<uint8_t*>(reinterpret_cast<void*(__fastcall*)(void*)>(base + 0x46849A0)(world));
+    if (!cp) return -2;
+    const uint8_t* data = *reinterpret_cast<uint8_t* const*>(cp + 336);
+    const int n = *reinterpret_cast<const int32_t*>(cp + 344);
+    int hits = 0;
+    *total = 0;
+    for (int i = 0; data && i < n && i < 8192; ++i)
+    {
+        const uint8_t* e = data + static_cast<size_t>(i) * 0x128;
+        const wchar_t* t = *reinterpret_cast<const wchar_t* const*>(e + 0xF0);
+        const int len = *reinterpret_cast<const int32_t*>(e + 0xF8);
+        if (!t || len <= 0 || len > 256) continue;
+        __try { ++*total; if (wcsstr(t, needle)) ++hits; } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    return hits;
+}
+int CountQuestDefs(const wchar_t* needle, int* total)
+{
+    __try { return CountQuestDefsImpl(needle, total); } __except (EXCEPTION_EXECUTE_HANDLER) { return -3; }
+}
+
 void RunScript(const Snapshot& snap)
 {
     LoadScriptOnce();
@@ -1625,6 +1699,30 @@ void RunScript(const Snapshot& snap)
             (unsigned long long)(exec ? exec - base : 0), f ? (unsigned)f->FunctionFlags : 0);
         return;
     }
+    if (!strcmp(op, "slotscan"))              // slotscan <Type> -- TEST: which listed objects have a <Type> component
+    {
+        Command c{ CmdType::SlotScan }; c.str = rest; State().Push(c);
+        return;
+    }
+    if (!strcmp(op, "slotlist"))              // slotlist -- TEST: log the last slotscan result
+    {
+        Log("[script] slotlist %s: %d object(s)", g_slotCandType.c_str(), (int)g_slotCands.size());
+        for (size_t i = 0; i < g_slotCands.size() && i < 25; ++i)
+        {
+            std::string cls;
+            for (const SceneObject& so : g_lastObjects) if (so.handle == g_slotCands[i].handle) cls = so.className;
+            Log("[script]   %s (%s) comp=%s", cls.c_str(), g_slotCands[i].handle.c_str(), g_slotCands[i].comp.c_str());
+        }
+        return;
+    }
+    if (!strcmp(op, "qdefs"))                 // qdefs <text> -- TEST: how many quest definitions here have <text> in the title
+    {
+        const std::wstring w(rest.begin(), rest.end());
+        int total = 0;
+        const int hits = CountQuestDefs(w.c_str(), &total);
+        Log("[script] qdefs '%s': %d match(es) of %d definition(s)", rest.c_str(), hits, total);
+        return;
+    }
     if (!strcmp(op, "pick") || !strcmp(op, "pickat"))   // pick <Class> -- the instance nearest the camera
     {                                                     // pickat <Class> x y z -- the instance nearest a point
         std::string cls = rest;
@@ -1814,6 +1912,39 @@ void RunScript(const Snapshot& snap)
     if (!strcmp(op, "datadump"))              // datadump -- log the Game data we have
     {
         for (const auto& e : g_data) Log("[script]   data %s (%s) = %s", e.path.c_str(), e.kind.c_str(), e.value.c_str());
+        return;
+    }
+    if (!strcmp(op, "luauref"))               // luauref <script> <slot> <Type> self|<Class> [x y z] -- wire a script slot
+    {                                         // of the last object (as dragging from the Outliner does)
+        char sc[64] = {}, sl[64] = {}, ty[64] = {}, tc[128] = {};
+        Vec3 at = o->location;
+        const int got = sscanf_s(rest.c_str(), "%63s %63s %63s %127s %lf %lf %lf", sc, (unsigned)sizeof(sc), sl, (unsigned)sizeof(sl),
+                                 ty, (unsigned)sizeof(ty), tc, (unsigned)sizeof(tc), &at.x, &at.y, &at.z);
+        if (got < 4) { Log("[script] FAIL luauref: want <script> <slot> <Type> self|<Class> [x y z]"); return; }
+        std::string target;
+        if (!strcmp(tc, "self")) target = o->handle;
+        else if (strcmp(tc, "-") != 0)
+        {
+            double bestD = 1e30;
+            for (const SceneObject& t : g_lastObjects)
+            {
+                if (t.className.find(tc) == std::string::npos || t.handle == o->handle) continue;
+                const double dx = t.location.x - at.x, dy = t.location.y - at.y, dz = t.location.z - at.z;
+                const double d = dx * dx + dy * dy + dz * dz;
+                if (d < bestD) { bestD = d; target = t.handle; }
+            }
+            if (target.empty()) { Log("[script] FAIL luauref: no %s", tc); return; }
+        }
+        std::string script = sc;
+        if (script.find(".luau") == std::string::npos) script += ".luau";
+        Command c{ CmdType::LuauRef }; c.str = o->handle; c.str2 = script; c.str3 = sl; c.str4 = ty; c.str5 = target;
+        State().Push(c);
+        Log("[script] luauref %s.%s -> %s", script.c_str(), sl, target.empty() ? "(cleared)" : target.c_str());
+        return;
+    }
+    if (!strcmp(op, "luaufile"))              // luaufile <name> -- attach RigelScripts/<name>.luau to the last object
+    {
+        Log("[script] luaufile %s: %s", rest.c_str(), ScriptAttachFile(o->handle, rest) ? "attached" : "FAIL no such file");
         return;
     }
     if (!strcmp(op, "luau"))                  // luau <name> <source...> -- attach a script to the last object
@@ -2170,7 +2301,7 @@ void PumpImpl()
     LogReplicationChanges(snap);
     RunScript(snap);
 
-    // The editor camera follows state: it is the view while editing with the UI up, and INSERT or Stop
+    // The editor camera follows state: it is the view while editing with the UI up, and F12 or Stop
     // Editing hands the player their own view back. A travel destroys the camera actor, so a dead actor
     // just re-arms activation.
     if (Cam().active && !ObjectAlive(g_cam.actor)) Cam().active = false;
@@ -2215,6 +2346,8 @@ void PumpImpl()
     snap.dataHandle = g_dataHandle;
     snap.data = g_data;
     snap.dataSerial = g_dataSerial;
+    snap.slotCandType = g_slotCandType;
+    snap.slotCands = g_slotCands;
     State().Publish(std::move(snap));
     HandleCommands();
 }
@@ -2263,6 +2396,17 @@ void HandleServerMessage(const wchar_t* w)
     for (int i = 0; w[i] && i < 60000; ++i) msg.push_back(static_cast<char>(w[i] < 128 ? w[i] : '?'));
     if (msg.rfind("SE|PROP|", 0) == 0) ApplyRemoteProp(msg);
     else if (msg.rfind("SE|NOTE|", 0) == 0) { Notes().Set(msg.substr(8)); Log("[note] %s", msg.substr(8).c_str()); }
+    else if (msg.rfind("SE|ERR|", 0) == 0)
+    {
+        // SE|ERR|<title>|<what happened and how to fix it>
+        const std::string rest = msg.substr(7);
+        const size_t bar = rest.find('|');
+        ProblemBox::Item it;
+        it.title = bar == std::string::npos ? std::string("Problem") : rest.substr(0, bar);
+        it.text = bar == std::string::npos ? rest : rest.substr(bar + 1);
+        Problems().Push(it);
+        Log("[error] %s: %s", it.title.c_str(), it.text.c_str());
+    }
     else if (msg.rfind("SE|LVLIST|", 0) == 0)
     {
         // SE|LVLIST|<loaded here ;-separated>|<name\tautoload\tloaded\tupdated\tsize>\x1E...

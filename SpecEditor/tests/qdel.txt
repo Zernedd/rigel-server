@@ -1,0 +1,16 @@
+log QD start
+enter
+wait 3
+qpub delA 250 0 Delete Me A
+qpub delB 250 0 Keep Me B
+wait 10
+qdefs Delete Me
+qdefs Keep Me
+log QD deleting
+raw SE|QDEL|delA
+wait 10
+qdefs Delete Me
+qdefs Keep Me
+raw SE|QLIST
+wait 3
+log QD done

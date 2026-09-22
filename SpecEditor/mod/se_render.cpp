@@ -30,7 +30,7 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM,
 namespace se {
 
 #ifdef RIGEL_EOS
-bool g_uiVisible = false;   // published Rift build: hidden until INSERT, so ordinary spectators never see it
+bool g_uiVisible = false;   // published Rift build: hidden until F12, so ordinary spectators never see it
 #else
 bool g_uiVisible = true;
 #endif
@@ -206,7 +206,7 @@ bool IsKeyDownMsg(UINT m) { return m == WM_KEYDOWN || m == WM_SYSKEYDOWN || m ==
 
 LRESULT __stdcall WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
-    if (msg == WM_KEYDOWN && wp == VK_INSERT) { g_uiVisible = !g_uiVisible; return 0; }
+    if (msg == WM_KEYDOWN && (wp == VK_F12 || wp == VK_INSERT)) { g_uiVisible = !g_uiVisible; se::Log("[ui] editor %s (%s)", g_uiVisible ? "shown" : "hidden", wp == VK_F12 ? "F12" : "Insert"); return 0; }   // F12 (Insert also works)
     if (!g_uiVisible || !g_imguiReady)
     {
         if (Cam().looking) EndLook();

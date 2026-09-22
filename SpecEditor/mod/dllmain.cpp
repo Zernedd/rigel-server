@@ -52,6 +52,12 @@ Notice& Notes()
     return n;
 }
 
+ProblemBox& Problems()
+{
+    static ProblemBox b;
+    return b;
+}
+
 DWORD g_mainThread = 0;
 
 void Log(const char* fmt, ...)
@@ -170,7 +176,7 @@ DWORD WINAPI Worker(LPVOID)
     if (!se::InstallGameHook())
         se::Log("[boot] game hook not installed");
 
-    se::Log("[boot] ready. INSERT toggles the editor UI.");
+    se::Log("[boot] ready. F12 (or Insert) toggles the editor UI.");
     return 0;
 }
 

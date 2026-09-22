@@ -1,0 +1,10 @@
+log E2 start
+enter
+wait 3
+spawnat LE_BP_LightSwitch_C -300 -1000 -27000 0
+wait 8
+luaufile BadRuntime
+wait 15
+log E2 alive
+wait 5
+log E2 done

@@ -1,0 +1,8 @@
+log QE start
+enter
+wait 3
+qpub delC 250 0 Delete Me C
+wait 50
+raw SE|QDEL|delC
+wait 5
+log QE done

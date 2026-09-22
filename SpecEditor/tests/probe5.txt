@@ -1,0 +1,18 @@
+log P5 start
+enter
+wait 3
+raw SE|SBTYPES
+slotscan PhysicalComponent
+wait 2
+slotlist
+spawnat BP_DebugCube_C 300 -3400 -27000 0
+wait 8
+spawnat LE_BP_LightSwitch_C -300 -3400 -27000 0
+wait 8
+luaufile BadSyntax
+wait 3
+luaufile LightSwitch
+wait 8
+luauref LightSwitch Target PhysicalComponent BP_DebugCube_C 300 -3400 -27000
+wait 5
+log P5 done

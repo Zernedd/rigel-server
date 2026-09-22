@@ -1,0 +1,6 @@
+log J start
+enter
+wait 10
+log J alive
+wait 3
+log J done

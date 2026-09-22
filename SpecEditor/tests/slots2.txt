@@ -1,0 +1,18 @@
+log S2 start
+enter
+wait 3
+spawnat BP_GolfTee_C 300 -2600 -27000 0
+wait 8
+spawnat LE_BP_LightSwitch_C -300 -2600 -27000 0
+wait 8
+luaufile LightSwitch
+wait 8
+luauref LightSwitch Switch ToggleableComponent self
+wait 6
+luauref LightSwitch Target PhysicalComponent BP_GolfTee_C 300 -2600 -27000
+wait 10
+toggle off
+wait 4
+toggle on
+wait 4
+log S2 done

@@ -1,0 +1,22 @@
+log E3 start
+enter
+wait 3
+spawnat LE_BP_LightSwitch_C -300 -600 -27000 0
+wait 8
+luaufile BadListen
+wait 8
+luauref BadListen Switch ToggleableComponent self
+wait 8
+toggle on
+wait 3
+toggle off
+wait 3
+toggle on
+wait 5
+spawnat LE_BP_LightSwitch_C -300 -200 -27000 0
+wait 8
+luaufile BadSyntax
+wait 10
+log E3 alive
+wait 3
+log E3 done

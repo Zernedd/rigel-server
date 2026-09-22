@@ -276,8 +276,11 @@ static bool SbOwnedDelete(const std::string& ident);   // below
 static std::string g_sbSpawnCls;   // the editor class of the sandbox spawn in flight (for SbOwned)
 static std::string g_sbSpawnPath;  // ...and the palette path it was asked for (saved levels reload by it)
 static std::vector<std::string> g_sbPendingScripts;   // custom Luau script names for the spawn in flight
+static std::string   g_sbForceIdx;                  // respawn under this idx (a rebuilt scripted object keeps its id)
+static SDK::UObject* g_sbForceLgm = nullptr;         // host the spawn in flight in this gamemode (script references)
 static std::string g_lvLoading;    // the saved level whose content is being created right now ("" = editor work)
 static void SeLvRecordPlain(SDK::AActor* a, const std::string& path);   // below (saved levels)
+static std::string SeLvIdent(SDK::AActor* a);                            // below (saved levels)
 static int  SeBroadcast(const std::string& msg, SDK::UObject* pc);   // below
 
 // The player controller behind a command's context object: the controller itself (Vivox transport) or a
@@ -627,6 +630,9 @@ struct SeAuthoredQuest
     std::vector<uint32_t> subQuests;     // 4 per GUID
     std::string  level;                  // saved level that owns it ("" = editor work)
     std::string  childIds;               // group: the quest ids in it, ';'-separated
+    // Deleted from the editor (SE|QDEL) or with its level. Kept, not erased: every row's FStrings point
+    // into its quest's own strings, and erasing from the middle of the deque would move them.
+    bool         deleted = false;
 
     // Checkpoint run, driven by the server (see SeQuestTick): reach each checkpoint in order.
     std::vector<SDK::AActor*> checkpoints;
@@ -723,12 +729,15 @@ static bool SeBuildRow(SeAuthoredQuest& q, const std::string& glyph, int repetit
 static void SeSendAuthored(void* comp)
 {
     if (!comp || g_seAuthored.empty() || !QSendSet_Orig) return;
+    bool anyDeleted = false;
+    for (const auto& q : g_seAuthored) anyDeleted |= q.deleted;
     g_seRowsBuf.assign(g_seAuthored.size() * 0x120, 0);
     int n = 0;
     g_seFoldersBuf.clear();
     int nf = 0;
     for (const auto& q : g_seAuthored)
     {
+        if (q.deleted) continue;
         if (q.isFolder)
         {
             g_seFoldersBuf.insert(g_seFoldersBuf.end(), q.folder, q.folder + sizeof(q.folder));
@@ -739,7 +748,7 @@ static void SeSendAuthored(void* comp)
         memcpy(g_seRowsBuf.data() + static_cast<size_t>(n) * 0x120, q.row, 0x120);
         ++n;
     }
-    if (!n && !nf) return;
+    if (!n && !nf && !anyDeleted) return;   // (all deleted: an empty bundle clears the player's list)
     memset(g_seBundle, 0, sizeof(g_seBundle));
     *reinterpret_cast<const wchar_t**>(g_seBundle) = kSeBundleId;
     *reinterpret_cast<int32_t*>(g_seBundle + 8)  = static_cast<int32_t>(wcslen(kSeBundleId) + 1);
@@ -790,6 +799,7 @@ static void SeQuestList(SDK::UObject* ctx)
     };
     for (const auto& q : g_seAuthored)
     {
+        if (q.deleted) continue;
         char hx[40];
         snprintf(hx, sizeof(hx), "%08X%08X%08X%08X", q.id[0], q.id[1], q.id[2], q.id[3]);
         add(hx, std::string(q.title.begin(), q.title.end()) + " (editor)", q.glyph);
@@ -865,6 +875,7 @@ static void SeQuest(const std::string& questId, const std::string& title, const 
     if (!q) { g_seAuthored.emplace_back(); q = &g_seAuthored.back(); }
     memcpy(q->id, id, sizeof(id));
     q->questId = questId;
+    q->deleted = false;
     q->title.assign(title.begin(), title.end());
     q->desc = description.empty() ? q->title : std::wstring(description.begin(), description.end());
     q->glyph = glyph;
@@ -880,7 +891,7 @@ static void SeQuest(const std::string& questId, const std::string& title, const 
     {
         if (c.empty() || c == questId) continue;
         bool sent = false;                              // only list children players actually receive
-        for (const auto& e : g_seAuthored) if (e.questId == c) { sent = true; break; }
+        for (const auto& e : g_seAuthored) if (e.questId == c && !e.deleted) { sent = true; break; }
         if (!sent) continue;
         uint32_t cg[4];
         SeQuestGuid(c, cg);
@@ -932,6 +943,82 @@ static void SeQuest(const std::string& questId, const std::string& title, const 
           built ? "built" : "WAITING FOR TEMPLATE (no player has received quests yet)",
           static_cast<int>(q->checkpoints.size()), missing, q->radius, q->timeLimit, q->children.size() / 20, sent);
     (void)bound;
+}
+
+// Take a quest out: it stops being sent and tracked, its checkpoints stop binding, and any group listing
+// it drops it. The caller re-sends the bundle (SeQuestResendAll).
+static void SeQuestRemove(SeAuthoredQuest& q)
+{
+    q.deleted = true;
+    q.checkpoints.clear();
+    q.runs.clear();
+    q.completedBy.clear();
+    for (auto& f : g_seAuthored)
+    {
+        if (!f.isFolder || f.deleted) continue;
+        for (size_t i = 0; i + 4 <= f.subQuests.size();)
+            if (memcmp(&f.subQuests[i], q.id, 16) == 0) f.subQuests.erase(f.subQuests.begin() + i, f.subQuests.begin() + i + 4);
+            else i += 4;
+        SetTArray(f.folder + 0x48, f.subQuests.data(), static_cast<int>(f.subQuests.size() / 4));
+    }
+}
+// Client_SetQuests(bundle, bRemoving=true) with the deleted rows: the game's own "take these out" path
+// (seen on the wire as removing=1). The remaining quests are re-sent afterwards either way.
+static void SeSendRemoval(void* comp, const std::vector<const SeAuthoredQuest*>& gone)
+{
+    if (!comp || gone.empty() || !QSendSet_Orig) return;
+    static std::vector<uint8_t> rows, folders;
+    static uint8_t bundle[0x40];
+    rows.clear(); folders.clear();
+    int n = 0, nf = 0;
+    for (const SeAuthoredQuest* q : gone)
+    {
+        if (q->isFolder) { folders.insert(folders.end(), q->folder, q->folder + sizeof(q->folder)); ++nf; continue; }
+        if (!*reinterpret_cast<const void* const*>(q->row + 0xF0)) continue;
+        rows.insert(rows.end(), q->row, q->row + 0x120); ++n;
+    }
+    if (!n && !nf) return;
+    memset(bundle, 0, sizeof(bundle));
+    *reinterpret_cast<const wchar_t**>(bundle) = kSeBundleId;
+    *reinterpret_cast<int32_t*>(bundle + 8)  = static_cast<int32_t>(wcslen(kSeBundleId) + 1);
+    *reinterpret_cast<int32_t*>(bundle + 12) = static_cast<int32_t>(wcslen(kSeBundleId) + 1);
+    SetTArray(bundle + 0x20, rows.data(), n);
+    SetTArray(bundle + 0x30, folders.data(), nf);
+    __try { QSendSet_Orig(comp, bundle, 1); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { HxLog("[HalcyonA2][SPECEDIT] quest removal FAULTED\n"); }
+}
+static int SeQuestResendAll(const std::vector<const SeAuthoredQuest*>& gone = {})
+{
+    int sent = 0;
+    for (auto* c : g_seQuestComps)
+        if (SeAlive(c)) { SeSendRemoval(c, gone); SeSendAuthored(c); ++sent; }
+    return sent;
+}
+static void SeCoinRunRemove(const std::string& questRef);   // below
+
+// SE|QDEL|<questId>: the editor deleted a quest it published.
+static void SeQuestDelete(SDK::UObject* ctx, const std::string& questId)
+{
+    SDK::UObject* caller = SeCallerPC(ctx);
+    SeAuthoredQuest* q = nullptr;
+    for (auto& e : g_seAuthored)
+    {
+        if (e.deleted) continue;
+        char hx[40];
+        snprintf(hx, sizeof(hx), "%08X%08X%08X%08X", e.id[0], e.id[1], e.id[2], e.id[3]);
+        if (e.questId == questId || _stricmp(hx, questId.c_str()) == 0) { q = &e; break; }   // by id or GUID
+    }
+    SeCoinRunRemove(q ? q->questId : questId);
+    if (!q)
+    {
+        HxLog("[HalcyonA2][SPECEDIT] QDEL %s: not a published quest (coin run only, if any)\n", questId.c_str());
+        if (caller) SeBroadcast("SE|QLIST", caller);
+        return;
+    }
+    SeQuestRemove(*q);
+    const int sent = SeQuestResendAll({ q });
+    HxLog("[HalcyonA2][SPECEDIT] QDEL %s: removed, re-sent to %d player(s)\n", questId.c_str(), sent);
+    if (caller) SeQuestList(ctx);
 }
 
 // ---- checkpoint runs (server-driven, so they work for every player, Quest included) -----------------
@@ -1000,7 +1087,7 @@ static void SeQuestTick()
 
         for (auto& q : g_seAuthored)
         {
-            if (q.checkpoints.empty()) continue;
+            if (q.deleted || q.checkpoints.empty()) continue;
             if (std::find(q.completedBy.begin(), q.completedBy.end(), who) != q.completedBy.end()) continue;
             auto& run = q.runs[e.idx];
             if (run.doneAt && now - run.doneAt < 15000) continue;                        // just finished
@@ -1136,7 +1223,7 @@ namespace SeSb {
 
 // A serverData value we want on an object: in "Properties" (typed, 02 01 <desc> <value>) or directly under
 // serverData (e.g. a red-coin run's CoinTransforms_v2). Queued for the next spawn, or written live.
-struct SbLeaf { bool inProps; std::string name; std::vector<uint8_t> blob; };
+struct SbLeaf { bool inProps; std::string name; std::vector<uint8_t> blob; bool inRefs = false; };   // inRefs: references container
 static std::vector<SbLeaf> g_sbPendingLeaves;
 
 static std::vector<uint8_t> SbBlobFloat(float v)
@@ -1349,6 +1436,7 @@ struct SbOwned
     std::string uniqueId, path, level;                  // saved levels: prefab type, palette path, owning level
     std::vector<std::array<std::string, 3>> data;       // Game-data edits {path, kind, value}, replayed on load
     std::vector<std::pair<std::string, std::string>> scripts;   // custom Luau {name, source}
+    std::vector<std::array<std::string, 4>> refs;                // script slots {script, slot, target idx, key}
 };
 static std::vector<SbOwned> g_sbOwned;
 
@@ -1823,8 +1911,11 @@ static void SbLgmTreeCore(std::string* out)
     __try { SbLgmTreeImpl(out); } __except (EXCEPTION_EXECUTE_HANDLER) { out->append("(fault)"); }
 }
 // SE|LGMDESC|<slot name> (local test): the component/script entries of every object in that gamemode.
-static void SbLgmDescImpl(const std::string& slot, std::string* out)
+static void SbTreeWalk(uint8_t* n, int depth, std::string& out);   // below
+static void SbLgmDescImpl(const std::string& slot0, std::string* out)
 {
+    const bool all = slot0.size() > 4 && slot0.compare(slot0.size() - 4, 4, ":all") == 0;   // every object, desc only
+    const std::string slot = all ? slot0.substr(0, slot0.size() - 4) : slot0;
     auto* cls = SDK::UObject::FindClassFast("LoadedGameMode");
     const int32_t n = SDK::UObject::GObjects->Num();
     for (int32_t i = 0; cls && i < n; ++i)
@@ -1842,7 +1933,12 @@ static void SbLgmDescImpl(const std::string& slot, std::string* out)
             if (!arr[k]) continue;
             char buf[2048];
             SbDescDumpCore(reinterpret_cast<uintptr_t>(arr[k]), buf, sizeof(buf));
-            if (strstr(buf, "script=") && !strstr(buf, "comps=0")) *out += std::string(buf) + "\n";
+            if (all) { *out += std::string(buf) + "\n"; continue; }
+            if (strstr(buf, "script=") && !strstr(buf, "comps=0"))
+            {
+                *out += std::string(buf) + "\n";
+                SbTreeWalk(arr[k], 0, *out);            // incl. references / outgoingConnections
+            }
         }
     }
 }
@@ -1917,7 +2013,7 @@ static void SbTreeWalk(uint8_t* n, int depth, std::string& out)
     out += line + "\n";
     if (type == 9)                                     // object node: its sub-containers are fields
     {
-        for (int off : { 552, 560 })                    // serverData, gameData
+        for (int off : { 552, 560, 608, 616 })          // serverData, gameData, outgoingConnections, references
         {
             uint8_t* c = *reinterpret_cast<uint8_t**>(n + off);
             if (!c || IsBadReadPtr(c, 160) || c[24] > 12) continue;
@@ -2135,7 +2231,7 @@ static bool SbWriteLeaves(SDK::AActor* a, const std::vector<SbLeaf>& leaves)
 static void* g_sbDefBp = nullptr;      // set around SbAddCore: the prefab's Blueprint class (defaults fill)
 static int   g_sbDefResult = 0;
 static void* g_sbLbClass = nullptr;    // ULuauBehavior (looked up outside the SEH frame)
-struct SbLeafPod { bool inProps; uint64_t props, name; const uint8_t* blob; int len; };
+struct SbLeafPod { bool inProps; uint64_t props, name; const uint8_t* blob; int len; bool inRefs; };
 static SbLeafPod g_sbLeafArr[16];      // POD view of g_sbPendingLeaves for the SEH core
 static size_t    g_sbLeafCount = 0;
 static int SbAddCore(void* lgmHandle, uint64_t objectsName, uint8_t* desc, uint64_t idxName)
@@ -2160,7 +2256,8 @@ static int SbAddCore(void* lgmHandle, uint64_t objectsName, uint8_t* desc, uint6
         g_sbDefResult = g_sbDefBp ? SbDefaultsCore(static_cast<uint8_t*>(node), g_sbDefBp, g_sbLbClass) : 0;
         if (g_sbDefBp && g_sbDefResult < 0) return -200 + g_sbDefResult;   // never attach a half-built object
         for (size_t i = 0; i < g_sbLeafCount; ++i)
-            SbOfflineLeafCore(*reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(node) + 552), g_sbLeafArr[i].inProps,
+            SbOfflineLeafCore(*reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(node) + (g_sbLeafArr[i].inRefs ? 616 : 552)),
+                              g_sbLeafArr[i].inRefs ? false : g_sbLeafArr[i].inProps,
                               g_sbLeafArr[i].props, g_sbLeafArr[i].name, g_sbLeafArr[i].blob, g_sbLeafArr[i].len);
         void* nodeRef = node;
         reinterpret_cast<void(__fastcall*)(uint8_t*, void**)>(base + SeSb::AddChild)(iter, &nodeRef);
@@ -2266,7 +2363,7 @@ static SDK::UObject* SbHostGamemode(const std::string& uniqueId)
 static std::string SeSandboxSpawn(const std::string& uniqueId, const double* loc, const double* rot, const double* scl)
 {
     SDK::UObject* sb = SbEngine();
-    SDK::UObject* lgm = SbHostGamemode(uniqueId);
+    SDK::UObject* lgm = (g_sbForceLgm && SeAlive(g_sbForceLgm)) ? g_sbForceLgm : SbHostGamemode(uniqueId);
     if (!sb || !lgm) { HxLog("[HalcyonA2][SPECEDIT] sandbox spawn: sandbox=%p gamemode=%p\n", sb, lgm); return std::string(); }
     SDK::AActor* slot = *reinterpret_cast<SDK::AActor**>(reinterpret_cast<uintptr_t>(lgm) + 0x320);
     SDK::FVector relLoc{ loc[0], loc[1], loc[2] };
@@ -2279,7 +2376,21 @@ static std::string SeSandboxSpawn(const std::string& uniqueId, const double* loc
     }
     static ULONGLONG s_seq = 0;
     wchar_t idxw[64];
-    swprintf_s(idxw, L"se_%llu_%llu", static_cast<unsigned long long>(GetTickCount64()), static_cast<unsigned long long>(++s_seq));
+    {
+        // A GUID named for the hosting slot: "%08X(slot)-BBBB-BBBB-CCCC-CCCCDDDDDDDD". Script references
+        // store parts 2-4 and rebuild part 1 from the slot, so only ids shaped like this can be referenced.
+        const uint32_t slotNo = *reinterpret_cast<const uint32_t*>(reinterpret_cast<uintptr_t>(lgm) + 0x118);
+        LARGE_INTEGER qpc; QueryPerformanceCounter(&qpc);
+        uint64_t x = qpc.QuadPart ^ (GetTickCount64() << 20) ^ (++s_seq * 0x9E3779B97F4A7C15ULL);
+        auto next = [&]() { x ^= x << 13; x ^= x >> 7; x ^= x << 17; return static_cast<uint32_t>(x); };
+        const uint32_t b = next(), c = next(), d = next();
+        swprintf_s(idxw, L"%08X-%04X-%04X-%04X-%04X%08X", slotNo, b >> 16, b & 0xFFFF, c >> 16, c & 0xFFFF, d);
+        // A rebuild keeps the object's id, so script slots pointing at it (its own included) stay valid.
+        char want[12];
+        snprintf(want, sizeof(want), "%08X-", slotNo);
+        if (g_sbForceIdx.size() == 36 && g_sbForceIdx.compare(0, 9, want) == 0)
+            for (size_t k = 0; k <= g_sbForceIdx.size(); ++k) idxw[k] = static_cast<wchar_t>(k < g_sbForceIdx.size() ? g_sbForceIdx[k] : 0);
+    }
     alignas(16) static uint8_t desc[0x400];
     memset(desc, 0, sizeof(desc));
     reinterpret_cast<void(__fastcall*)(uint8_t*)>(GetBase() + SeSb::DescInit)(desc);
@@ -2313,7 +2424,7 @@ static std::string SeSandboxSpawn(const std::string& uniqueId, const double* loc
     for (const auto& l : leaves)
         if (g_sbLeafCount < 16)
             g_sbLeafArr[g_sbLeafCount++] = { l.inProps, NvNameBits(NvName("Properties")), NvNameBits(NvName(l.name)),
-                                             l.blob.data(), static_cast<int>(l.blob.size()) };
+                                             l.blob.data(), static_cast<int>(l.blob.size()), l.inRefs };
     if (!g_sbDefBp)
     {
         HxLog("[HalcyonA2][SPECEDIT] sandbox spawn %s: no prefab definition -- refusing (a half-built object crashes joiners)\n", uniqueId.c_str());
@@ -2454,6 +2565,19 @@ static void SeCoinRun(const std::string& ident, const std::string& locs, const s
     const bool ok = SbWriteLeaves(a, leaves);
     HxLog("[HalcyonA2][SPECEDIT] COINRUN update %s: %zu coin(s), %.0fs, quest %s -> %s\n", a->GetName().c_str(), rel.size(), dur,
           questHex.c_str(), ok ? "ok" : "FAILED");
+}
+
+// A deleted quest's red coin run goes too: the run and its start button, and its saved-level record.
+static void SeCoinRunRemove(const std::string& questRef)
+{
+    if (auto old = g_seCoinRuns.find(questRef); old != g_seCoinRuns.end())
+    {
+        for (const std::string& idx : { old->second.first, old->second.second })
+            if (SDK::AActor* prev = idx.empty() ? nullptr : SbActorForIdx(idx)) SeSandboxDelete(prev);
+        g_seCoinRuns.erase(old);
+        HxLog("[HalcyonA2][SPECEDIT] coin run for %s removed\n", questRef.c_str());
+    }
+    g_lvRuns.erase(std::remove_if(g_lvRuns.begin(), g_lvRuns.end(), [&](const SeLvRun& r) { return r.questRef == questRef; }), g_lvRuns.end());
 }
 
 
@@ -2659,6 +2783,34 @@ static void SbListCore(uint8_t* node, std::string* out)
     __except (EXCEPTION_EXECUTE_HANDLER) { out->append("!fault\n"); }
 }
 
+// The Luau scripts an object carries: its Desc component entries (+160, 48 bytes each) with a script FString
+// at +24 -- the game's own objects (TKBGolf's course Cube -> Course.luau) and ours alike.
+static void SbScriptsImpl(uintptr_t node, std::vector<std::string>* out)
+{
+    const uint8_t* d = reinterpret_cast<const uint8_t*>(reinterpret_cast<void*(__fastcall*)(uintptr_t)>(GetBase() + SeSb::NodeDesc)(node));
+    if (!d) return;
+    const uint8_t* comps = *reinterpret_cast<uint8_t* const*>(d + 160);
+    const int nc = *reinterpret_cast<const int32_t*>(d + 168);
+    for (int i = 0; comps && i < nc && i < 32; ++i)
+    {
+        const wchar_t* w = *reinterpret_cast<wchar_t* const*>(comps + i * 48 + 24);
+        if (!w || !w[0]) continue;
+        std::string n;
+        for (int k = 0; w[k] && k < 120; ++k) n.push_back(w[k] < 128 ? static_cast<char>(w[k]) : '?');
+        out->push_back(n);
+    }
+}
+static void SbScriptsCore(uintptr_t node, std::vector<std::string>* out)
+{
+    __try { SbScriptsImpl(node, out); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+static std::vector<std::string> SbObjectScripts(uint8_t* handle)
+{
+    std::vector<std::string> v;
+    if (const uintptr_t node = SbNodeOf(handle)) SbScriptsCore(node, &v);
+    return v;
+}
+
 static void SeSbData(SDK::UObject* ctx, const std::string& ident)
 {
     SDK::AActor* a = SeFindEditorActor(ident);
@@ -2718,6 +2870,10 @@ static void SeSbData(SDK::UObject* ctx, const std::string& ident)
         NvWalkRelease(&w);
         add((f[0] == "S" ? "sd/" : "gd/") + name, type == NvNative::TBool ? "bool" : type == NvNative::TNumber ? "num" : "str", value);
     }
+    for (const auto& sn : SbObjectScripts(handle)) add("script/" + sn, "script", sn);
+    if (SbOwned* own = SbOwnedByIdx(FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(pc) + 0x248))))
+        for (const auto& r : own->refs)
+            if (SDK::AActor* t = SbActorForIdx(r[2])) add("slot/" + r[0] + "/" + r[1], "slot", SeLvIdent(t));
     SeBroadcast("SE|SBDATA|" + ident + "|" + entries, caller);
     HxLog("[HalcyonA2][SPECEDIT] SBDATA %s: %zu byte(s) sent\n", a->GetName().c_str(), entries.size());
 }
@@ -2971,10 +3127,13 @@ static void SeReplayEdits(SDK::UObject* pc)
 // attaches its Luau (TKBGolf's Course.luau sits on a Cube exactly like this).
 static std::unordered_map<std::string, std::string> g_luauParts;
 static std::string SeLvIdent(SDK::AActor* a);   // below (saved levels)
-static std::string SeLuauName(const std::string& raw)
+static std::vector<SbLeaf> SbRefLeaves(const std::vector<std::array<std::string, 4>>& refs);   // below (script slots)
+static std::string SeLuauName(const std::string& raw0)
 {
+    std::string raw = raw0;
+    if (raw.size() > 5 && _stricmp(raw.c_str() + raw.size() - 5, ".luau") == 0) raw.resize(raw.size() - 5);
     std::string n;
-    for (char c : raw) if (isalnum(static_cast<unsigned char>(c)) || c == '_') n += c;
+    for (char c : raw) if (isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '.' || c == '-') n += c;
     if (n.empty() || n.size() > 48) return std::string();
     return n + ".luau";
 }
@@ -3010,9 +3169,28 @@ static int SeLuauNodeCore(void* lgmHandle, uint64_t scriptsBits, uint64_t nameBi
     }
     __except (EXCEPTION_EXECUTE_HANDLER) { return -20; }
 }
-static bool SeLuauPutSource(SDK::UObject* lgm, const std::string& name, const std::string& src)
+// Every editor script gets this appended: the lifecycle functions the game calls run inside pcall, so a
+// runtime error (a nil slot, a typo'd method) is logged and the object keeps working. Without it an error in
+// BeginPlay left the object half-built and every client -- joiners included -- crashed on it moments later.
+// Appended (not prepended) so the line numbers in error messages still match the user's file.
+static const char kSeLuauGuard[] = R"LUAU(
+
+-- [Rigel] safety net added by the server: errors are reported, never fatal
+local __rigelWrap = function(name: string, f: any): any
+	return function(...)
+		local ok, err = pcall(f, ...)
+		if not ok then warn("[RigelError] " .. name .. ": " .. tostring(err)) end
+	end
+end
+if type(BeginPlay) == "function" then BeginPlay = __rigelWrap("BeginPlay", BeginPlay) end
+if type(EndPlay) == "function" then EndPlay = __rigelWrap("EndPlay", EndPlay) end
+if type(Tick) == "function" then Tick = __rigelWrap("Tick", Tick) end
+)LUAU";
+
+static bool SeLuauPutSource(SDK::UObject* lgm, const std::string& name, const std::string& src0)
 {
     if (!lgm || !SeAlive(lgm)) return false;
+    const std::string src = src0.find("[Rigel] safety net") == std::string::npos ? src0 + kSeLuauGuard : src0;
     std::wstring w;
     if (!src.empty())
     {
@@ -3045,6 +3223,9 @@ static std::string SeLuauAttach(SDK::AActor* a, const std::string& name, const s
     std::vector<std::string> names;
     for (const auto& s2 : keep.scripts) names.push_back(s2.first);
     g_sbPendingScripts = names;
+    g_sbPendingLeaves = SbRefLeaves(keep.refs);             // script slots -> references/<script> blobs
+    g_sbForceLgm = keep.lgm;                                // stay in the same slot (targets live there)
+    g_sbForceIdx = oldIdx;                                  // and keep the id (slots that point at it)
     const std::string prevLoading = g_lvLoading;
     g_lvLoading = keep.level;
     g_sbSpawnCls = keep.cls; g_sbSpawnPath = keep.path;
@@ -3052,7 +3233,9 @@ static std::string SeLuauAttach(SDK::AActor* a, const std::string& name, const s
     g_sbSpawnCls.clear(); g_sbSpawnPath.clear();
     g_lvLoading = prevLoading;
     g_sbPendingScripts.clear();
-    if (SbOwned* n = idx.empty() ? nullptr : SbOwnedByIdx(idx)) { n->data = keep.data; n->scripts = keep.scripts; }
+    g_sbForceLgm = nullptr;
+    g_sbForceIdx.clear();
+    if (SbOwned* n = idx.empty() ? nullptr : SbOwnedByIdx(idx)) { n->data = keep.data; n->scripts = keep.scripts; n->refs = keep.refs; }
     if (!idx.empty()) if (SDK::AActor* na = SbActorForIdx(idx)) for (const auto& d : keep.data) SeSbSet(nullptr, SeLvIdent(na), d[0], d[1], d[2]);
     HxLog("[HalcyonA2][SPECEDIT] luau %s attached: %s -> %s\n", name.c_str(), oldIdx.c_str(), idx.empty() ? "FAILED" : idx.c_str());
     return idx;
@@ -3065,6 +3248,30 @@ static void SeLuauPart(const std::string& rawName, const std::string& hex)
     if (buf.size() > 200000) return;
     for (size_t i = 0; i + 1 < hex.size(); i += 2) buf.push_back(static_cast<char>(strtoul(hex.substr(i, 2).c_str(), nullptr, 16)));
 }
+// SE|LUAUSRC|<name> -- a script file was saved in VS Code: re-send it to every object we placed that runs
+// it (each is rebuilt to pick up the new code). Sent after the LUAUPART chunks, like SE|LUAU.
+static void SeLuauUpdateAll(SDK::UObject* ctx, const std::string& rawName)
+{
+    SDK::UObject* caller = SeCallerPC(ctx);
+    const std::string name = SeLuauName(rawName);
+    auto it = g_luauParts.find(name);
+    if (name.empty() || it == g_luauParts.end()) return;
+    const std::string src = it->second;
+    g_luauParts.erase(it);
+    std::vector<std::string> idxs;
+    for (const auto& o : g_sbOwned)
+        for (const auto& sc : o.scripts) if (sc.first == name) { idxs.push_back(o.idx); break; }
+    int n = 0;
+    for (const auto& idx : idxs)
+    {
+        SDK::AActor* a = SbActorForIdx(idx);
+        SDK::UObject* pc = a ? SbPrefabOf(a) : nullptr;
+        SDK::UObject* lgm = pc ? *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(pc) + 0x440) : nullptr;
+        if (lgm && SeLuauPutSource(lgm, name, src) && !SeLuauAttach(a, name, src).empty()) ++n;
+    }
+    if (caller) SeBroadcast("SE|NOTE|" + name + " updated on " + std::to_string(n) + " object(s).", caller);
+}
+
 static void SeLuau(SDK::UObject* ctx, const std::string& ident, const std::string& rawName)
 {
     SDK::UObject* caller = SeCallerPC(ctx);
@@ -3080,9 +3287,201 @@ static void SeLuau(SDK::UObject* ctx, const std::string& ident, const std::strin
     const std::string src = it->second;
     g_luauParts.erase(it);
     SDK::UObject* lgm = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(pc) + 0x440);
+    SbOwned* own = SbOwnedByIdx(FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(pc) + 0x248)));
+    if (!own)
+    {
+        // Not ours (a station object): update the source everyone compiles; the object's already-built
+        // script component keeps the old code until the object is rebuilt (rejoin / gamemode reload).
+        const bool put = SeLuauPutSource(lgm, name, src);
+        if (caller) SeBroadcast(put ? "SE|NOTE|Updated " + name + " on the server. Players who join from now get the new code; players "
+                                      "already here keep running the old copy until they rejoin." :
+                                      "SE|NOTE|Updating " + name + " FAILED - see the server log.", caller);
+        return;
+    }
     const bool ok = SeLuauPutSource(lgm, name, src) && !SeLuauAttach(a, name, src).empty();
     if (caller) SeBroadcast(ok ? "SE|NOTE|Script " + name + " is running on the object for everyone (it was rebuilt to pick it up)." :
                                  "SE|NOTE|Attaching " + name + " FAILED - see the server log.", caller);
+}
+
+
+// ---- Script slots (object references) ------------------------------------------------------------------
+// A script declares typed slots (`local Target: PhysicalComponent = nil`); the editor fills one by dropping
+// an object on it. The game binds them from the scripted object's references/<script> blob:
+//   02 01 00 00 00 | int32 count | per slot: 2D 00, FString slot, 02, uint32 B, C, D (target GUID parts
+//   2-4; part 1 = the slot number), FString component key (Luau type minus "Component", first letter low).
+// References are read when the object is built, so wiring rebuilds the scripted object; the target must
+// live in the same gamemode slot (it is moved there if not).
+static bool SbGuidParts(const std::string& idx, uint32_t* b, uint32_t* c, uint32_t* d)
+{
+    unsigned a1, b1, b2, c1, c2, dd;
+    if (idx.size() != 36 || sscanf_s(idx.c_str(), "%8x-%4x-%4x-%4x-%4x%8x", &a1, &b1, &b2, &c1, &c2, &dd) != 6) return false;
+    *b = (b1 << 16) | b2; *c = (c1 << 16) | c2; *d = dd;
+    return true;
+}
+static std::vector<SbLeaf> SbRefLeaves(const std::vector<std::array<std::string, 4>>& refs)
+{
+    std::vector<SbLeaf> out;
+    std::vector<std::string> scripts;
+    for (const auto& r : refs) if (std::find(scripts.begin(), scripts.end(), r[0]) == scripts.end()) scripts.push_back(r[0]);
+    auto putStr = [](std::vector<uint8_t>& v, const std::string& str) {
+        const int32_t n = static_cast<int32_t>(str.size()) + 1;
+        v.insert(v.end(), reinterpret_cast<const uint8_t*>(&n), reinterpret_cast<const uint8_t*>(&n) + 4);
+        v.insert(v.end(), str.begin(), str.end());
+        v.push_back(0);
+    };
+    for (const auto& sc : scripts)
+    {
+        std::vector<uint8_t> v = { 0x02, 0x01, 0x00, 0x00, 0x00 };
+        int32_t count = 0;
+        const size_t countAt = v.size();
+        v.insert(v.end(), 4, 0);
+        for (const auto& r : refs)
+        {
+            uint32_t b, c, d;
+            if (r[0] != sc || !SbGuidParts(r[2], &b, &c, &d)) continue;
+            v.push_back(0x2D); v.push_back(0x00);
+            putStr(v, r[1]);
+            v.push_back(0x02);
+            for (uint32_t w : { b, c, d }) v.insert(v.end(), reinterpret_cast<const uint8_t*>(&w), reinterpret_cast<const uint8_t*>(&w) + 4);
+            putStr(v, r[3]);
+            ++count;
+        }
+        memcpy(v.data() + countAt, &count, 4);
+        SbLeaf l;
+        l.inProps = false; l.name = sc; l.blob = v; l.inRefs = true;
+        out.push_back(l);
+    }
+    return out;
+}
+static std::string SbKeyForType(const std::string& type)
+{
+    std::string k = type;
+    if (k.size() > 9 && k.compare(k.size() - 9, 9, "Component") == 0) k.resize(k.size() - 9);
+    if (!k.empty()) k[0] = static_cast<char>(tolower(static_cast<unsigned char>(k[0])));
+    return k;
+}
+// Move a placed object into another gamemode (respawn there, keeping everything). Returns the new idx.
+static std::string SbRehost(SbOwned& o, SDK::UObject* lgm)
+{
+    SDK::AActor* a = SbActorForIdx(o.idx);
+    SbOwned keep = o;
+    if (a) SeSandboxDelete(a); else SbOwnedApply(o, true);
+    for (size_t i = 0; i < g_sbOwned.size(); ++i) if (g_sbOwned[i].idx == keep.idx) { g_sbOwned.erase(g_sbOwned.begin() + i); break; }
+    std::vector<std::string> names;
+    for (const auto& s2 : keep.scripts) names.push_back(s2.first);
+    g_sbPendingScripts = names;
+    g_sbPendingLeaves = SbRefLeaves(keep.refs);
+    g_sbForceLgm = lgm;
+    const std::string prevLoading = g_lvLoading;
+    g_lvLoading = keep.level;
+    g_sbSpawnCls = keep.cls; g_sbSpawnPath = keep.path;
+    const std::string idx = SeSandboxSpawn(keep.uniqueId, keep.loc, keep.rot, keep.scl);
+    g_sbSpawnCls.clear(); g_sbSpawnPath.clear();
+    g_lvLoading = prevLoading;
+    g_sbPendingScripts.clear();
+    g_sbForceLgm = nullptr;
+    if (SbOwned* n = idx.empty() ? nullptr : SbOwnedByIdx(idx)) { n->data = keep.data; n->scripts = keep.scripts; n->refs = keep.refs; }
+    if (!idx.empty()) if (SDK::AActor* na = SbActorForIdx(idx)) for (const auto& d : keep.data) SeSbSet(nullptr, SeLvIdent(na), d[0], d[1], d[2]);
+    // anything that pointed at the old id now points at the new one
+    for (auto& other : g_sbOwned) for (auto& r : other.refs) if (r[2] == keep.idx) r[2] = idx;
+    return idx;
+}
+// Rebuild a scripted object so its script picks up its (new) references.
+static std::string SbRebuildScripted(SbOwned& o)
+{
+    SDK::AActor* a = SbActorForIdx(o.idx);
+    if (!a || o.scripts.empty()) return std::string();
+    return SeLuauAttach(a, o.scripts.front().first, o.scripts.front().second);
+}
+
+// A script slot binds to one of the target's Luau components by its NAME, first letter lowered: the game's
+// own golf course points "Hole_1" at key "physical", the GolfHole's component named "Physical". Find the
+// target's component of the slot's type; `have` lists what it does have (for the error message).
+static std::string SbComponentKey(SDK::AActor* t, const std::string& type, std::string* have)
+{
+    SDK::UClass* want = SDK::UObject::FindClassFast(type);
+    static SDK::UClass* luauCls = nullptr;
+    if (!luauCls) luauCls = SDK::UObject::FindClassFast("LuauBehavior");
+    std::string key;
+    const int32_t n = SDK::UObject::GObjects->Num();
+    for (int32_t i = 0; t && i < n; ++i)
+    {
+        SDK::UObject* c = SDK::UObject::GObjects->GetByIndex(i);
+        if (!c || c->Outer != t || c->IsDefaultObject() || !c->Class) continue;
+        const std::string cn = c->Class->GetName();
+        if (luauCls && c->IsA(luauCls) && cn.find("Luau") == std::string::npos && have->find(cn) == std::string::npos)
+            *have += (have->empty() ? "" : ", ") + cn;
+        if (key.empty() && want && c->IsA(want))
+        {
+            key = c->GetName();
+            if (!key.empty()) key[0] = static_cast<char>(tolower(static_cast<unsigned char>(key[0])));
+        }
+    }
+    return key;
+}
+
+// SE|ERR|<title>|<what happened and how to fix it>: shown to the editor as a popup.
+static void SeError(SDK::UObject* caller, const std::string& title, const std::string& text)
+{
+    HxLog("[HalcyonA2][SPECEDIT] error to editor: %s - %s\n", title.c_str(), text.c_str());
+    if (caller) SeBroadcast("SE|ERR|" + title + "|" + text, caller);
+}
+
+// SE|LUAUREF|<scripted object ident>|<script>|<slot>|<type>|<target ident, or "-" to clear>
+static void SeLuauRef(SDK::UObject* ctx, const std::string& ident, const std::string& script, const std::string& slot,
+                      const std::string& type, const std::string& targetIdent)
+{
+    SDK::UObject* caller = SeCallerPC(ctx);
+    auto note = [&](const std::string& m) { if (caller) SeBroadcast("SE|NOTE|" + m, caller); };
+    SDK::AActor* a = SeFindEditorActor(ident);
+    SDK::UObject* pc = SbPrefabOf(a);
+    SbOwned* o = pc ? SbOwnedByIdx(FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(pc) + 0x248))) : nullptr;
+    const std::string sname = SeLuauName(script);
+    if (!o || sname.empty()) { note("Wire slots on an object you placed that runs the script."); return; }
+    o->refs.erase(std::remove_if(o->refs.begin(), o->refs.end(), [&](const std::array<std::string, 4>& r) { return r[0] == sname && r[1] == slot; }),
+                  o->refs.end());
+    std::string targetName = "nothing";
+    if (targetIdent != "-")
+    {
+        SDK::AActor* t = SeFindEditorActor(targetIdent);
+        SDK::UObject* tpc = SbPrefabOf(t);
+        SbOwned* to = tpc ? SbOwnedByIdx(FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(tpc) + 0x248))) : nullptr;
+        const std::string tname = t && t->Class ? t->Class->GetName() : std::string("that object");
+        if (!to)
+        {
+            SeError(caller, "Can't use that object",
+                    "Slot '" + slot + "' can only point at objects you placed with the editor. " + tname +
+                    " belongs to the station. Place your own copy and drag that onto the slot instead.");
+            return;
+        }
+        std::string have;
+        const std::string key = SbComponentKey(t, type, &have);
+        if (key.empty())
+        {
+            SeError(caller, "Wrong kind of object for " + slot,
+                    "Slot '" + slot + "' needs an object with a " + type + ", but " + tname + " has " +
+                    (have.empty() ? std::string("no scriptable components at all") : "only: " + have) +
+                    ". Pick a different object (the slot's list shows the ones that fit), or change the slot's type in "
+                    "the script, e.g.  local " + slot + ": " + (have.empty() ? std::string("PhysicalComponent") : have.substr(0, have.find(','))) + " = nil");
+            return;
+        }
+        std::string tidx = to->idx;
+        uint32_t b, c, d;
+        if (to->lgm != o->lgm || !SbGuidParts(tidx, &b, &c, &d)) tidx = SbRehost(*to, o->lgm);   // same slot, GUID id
+        // SbRehost may have reallocated g_sbOwned: look the scripted object up again
+        o = nullptr;
+        for (auto& e : g_sbOwned) for (const auto& sc : e.scripts) if (sc.first == sname && SbActorForIdx(e.idx) == a) o = &e;
+        if (!o || tidx.empty()) { note("Wiring failed - see the server log."); return; }
+        o->refs.push_back({ sname, slot, tidx, key });
+        targetName = t && t->Class ? t->Class->GetName() : tidx;
+    }
+    SbOwned* cur = nullptr;
+    for (auto& e : g_sbOwned) for (const auto& r : e.refs) if (r[0] == sname && r[1] == slot) cur = &e;
+    if (!cur) for (auto& e : g_sbOwned) for (const auto& sc : e.scripts) if (sc.first == sname) cur = &e;
+    const std::string idx = cur ? SbRebuildScripted(*cur) : std::string();
+    HxLog("[HalcyonA2][SPECEDIT] script slot %s.%s (%s) -> %s: %s\n", sname.c_str(), slot.c_str(), type.c_str(), targetName.c_str(),
+          idx.empty() ? "FAILED" : idx.c_str());
+    note(idx.empty() ? "Wiring " + slot + " failed - see the server log." : slot + " -> " + targetName + " (the scripted object was rebuilt to pick it up).");
 }
 
 // Saved levels. What the editor builds -- sandbox objects, speed pads and coins, their Game data,
@@ -3141,7 +3540,7 @@ static std::string SeLvSymbolic(const std::string& value)
         size_t e = value.find(',', b);
         const bool last = e == std::string::npos;
         std::string part = value.substr(b, last ? std::string::npos : e - b);
-        for (const auto& q : g_seAuthored) if (part.size() == 32 && SeLvGuidOf(q.questId) == part) { part = "{q:" + q.questId + "}"; break; }
+        for (const auto& q : g_seAuthored) if (!q.deleted && part.size() == 32 && SeLvGuidOf(q.questId) == part) { part = "{q:" + q.questId + "}"; break; }
         out += part;
         if (last) break;
         out += ',';
@@ -3166,6 +3565,8 @@ static std::string SeLvResolve(const std::string& value)
 static std::string SeLvBuild(const std::string& name, int* counts)
 {
     std::string t = "L\t" + SeLvClean(name) + "\t1\n";
+    struct Wire { int from; std::string script, slot, targetIdx, key; };
+    std::vector<Wire> wiring;
     std::unordered_map<std::string, int> ownedIdx;       // sandbox idx -> object number
     std::unordered_map<SDK::AActor*, int> actorIdx;      // actor -> object number (checkpoints)
     std::unordered_set<std::string> runObjs;             // run + button nodes (rebuilt from R records)
@@ -3182,6 +3583,7 @@ static std::string SeLvBuild(const std::string& name, int* counts)
              SeLvVec(o.rot) + "\t" + SeLvVec(o.scl) + "\n";
         for (const auto& d : o.data)
             t += "D\t" + std::to_string(n) + "\t" + d[0] + "\t" + d[1] + "\t" + SeLvClean(SeLvSymbolic(d[2])) + "\n";
+        for (const auto& r : o.refs) wiring.push_back({ n, r[0], r[1], r[2], r[3] });
         for (const auto& sc : o.scripts)
         {
             std::string hex;
@@ -3204,10 +3606,13 @@ static std::string SeLvBuild(const std::string& name, int* counts)
             if (e.actor == p.actor) t += "E\t" + std::to_string(n) + "\t" + e.path + "\t" + SeLvClean(e.value) + "\n";
         ++n;
     }
+    for (const auto& w : wiring)                          // W <from obj> <script> <slot> <target obj> <key>
+        if (auto it = ownedIdx.find(w.targetIdx); it != ownedIdx.end())
+            t += "W\t" + std::to_string(w.from) + "\t" + w.script + "\t" + w.slot + "\t" + std::to_string(it->second) + "\t" + w.key + "\n";
     int nq = 0, nr = 0;
     for (auto& q : g_seAuthored)
     {
-        if (!(q.level.empty() || q.level == name)) continue;
+        if (q.deleted || !(q.level.empty() || q.level == name)) continue;
         q.level = name;
         std::string steps;
         for (SDK::AActor* a : q.checkpoints)
@@ -3315,6 +3720,23 @@ static void SeLvLoad(const std::string& name, const std::string& text)
             ++nd;
         }
     }
+    // Script slots: record them on the scripted objects first (all in the first object's slot), so the
+    // X pass below builds them with their references.
+    for (const auto& f : lines)
+    {
+        if (f[0] != "W" || f.size() < 6) continue;
+        auto from = objs.find(atoi(f[1].c_str())), to = objs.find(atoi(f[4].c_str()));
+        if (from == objs.end() || to == objs.end() || !from->second || !to->second) continue;
+        SDK::UObject* fpc = SbPrefabOf(from->second);
+        SDK::UObject* tpc = SbPrefabOf(to->second);
+        SbOwned* fo = fpc ? SbOwnedByIdx(FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(fpc) + 0x248))) : nullptr;
+        SbOwned* tobj = tpc ? SbOwnedByIdx(FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(tpc) + 0x248))) : nullptr;
+        if (!fo || !tobj) continue;
+        std::string tidx = tobj->idx;
+        const std::string fromIdx = fo->idx;
+        if (tobj->lgm != fo->lgm) { tidx = SbRehost(*tobj, fo->lgm); to->second = SbActorForIdx(tidx); }
+        if (SbOwned* again = SbOwnedByIdx(fromIdx)) again->refs.push_back({ SeLuauName(f[2]), f[3], tidx, f[5] });
+    }
     for (const auto& f : lines)                            // custom Luau: source into the gamemode, then attach
     {
         if (f[0] != "X" || f.size() < 4) continue;
@@ -3380,10 +3802,11 @@ static void SeLvUnload(const std::string& name)
         it = g_lvRuns.erase(it);
         ++n;
     }
-    // Quests stay in players' lists until they rejoin (the bundle has no per-quest removal we trust yet),
-    // but they stop being sent to anyone new and stop being tracked.
-    for (auto it = g_seAuthored.begin(); it != g_seAuthored.end();)
-        if (it->level == name) { it = g_seAuthored.erase(it); ++n; } else ++it;
+    // Its quests leave every player's list (the authored bundle is re-sent without them).
+    std::vector<const SeAuthoredQuest*> gone;
+    for (auto& q : g_seAuthored)
+        if (q.level == name && !q.deleted) { SeQuestRemove(q); gone.push_back(&q); ++n; }
+    if (!gone.empty()) SeQuestResendAll(gone);
     g_lvLoaded.erase(std::remove(g_lvLoaded.begin(), g_lvLoaded.end(), name), g_lvLoaded.end());
     g_lvStatusDirty = true;
     HxLog("[HalcyonA2][LEVELS] unloaded '%s': %d item(s) removed\n", name.c_str(), n);
@@ -3419,7 +3842,7 @@ static std::vector<std::string> SeLvLines(const std::string& body)
 }
 
 static std::vector<std::string> g_lvLoadedSnapshot;     // for the worker (copied under g_lvMu)
-static void SeLvPoller()
+static void SeLvPollerBody()
 {
     // Wait until the server has registered with the backend (the deployment id is known).
     for (int i = 0; i < 300 && g_deploymentId.empty() && !g_seLocalTest; ++i) Sleep(2000);
@@ -3460,6 +3883,24 @@ static void SeLvPoller()
             SeLvHttp(L"POST", "/v1/spec/status?deployment=" + dep, body, &s4);
         }
     }
+}
+
+// The poller thread must never take the server down: anything unexpected (a malformed backend reply,
+// an allocation failure) is logged and the poller starts over a minute later.
+static void SeLvPollerGuarded()
+{
+    try { SeLvPollerBody(); }
+    catch (const std::exception& e) { HxLog("[HalcyonA2][LEVELS] poller error: %s -- restarting in 60s\n", e.what()); }
+    catch (...) { HxLog("[HalcyonA2][LEVELS] poller error -- restarting in 60s\n"); }
+}
+static void SeLvPollerSeh()
+{
+    __try { SeLvPollerGuarded(); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { HxLog("[HalcyonA2][LEVELS] poller fault -- restarting in 60s\n"); }
+}
+static void SeLvPoller()
+{
+    for (;;) { SeLvPollerSeh(); Sleep(60000); }
 }
 
 // Game thread: start the poller once, and apply what it fetched.
@@ -3560,12 +4001,15 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
     else if (op == "SBPROBE" && p.size() >= 3) SeSandboxProbePaths(p[2]);
     else if (op == "SBTREE" && p.size() >= 3) SeSandboxTree(p[2]);
     else if (op == "QLIST") SeQuestList(pawn);
+    else if (op == "QDEL" && p.size() >= 3) SeQuestDelete(pawn, p[2]);
     else if (op == "LVSAVE" && p.size() >= 3) SeLvSave(pawn, p[2]);
     else if (op == "LVLIST") SeLvList(pawn);
     else if (op == "LVLOAD" && p.size() >= 3) SeLvSetLoaded(pawn, p[2], true);
     else if (op == "LVUNLOAD" && p.size() >= 3) SeLvSetLoaded(pawn, p[2], false);
     else if (op == "LUAUPART" && p.size() >= 4) SeLuauPart(p[2], p[3]);
     else if (op == "LUAU" && p.size() >= 4) SeLuau(pawn, p[2], p[3]);
+    else if (op == "LUAUSRC" && p.size() >= 3) SeLuauUpdateAll(pawn, p[2]);
+    else if (op == "LUAUREF" && p.size() >= 7) SeLuauRef(pawn, p[2], p[3], p[4], p[5], p[6]);
     else if (op == "LGMTREE") SeLgmTree();
     else if (op == "LGMDESC" && p.size() >= 3) SeLgmDesc(p[2]);
     else if (op == "ACTORS" && p.size() >= 3) SeActorClasses(p[2]);

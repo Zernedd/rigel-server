@@ -1,0 +1,1316 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Rigel Luau Scripting Guide</title>
+<style>
+@page { size: A4; margin: 18mm 17mm 20mm 17mm;
+  @bottom-center { content: counter(page); font: 9pt 'Segoe UI', sans-serif; color: #888; } }
+@page :first { @bottom-center { content: none; } }
+:root { --ink:#1d2330; --muted:#5a6475; --accent:#3a5bd9; --accent2:#0d8f7a; --bg:#f4f6fb; --line:#dde2ee; }
+* { box-sizing: border-box; }
+body { font: 10pt/1.48 'Segoe UI', 'Helvetica Neue', Arial, sans-serif; color: var(--ink); margin: 0; }
+h1, h2, h3, h4 { font-family: 'Segoe UI Semibold', 'Segoe UI', sans-serif; line-height: 1.2; }
+h2 { font-size: 19pt; margin: 0 0 10px; padding-bottom: 6px; border-bottom: 2px solid var(--accent); break-after: avoid; }
+h2 .num { color: var(--accent); margin-right: 8px; }
+h3 { font-size: 12.5pt; margin: 18px 0 6px; color: #23304f; break-after: avoid; }
+h4 { font-size: 10pt; margin: 0 0 1px; }
+section.chapter { margin-top: 26px; }
+section.chapter.newpage { break-before: page; margin-top: 0; }
+p { margin: 6px 0 8px; }
+code { font: 9pt 'Cascadia Mono', Consolas, monospace; background: #eef1f8; padding: 0 3px; border-radius: 3px; }
+figure.code { margin: 8px 0 12px; border: 1px solid var(--line); border-radius: 6px; background: #fbfcfe; break-inside: avoid; }
+figure.code .cap { font: 8.5pt 'Segoe UI', sans-serif; color: var(--muted); padding: 4px 10px; border-bottom: 1px solid var(--line); background: var(--bg); border-radius: 6px 6px 0 0; }
+figure.code pre { margin: 0; padding: 6px 10px; font: 8.2pt/1.36 'Cascadia Mono', Consolas, monospace; white-space: pre-wrap; word-break: break-word; tab-size: 4; }
+figure.code pre code { background: none; padding: 0; }
+.k { color: #7a2bb8; font-weight: 600; } .s { color: #a3451b; } .c { color: #6b7a8c; font-style: italic; } .n { color: #0d7a68; }
+.note, .warn, .tip { border-left: 4px solid var(--accent); background: #eef2fd; padding: 8px 12px; margin: 10px 0; border-radius: 0 6px 6px 0; break-inside: avoid; }
+.warn { border-color: #d9822b; background: #fdf4ea; }
+.tip { border-color: var(--accent2); background: #e9f7f4; }
+.note b:first-child, .warn b:first-child, .tip b:first-child { display: block; margin-bottom: 2px; }
+ol.steps { padding-left: 0; counter-reset: s; list-style: none; }
+ol.steps > li { counter-increment: s; position: relative; padding: 4px 0 6px 36px; }
+ol.steps > li::before { content: counter(s); position: absolute; left: 0; top: 3px; width: 24px; height: 24px; border-radius: 50%; background: var(--accent); color: white; font-weight: 600; text-align: center; line-height: 24px; font-size: 10pt; }
+table.t { border-collapse: collapse; width: 100%; margin: 8px 0 12px; font-size: 9.4pt; break-inside: auto; }
+table.t th, table.t td { border: 1px solid var(--line); padding: 5px 7px; vertical-align: top; text-align: left; }
+table.t th { background: var(--bg); }
+table.t tr { break-inside: avoid; }
+.cover { height: 250mm; display: flex; flex-direction: column; justify-content: space-between; }
+.cover .band { background: linear-gradient(135deg, #1f2d5c, #3a5bd9 60%, #0d8f7a); color: white; padding: 38mm 14mm 16mm; border-radius: 10px; }
+.cover h1 { font-size: 34pt; margin: 0 0 6px; }
+.cover .sub { font-size: 14pt; opacity: .92; }
+.cover .meta { color: var(--muted); font-size: 10pt; }
+.toc { columns: 2; column-gap: 24px; font-size: 10.5pt; }
+.toc div { break-inside: avoid; padding: 2px 0; }
+.toc .n { display: inline-block; width: 26px; color: var(--accent); font-weight: 600; font-style: normal; }
+.apigrid { columns: 2; column-gap: 12px; }
+.api { border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px 4px; margin: 0 0 7px; break-inside: avoid; display: inline-block; width: 100%; }
+.api .origin { font-size: 7.3pt; color: var(--muted); margin-bottom: 3px; }
+.api .par { font-weight: 400; font-size: 9pt; color: var(--muted); }
+.api ul.methods { margin: 1px 0 2px; padding-left: 14px; font-size: 8pt; line-height: 1.3; }
+.api ul.methods li { margin: 0; }
+.api ul.methods code { font-size: 7.3pt; background: none; padding: 0; }
+.api .evs { font-size: 7.8pt; margin-top: 1px; line-height: 1.3; } .api .evs code { font-size: 7.2pt; background: none; padding: 0; }
+.more { color: var(--muted); font-style: italic; }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.linebyline { width: 100%; border-collapse: collapse; font-size: 9.4pt; margin: 6px 0 12px; }
+.linebyline td { border-bottom: 1px solid var(--line); padding: 4px 6px; vertical-align: top; }
+.linebyline td:first-child { width: 42%; }
+.linebyline td:first-child code { background: none; font-size: 8.4pt; }
+.diagram { display: flex; gap: 8px; align-items: stretch; margin: 10px 0 14px; }
+.diagram .box { flex: 1; border: 1px solid var(--line); border-radius: 8px; padding: 8px; text-align: center; background: var(--bg); font-size: 9.2pt; }
+.diagram .box b { display: block; color: var(--accent); margin-bottom: 3px; }
+.diagram .arrow { align-self: center; color: var(--muted); font-size: 16pt; }
+</style></head><body><section class="cover">
+  <div class="band">
+    <div style="font-size:11pt;letter-spacing:.14em;text-transform:uppercase;opacity:.85">Rigel &middot; Spec Editor</div>
+    <h1>Luau Scripting Guide</h1>
+    <div class="sub">Write scripts for the objects you place, and run them on every player's machine.</div>
+  </div>
+  <div>
+    <h3>Contents</h3>
+    <div class="toc"><div><span class="n">1</span>What a script is and where it runs</div><div><span class="n">2</span>Attaching a script in the editor</div><div><span class="n">3</span>Saving scripts with levels</div><div><span class="n">4</span>Anatomy of a script</div><div><span class="n">5</span>Core globals and patterns</div><div><span class="n">6</span>Components and how to find their methods</div><div><span class="n">7</span>Worked examples from this kit</div><div><span class="n">8</span>Fun scripts to drop in</div><div><span class="n">9</span>Worked examples: components and the game&#x27;s scripts</div><div><span class="n">10</span>Setting up VS Code</div><div><span class="n">11</span>Troubleshooting</div><div><span class="n">12</span>Limitations</div><div><span class="n">A</span>Appendix: component and class reference</div><div><span class="n">B</span>Appendix: global tables</div></div>
+  </div>
+  <div class="meta">Orion Drift build 22284 &middot; definitions: 49 classes, 524 methods,
+  119 events &middot; kit folder: <code>SpecEditor/luau</code></div>
+</section><section class="chapter newpage" id="ch1"><h2><span class="num">1</span>What a script is and where it runs</h2>
+<p>A <b>Luau script</b> is a small program attached to an object in the station. Orion Drift's own
+game modes are written this way. TKBGolf's <code>Course.luau</code>, for example, sits on a plain
+Cube object and runs the whole mini-golf course. The Spec Editor lets you attach your own scripts
+to objects you place, using the same mechanism the game uses.</p>
+
+<div class="diagram">
+  <div class="box"><b>Spec Editor</b>You write the source and click <i>Attach</i></div>
+  <div class="arrow">&rarr;</div>
+  <div class="box"><b>Server</b>Stores it as <code>Scripts/&lt;name&gt;.luau</code> in the object's gamemode and rebuilds the object</div>
+  <div class="arrow">&rarr;</div>
+  <div class="box"><b>Every machine</b>Server, your editor client and every player's client compile and run it</div>
+</div>
+
+<h3>It runs everywhere</h3>
+<p>This is the most important fact about scripts. The same source runs <b>on every machine that has
+the object</b>: the dedicated server, your own client, and every other player's client, including
+players with no mods. The test that confirmed this was a one-line script:</p>
+<figure class="code"><pre>log(<span class="s">&quot;RIGEL LUAU OK &quot;</span> .. tostring(<span class="n">20</span> + <span class="n">22</span>))</pre></figure>
+<p>and the line <code>[RigelTest.luau]: RIGEL LUAU OK 42</code> appeared in the logs of the server,
+the editor client and an unmodded player's client.</p>
+
+<h3>What that means for your code</h3>
+<ul>
+<li><b>Side effects happen once per machine.</b> A <code>log</code> call prints once in each log. An
+action that changes shared game state (scoring, spawning, teleporting) may run on several
+machines at once. The game scripts handle this by listening to <i>server</i> events for authoritative work
+(<code>onOverlapByPlayerServer</code>, <code>serverEventData</code>) and to <i>client-side</i> events for
+per-player feedback (<code>onOverlapByPlayerClientside</code>).</li>
+<li><b>"The local player" differs per machine.</b> <code>VRPawn.getLocalPlayerIndex()</code> returns a
+different value on each client. The golf course uses exactly that to give every player their own
+personal ball.</li>
+<li><b>Variables are not shared.</b> Each machine has its own copy of every variable. To tell other
+machines something, the game scripts use components such as <code>EventComponent</code>
+(<code>triggerEventWithData</code> &rarr; <code>serverEventData</code>).</li>
+</ul>
+
+<div class="note"><b>Scope of this guide</b>
+The kit is built from three sources: the game's own scripts (in <code>game-scripts/</code>), the
+game's class dump (a Dumper-7 C++ SDK of build 22284) and tests run in Rigel. Where something
+has only been inferred, the guide says so. Chapter 12 lists the limits.</div>
+</section><section class="chapter" id="ch2"><h2><span class="num">2</span>Attaching a script in the editor</h2>
+<p>Scripts are ordinary <code>.luau</code> files in your <b>RigelScripts</b> folder
+(<code>Documents\RigelScripts</code>). The editor creates it the first time and copies this kit into it
+(types, examples, VS Code settings), so autocomplete works straight away. You write scripts in
+VS Code, not inside the editor.</p>
+<ol class="steps">
+<li><b>Open the editor</b> with <b>F12</b>, and place or select an object.</li>
+<li>In <b>Details</b>, open <b>Luau script</b> and click <b>Open folder in VS Code</b>.</li>
+<li><b>Write the script</b> as a new file, e.g. <code>DoorLogic.luau</code>, or copy one from <code>examples/</code>.
+The file name is the script's name: it is stored as <code>Scripts/DoorLogic.luau</code>, and
+<code>[DoorLogic.luau]</code> is what you'll see in logs.</li>
+<li>Back in the editor, pick the file in the list (press <b>Refresh</b> if it's new) and click
+<b>Attach to this object</b>.</li>
+<li><b>Wire its slots</b> (chapter 4): under the script in <b>Details &rarr; Game data</b>, click a slot and then
+click the object it should use, in the viewport or the Outliner. You can also drag the object onto the slot, or pick
+from the slot's <b>&#9660;</b> list.</li>
+<li><b>Keep editing in VS Code.</b> Every time you save the file, the editor re-sends it, and every object
+running that script is rebuilt with the new code, on every machine.</li>
+</ol>
+
+<h3>What happens when you attach</h3>
+<p>The server stores your source in the object's gamemode under <code>Scripts/&lt;name&gt;.luau</code>,
+then <b>rebuilds the object</b> with a component entry whose id and script are both
+<code>&lt;name&gt;.luau</code>. The game attaches its own scripts in exactly this way. Because the object is
+rebuilt:</p>
+<ul>
+<li>the old copy of the object (and any script that was running on it) goes away, and the new one runs
+from the top, <code>BeginPlay</code> included;</li>
+<li>anything your script had set up (timers, listeners, variables) starts fresh;</li>
+<li>attaching the <b>same file</b> again replaces the script, and a different file adds another script entry.</li>
+</ul>
+
+<h3>Scripts already on an object</h3>
+<p>Selecting any object, including the station's own, lists its scripts in <b>Game data</b> as
+<i>Script &lt;name&gt;.luau</i>. <b>Replace</b> swaps in a file from your folder. On objects you placed this
+happens right away. On the station's objects, players who join from then on get the new code.</p>
+
+<h3>Borrowing from the game's scripts</h3>
+<p><b>Copy the game's own scripts into the folder (examples)</b> copies the station's scripts (golf,
+Scraprun, Tackleball, ...) into <code>RigelScripts\game-scripts</code>, where you can read them in VS Code.</p>
+</section><section class="chapter" id="ch3"><h2><span class="num">3</span>Saving scripts with levels</h2>
+<p>Scripts are part of the level. When you save a level in the editor's <b>Levels</b> tab, every script
+attached to its objects is saved with it. When the level is loaded again, the scripts are
+<b>re-attached</b> to their objects, so the objects are rebuilt and the scripts start from the top on
+every machine.</p>
+<ul>
+<li>Save the level after attaching or changing a script. The attached script lives on the running
+server, and only the saved level brings it back after a restart.</li>
+<li>Your RigelScripts files stay the source of truth. A level stores a copy of each script and its slot
+wiring.</li>
+<li>Loading a level re-runs <code>BeginPlay</code> for its scripts. Write <code>BeginPlay</code> so that running
+it again on a fresh object is harmless.</li>
+</ul>
+<div class="tip"><b>Workflow that works well</b>
+Attach once, then just edit and save in VS Code: each save re-sends the script. Read the log, repeat.
+When it behaves, save the level.</div>
+</section><section class="chapter" id="ch4"><h2><span class="num">4</span>Anatomy of a script</h2>
+<p>Every game script follows the same shape. Here is the start of TKBGolf's course script, cut
+down:</p>
+<figure class="code"><div class="cap">game-scripts/TKBGolf__Course.luau, lines 1-12</div><pre><span class="c">--!strict</span>
+<span class="c">-- External Dependencies</span>
+
+
+<span class="k">local</span> MainEventRepeater: EventComponent = <span class="k">nil</span>
+<span class="k">local</span> DataTable: DataTableComponent = <span class="k">nil</span>
+
+<span class="k">local</span> Cup_1: GolfCupComponent = <span class="k">nil</span>
+<span class="k">local</span> Cup_2: GolfCupComponent = <span class="k">nil</span>
+<span class="k">local</span> Cup_3: GolfCupComponent = <span class="k">nil</span>
+<span class="k">local</span> Cup_4: GolfCupComponent = <span class="k">nil</span>
+<span class="k">local</span> Cup_5: GolfCupComponent = <span class="k">nil</span></pre></figure>
+<p>and here is how a script built in the same shape reads, top to bottom:</p>
+<figure class="code"><div class="cap">the parts of a script</div><pre><span class="c">--!strict                                   -- 1. mode line</span>
+
+<span class="c">-- External Dependencies                    -- 2. components this script talks to</span>
+<span class="k">local</span> Button: BasicButtonComponent = <span class="k">nil</span>
+<span class="k">local</span> Door: PhysicalComponent = <span class="k">nil</span>
+<span class="c">-- End External Dependencies</span>
+
+<span class="k">local</span> doorOpen = <span class="k">false</span>                      <span class="c">-- 3. your own state</span>
+
+<span class="k">local</span> <span class="k">function</span> toggle()                     <span class="c">-- 4. helpers</span>
+    doorOpen = <span class="k">not</span> doorOpen
+    <span class="k">if</span> doorOpen <span class="k">then</span> Door:hideLua() <span class="k">else</span> Door:showLua() <span class="k">end</span>
+<span class="k">end</span>
+
+<span class="k">function</span> BeginPlay()                        <span class="c">-- 5. lifecycle entry point</span>
+    Button.onButtonPressEvent.Listen(toggle)
+<span class="k">end</span>
+
+<span class="k">function</span> EndPlay()                          <span class="c">-- 6. optional clean-up</span>
+<span class="k">end</span></pre></figure>
+
+<h3>1. <code>--!strict</code></h3>
+<p>The first line picks the Luau type-checking mode. The golf scripts use <code>--!strict</code>, and the
+gamemode scripts (Scraprun, Tackleball) have no mode line. The mode matters to the type checker in
+VS Code, and <code>--!strict</code> gets you the most help from it. This kit's <code>.luaurc</code> turns
+strict mode on for every file.</p>
+
+<h3>2. The External Dependencies block</h3>
+<p>Typed locals set to <code>nil</code>, one per component the script uses. <b>The game fills these in
+before <code>BeginPlay</code></b> from the object's <code>references</code> wiring: a reference named
+<code>Cup_1</code> becomes the value of <code>local Cup_1</code>. The type after the colon is the
+component's Luau type (<code>GolfCupComponent</code>, <code>PhysicalComponent</code>, ...), which is also
+what gives you autocomplete.</p>
+<div class="tip"><b>Slots: wire them by dragging</b>
+Each dependency local is a <b>slot</b>. Under the script in <b>Details &rarr; Game data</b>, the editor lists
+every slot (<code>Switch (ToggleableComponent)</code>, <code>Target (PhysicalComponent)</code>, ...). Click a slot
+and then click the object (in the viewport or the Outliner). Dragging an object onto the slot also works, and the
+<b>&#9660;</b> button lists every object you placed that fits. <b>X</b> clears the slot, and <b>Esc</b> cancels a
+pick. The object must have a component of that type; if it doesn't, the editor explains which components it
+does have. Objects are moved into the scripted object's gamemode area if needed. The script is rebuilt with the
+new wiring, and the wiring is saved with the level. Still check for <code>nil</code>
+in <code>BeginPlay</code>, so an unwired slot logs a hint instead of an error.</div>
+
+<h3>3&ndash;4. State and helpers</h3>
+<p>Plain Luau. Prefer <code>local</code> variables and functions. The game scripts also use globals freely
+(<code>currentState = ...</code>). That works, but everything in the script can then change them.</p>
+
+<h3>5&ndash;6. Lifecycle</h3>
+<table class="t">
+<tr><th>When</th><th>What runs</th></tr>
+<tr><td>Script loaded</td><td>All top-level code, in order. The dependency locals are still <code>nil</code> here.</td></tr>
+<tr><td>Object ready</td><td><code>function BeginPlay()</code>, if you define it. Every game script does its setup here:
+hooking events and setting the initial state.</td></tr>
+<tr><td>Object/gamemode torn down</td><td><code>function EndPlay()</code>, if defined (Scraprun clears its tables here).
+Attaching a new version of your script rebuilds the object, which ends the old one.</td></tr>
+<tr><td>Later</td><td>Only what you scheduled: event listeners and timers/promises.</td></tr>
+</table>
+<p><code>BeginPlay</code> and <code>EndPlay</code> must be <b>global</b> functions (<code>function BeginPlay()</code>,
+not <code>local function</code>) so that the game can find them. No per-frame <code>Tick</code> function appears in any game
+script, so for anything repeating use timers (chapter 5).</p>
+</section><section class="chapter" id="ch5"><h2><span class="num">5</span>Core globals and patterns</h2>
+<h3>Logging</h3>
+<figure class="code"><pre>log(<span class="s">&quot;score is&quot;</span>, score)            <span class="c">-- LogLuau: Display: [MyScript.luau]: score is 3</span>
+warn(<span class="s">&quot;something odd&quot;</span>)             <span class="c">-- LogLuau: Warning: [MyScript.luau]: something odd</span>
+Logging.warn(<span class="s">&quot;Category&quot;</span>, value)   <span class="c">-- used by TKBGolf&#x27;s ServerGolfLogic</span></pre></figure>
+<p><code>log</code> takes any number of values. Build strings with <code>..</code> or backtick
+interpolation (<code>`hole {i} done`</code>), as the game scripts do.</p>
+
+<h3>Timers: <code>LuauClock</code></h3>
+<table class="t">
+<tr><th>Call</th><th>Meaning</th></tr>
+<tr><td><code>LuauClock.timeout(seconds)</code></td><td>A promise that resolves after <i>seconds</i>. <code>timeout(0)</code> means "next moment".</td></tr>
+<tr><td><code>LuauClock.getTime()</code></td><td>Current time in seconds. Subtract two readings to measure a duration.</td></tr>
+<tr><td><code>LuauClock.createTimer(interval, fn)</code></td><td>Found in the class dump (<code>ULuauClock::CreateTimer</code>), but no game script uses it. Untested.</td></tr>
+</table>
+<figure class="code"><pre>LuauClock.timeout(<span class="n">5</span>):andThen(<span class="k">function</span>()
+    Cup:setEnableArrowIndicator(<span class="k">false</span>)        <span class="c">-- hide the arrow 5 s later (ClubGolf)</span>
+<span class="k">end</span>)</pre></figure>
+
+<h3>Promises</h3>
+<p>Asynchronous work comes back as a promise. The game scripts use three shapes:</p>
+<figure class="code"><pre><span class="c">-- a) chain: run a function when it resolves</span>
+Tee:spawnBallWithParameters(params):andThen(<span class="k">function</span>(Disc: DiscEntity)
+    Disc:setEnableHUDIndicator(<span class="k">true</span>)
+<span class="k">end</span>)
+
+<span class="c">-- b) straight-line: :await() pauses this function until the promise resolves</span>
+Promise.new(<span class="k">function</span>()
+    ResetTrigger:luaEnable()
+    LuauClock.timeout(<span class="n">0.25</span>):await()
+    ResetTrigger:luaDisable()
+<span class="k">end</span>)
+
+<span class="c">-- c) whichever finishes first</span>
+Promise.race({ LuauClock.timeout(<span class="n">45</span>), earlyOut }):andThen(<span class="k">function</span>() ... <span class="k">end</span>)</pre></figure>
+<p><code>:await()</code> only makes sense inside <code>Promise.new(function() ... end)</code>, which runs its
+function as its own coroutine. Scraprun uses this for every "do X, wait, do Y" sequence.
+<code>Promise.resolve(v)</code>, <code>Promise.try(fn)</code> and <code>:expect()</code> appear in commented-out
+code in the golf scripts.</p>
+
+<h3>Events</h3>
+<p>Components expose C++ multicast delegates as events. Listen with a <b>dot</b>:</p>
+<figure class="code"><pre>Disc.onGoToSleep.Listen(<span class="k">function</span>()
+    Disc:addSmoothOffset(Disc:getGravityDirection() * -<span class="n">10</span>)
+<span class="k">end</span>)
+Cup.onBallInCup_Multicast.Listen(<span class="k">function</span>(Cup: GolfCupComponent, Score: number, Disc: DiscEntity)
+    ...
+<span class="k">end</span>)
+BasicTimer.finished.Listen(BasicTimerFinished)   <span class="c">-- pass a named function</span></pre></figure>
+<p>The callback gets the delegate's arguments, in order: <code>TMulticastInlineDelegate&lt;void(UGolfCupComponent*
+Cup, int32 Score, ADiscEntity* Entity)&gt;</code> becomes <code>(GolfCupComponent, number, DiscEntity)</code>.
+The colon form <code>Player.onBeforeDestroy:Listen(fn)</code> also appears in a game script, and the definitions
+accept both. Event names are lowerCamel (<code>onGoToSleep</code>), but the game scripts also use the
+original C++ spelling (<code>BlueprintOnEnabled</code>, <code>TeamSizeIncreased</code>), so both spellings are in the
+definitions.</p>
+
+<h3>Vectors</h3>
+<figure class="code"><pre><span class="k">local</span> v = Vector.new(<span class="n">0</span>, <span class="n">0</span>, <span class="n">1</span>)
+<span class="k">local</span> d = disc:getDiscPosition() - VRPawn.getPositionByID(playerId)   <span class="c">-- Vector - Vector</span>
+<span class="k">local</span> dist = math.sqrt(d.x * d.x + d.y * d.y + d.z * d.z)              <span class="c">-- .x .y .z</span>
+<span class="k">local</span> dir = d / dist                                                  <span class="c">-- Vector / number</span>
+ball:setVelocity(dir * <span class="n">3500</span> + Vector.new(<span class="n">0</span>, <span class="n">0</span>, <span class="n">200</span>))                  <span class="c">-- *, +</span></pre></figure>
+<p>Units are Unreal units (centimetres). <code>Vec3.new</code> is an older spelling used once in the
+Tackleball script. C++ <code>FRotator</code> parameters take a <code>Vector</code> of (pitch, yaw, roll), as
+<code>requestTrainingBallAtLocation(Location, Rotation)</code> shows.</p>
+
+<h3>Other globals</h3>
+<table class="t">
+<tr><th>Global</th><th>What it's for (as used in the game scripts)</th></tr>
+<tr><td><code>VRPawn.getLocalPlayerIndex()</code></td><td>Index of this machine's player.</td></tr>
+<tr><td><code>VRPawn.getPlayerByID(id)</code>, <code>getPlayerName(id)</code>, <code>getTeamIndexByID(id)</code>, <code>getPositionByID(id)</code></td><td>Look up players by index. A name of <code>"None"</code> means unknown.</td></tr>
+<tr><td><code>Quests.event(player, id)</code>, <code>Quests.eventNumber(player, id, n)</code>, <code>Quests.complete(player, questId)</code></td><td>Quest/stat progress. The golf scripts pass <code>-1</code> from client-side handlers.</td></tr>
+<tr><td><code>Gamemode:getNumberConfigVariable(name)</code>, <code>getBoolConfigVariable</code>, <code>startGame()</code>, <code>stopGame()</code>, <code>setTeamScore(t, n)</code>, <code>onConfigChanged</code></td><td>The gamemode the script belongs to. Only the gamemode scripts use it, and it's untested from a sandbox object's script.</td></tr>
+<tr><td><code>BallSpawnParameters.new{...}</code>, <code>GoalInfo.new{...}</code></td><td>Build C++ structs from a table with lowerCamel keys.</td></tr>
+<tr><td><code>LinearColor.new(r, g, b, a)</code>, <code>CellStyle.new</code>, <code>LayoutSettings.new</code>, <code>LayoutGap.new</code>, <code>StyleOverRange.new</code>, <code>Enum.TextJustify</code></td><td>Scoreboard styling (<code>DataTableComponent</code>).</td></tr>
+<tr><td><code>require("Name")</code></td><td>Loads another script from the same gamemode (TKBGolf's <code>ServerCourseLogic</code> requires <code>ServerGolfLogic</code>). Not tested with editor-attached scripts, and VS Code can't resolve it.</td></tr>
+</table>
+</section><section class="chapter" id="ch6"><h2><span class="num">6</span>Components and how to find their methods</h2>
+<p>A <b>component</b> is a C++ class deriving from <code>ULuauBehavior</code>. Buttons, triggers, timers,
+ball spawners, goals, scoreboards and toggles are all components. Scripts reach them through the External
+Dependencies block and then call their methods and listen to their events.</p>
+
+<h3>The naming rule</h3>
+<table class="t">
+<tr><th>In C++ (class dump)</th><th>In Luau</th></tr>
+<tr><td><code>class UGolfCupComponent : public ULuauBehavior</code></td><td>type <code>GolfCupComponent</code> (drop the <code>U</code>)</td></tr>
+<tr><td><code>class ADiscEntity : public AActor</code></td><td>type <code>DiscEntity</code> (drop the <code>A</code>)</td></tr>
+<tr><td><code>void SetCupVisibility(bool Show);</code></td><td><code>cup:setCupVisibility(show)</code> (lowerCamel, colon call)</td></tr>
+<tr><td><code>static int32 GetLocalPlayerIndex(UWorld* World);</code></td><td><code>VRPawn.getLocalPlayerIndex()</code> (dot call, world supplied for you)</td></tr>
+<tr><td><code>TMulticastInlineDelegate&lt;void()&gt; OnGoToSleep;</code></td><td><code>disc.onGoToSleep.Listen(function() end)</code></td></tr>
+<tr><td><code>void Client_EmitStatEvent(const FString&amp;, int32);</code></td><td><code>pawn:client_EmitStatEvent("Stat", 1)</code> (only the first letter changes)</td></tr>
+</table>
+
+<h3>The generated definitions</h3>
+<p><code>generate_defs.py</code> reads the class dump (<code>HalcyonA2/HalcyonA2/gamesdk/22284/SDK</code>) and writes
+<code>types/rigel.d.luau</code>, a luau-lsp definition file. The current build covers
+<b>49 classes</b> (36 of them <code>ULuauBehavior</code> components) with <b>524 methods</b>,
+<b>119 events</b>, <b>239 properties</b>, <b>16 static functions</b> and
+<b>19 structs</b>. Each method carries its original C++ declaration as a comment:</p>
+<figure class="code"><div class="cap">types/rigel.d.luau (excerpt)</div><pre>declare extern <span class="k">type</span> GolfCupComponent extends LuauBehavior with
+	<span class="c">-- C++: void SetCupVisibility(bool Show);</span>
+	<span class="k">function</span> setCupVisibility(self, show: boolean): ()
+	...
+	onBallInCup_Multicast: Event&lt;(GolfCupComponent, number, DiscEntity)&gt;
+<span class="k">end</span></pre></figure>
+
+<h3>Type mapping</h3>
+<table class="t">
+<tr><th>C++</th><th>Luau</th></tr>
+<tr><td><code>bool</code></td><td><code>boolean</code></td></tr>
+<tr><td><code>int32</code>, <code>float</code>, <code>double</code>, <code>uint8</code>...</td><td><code>number</code> (the game scripts also write <code>int</code>, an alias)</td></tr>
+<tr><td><code>FString</code>, <code>FName</code>, <code>FText</code></td><td><code>string</code></td></tr>
+<tr><td><code>FVector</code>, <code>FRotator</code></td><td><code>Vector</code></td></tr>
+<tr><td><code>UFoo*</code> / <code>AFoo*</code></td><td><code>Foo</code> when it is in the definitions, otherwise <code>any</code></td></tr>
+<tr><td><code>TArray&lt;T&gt;</code></td><td><code>{T}</code></td></tr>
+<tr><td><code>FLuaRef</code></td><td><code>Ref</code> (any Luau table)</td></tr>
+<tr><td>game structs (<code>FGoalInfo</code>, ...)</td><td>a type with lowerCamel fields (<code>goalInfo.scoringTeam</code>)</td></tr>
+<tr><td>out-parameters (<code>T* Out</code>)</td><td>returned as extra results</td></tr>
+<tr><td>anything else</td><td><code>any</code></td></tr>
+</table>
+
+<h3>Blueprint-backed types</h3>
+<p>Some types in the game scripts aren't C++ components. They're Blueprint actors with a Luau
+bridge: <code>GolfTeeComponent</code>, <code>TrapSpinnerComponent</code>, <code>SlidingPlatformComponent</code>,
+<code>GameStateManagerBlueprintComponent</code> and others. The generator maps each one to the Blueprint class whose
+functions match the calls in the scripts (for example <code>GolfTeeComponent</code> &rarr; <code>BP_GolfTee_C</code>, which has
+<code>onManualStart</code> and <code>Set_Enable_Arrow</code>). Blueprint functions are listed under several spellings,
+because the scripts call them as written (<code>GameStateManagerBP:PlaySaveEvent()</code>), in lowerCamel
+(<code>setIsRestartable</code>) and without underscores (<code>setEnableArrow</code>). These mappings are
+inferred from the scripts.</p>
+
+<h3>Finding what you need</h3>
+<ol>
+<li>In VS Code, type the variable name and <code>:</code> (methods) or <code>.</code> (events and properties).</li>
+<li><i>Go to Definition</i> (F12) on a type name opens <code>rigel.d.luau</code> at that class, with the C++ comments.</li>
+<li>Search <code>game-scripts/</code> for the method name. A method the game itself calls is much more likely to
+work than one that only appears in the dump.</li>
+<li>Appendix A lists every class in the definitions with its key methods and events.</li>
+</ol>
+</section><section class="chapter" id="ch7"><h2><span class="num">7</span>Worked examples from this kit</h2>
+<p>All six files in <code>examples/</code> type-check with no errors against the definitions
+(<code>luau-lsp analyze</code>, strict mode). Examples 1&ndash;3 only use globals, so they can run on any object
+you place. Examples 4&ndash;6 need their slots wired (chapter 4).</p>
+
+<h3>Example 1: hello</h3>
+<figure class="code"><div class="cap">examples/01_hello.luau</div><pre><span class="c">--!strict</span>
+<span class="c">-- 01_hello.luau</span>
+<span class="c">-- The smallest useful script. Attach it to any sandbox object.</span>
+<span class="c">-- Every machine that has the object (the server, the editor, every player) runs it,</span>
+<span class="c">-- so you will see the line once in EACH machine&#x27;s log:</span>
+<span class="c">--     LogLuau: Display: [01_hello.luau]: Hello from player 3 -- 20 + 22 = 42</span>
+
+<span class="c">-- Code at the top level runs as soon as the script is loaded.</span>
+<span class="k">local</span> answer = <span class="n">20</span> + <span class="n">22</span>
+
+<span class="c">-- BeginPlay is called by the game once the script&#x27;s object is ready.</span>
+<span class="k">function</span> BeginPlay()
+	<span class="c">-- VRPawn.getLocalPlayerIndex() is the index of the player on THIS machine.</span>
+	<span class="c">-- (On the dedicated server there is no local player, so expect a placeholder value there.)</span>
+	<span class="k">local</span> me = VRPawn.getLocalPlayerIndex()
+	log(<span class="s">&quot;Hello from player &quot;</span> .. tostring(me) .. <span class="s">&quot; -- 20 + 22 = &quot;</span> .. tostring(answer))
+<span class="k">end</span>
+
+<span class="c">-- EndPlay is called when the object or its gamemode is torn down (for example when the</span>
+<span class="c">-- object is rebuilt because you attached a new version of this script).</span>
+<span class="k">function</span> EndPlay()
+	log(<span class="s">&quot;Goodbye&quot;</span>)
+<span class="k">end</span></pre></figure>
+<table class="linebyline">
+<tr><td><code>--!strict</code></td><td>Full type checking in VS Code.</td></tr>
+<tr><td><code>local answer = 20 + 22</code></td><td>Top-level code runs as soon as the script loads, on every machine.</td></tr>
+<tr><td><code>function BeginPlay()</code></td><td>Global, so the game can call it once the object is ready.</td></tr>
+<tr><td><code>VRPawn.getLocalPlayerIndex()</code></td><td>A static UFunction, called with a dot. Each client gets its own index.</td></tr>
+<tr><td><code>log("Hello from player " .. ...)</code></td><td>One line per machine in <code>LogLuau</code>.</td></tr>
+<tr><td><code>function EndPlay()</code></td><td>Runs when the object is rebuilt or removed.</td></tr>
+</table>
+
+<h3>Example 2: repeating timer</h3>
+<figure class="code"><div class="cap">examples/02_repeating_timer.luau</div><pre><span class="c">--!strict</span>
+<span class="c">-- 02_repeating_timer.luau</span>
+<span class="c">-- A timer loop: log a heartbeat every 2 seconds, and stop after 5 beats.</span>
+<span class="c">--</span>
+<span class="c">-- LuauClock.timeout(seconds) returns a promise that resolves after that many seconds.</span>
+<span class="c">-- :andThen(fn) runs fn when it resolves. To repeat, schedule the next timeout from inside fn.</span>
+
+<span class="k">local</span> INTERVAL = <span class="n">2</span>      <span class="c">-- seconds between beats</span>
+<span class="k">local</span> MAX_BEATS = <span class="n">5</span>
+
+<span class="k">local</span> beats = <span class="n">0</span>
+<span class="k">local</span> startedAt = <span class="n">0</span>
+
+<span class="k">local</span> <span class="k">function</span> beat()
+	beats += <span class="n">1</span>
+	<span class="k">local</span> elapsed = LuauClock.getTime() - startedAt
+	log(<span class="s">`beat {beats} at {math.floor(elapsed * 10 + 0.5) / 10} s`</span>)
+
+	<span class="k">if</span> beats &lt; MAX_BEATS <span class="k">then</span>
+		LuauClock.timeout(INTERVAL):andThen(beat)
+	<span class="k">else</span>
+		log(<span class="s">&quot;done&quot;</span>)
+	<span class="k">end</span>
+<span class="k">end</span>
+
+<span class="k">function</span> BeginPlay()
+	startedAt = LuauClock.getTime()
+	LuauClock.timeout(INTERVAL):andThen(beat)
+<span class="k">end</span></pre></figure>
+<table class="linebyline">
+<tr><td><code>LuauClock.getTime()</code></td><td>Record the start time so each beat can report the elapsed time.</td></tr>
+<tr><td><code>LuauClock.timeout(INTERVAL):andThen(beat)</code></td><td>Schedule <code>beat</code>. Inside <code>beat</code> the same call schedules the next one, which makes a loop.</td></tr>
+<tr><td><code>if beats &lt; MAX_BEATS then ... else log("done")</code></td><td>Always give a loop a way to stop, or it keeps running on every machine for as long as the object exists.</td></tr>
+<tr><td><code>`beat {beats} at ...`</code></td><td>Backtick string interpolation, as used in the game scripts.</td></tr>
+</table>
+
+<h3>Example 3: promises</h3>
+<figure class="code"><div class="cap">examples/03_promise_sequence.luau</div><pre><span class="c">--!strict</span>
+<span class="c">-- 03_promise_sequence.luau</span>
+<span class="c">-- Two ways to wait: chaining with :andThen, and writing straight-line code with :await().</span>
+<span class="c">-- Both patterns are taken from the game&#x27;s own scripts (TKBGolf, ScraprunPrime).</span>
+
+<span class="c">-- Straight-line style: inside Promise.new(function() ... end) you may call :await(),</span>
+<span class="c">-- which pauses only this function, not the game.</span>
+<span class="k">local</span> <span class="k">function</span> countdown(from: number)
+	Promise.new(<span class="k">function</span>()
+		<span class="k">for</span> n = from, <span class="n">1</span>, -<span class="n">1</span> <span class="k">do</span>
+			log(<span class="s">&quot;T-minus &quot;</span> .. n)
+			LuauClock.timeout(<span class="n">1</span>):await()
+		<span class="k">end</span>
+		log(<span class="s">&quot;Go!&quot;</span>)
+	<span class="k">end</span>)
+<span class="k">end</span>
+
+<span class="c">-- Racing a timeout against something that may happen first (TKBGolf uses this to hide an</span>
+<span class="c">-- arrow after 45 seconds OR as soon as the player starts another hole).</span>
+<span class="k">local</span> cancel: () -&gt; () = <span class="k">function</span>() <span class="k">end</span>
+
+<span class="k">local</span> <span class="k">function</span> waitForSignalOrTimeout(seconds: number)
+	<span class="k">local</span> signalled = Promise.new(<span class="k">function</span>(resolve: (number) -&gt; (), _reject: (any) -&gt; ())
+		cancel = <span class="k">function</span>()
+			resolve(<span class="n">1</span>)
+		<span class="k">end</span>
+	<span class="k">end</span>)
+
+	Promise.race({ LuauClock.timeout(seconds), signalled }):andThen(<span class="k">function</span>()
+		cancel = <span class="k">function</span>() <span class="k">end</span>
+		log(<span class="s">&quot;either the timeout fired or cancel() was called&quot;</span>)
+	<span class="k">end</span>)
+<span class="k">end</span>
+
+<span class="k">function</span> BeginPlay()
+	countdown(<span class="n">3</span>)
+	waitForSignalOrTimeout(<span class="n">10</span>)
+	<span class="c">-- Something else in your script could call cancel() to finish early:</span>
+	LuauClock.timeout(<span class="n">4</span>):andThen(<span class="k">function</span>()
+		cancel()
+	<span class="k">end</span>)
+<span class="k">end</span></pre></figure>
+<table class="linebyline">
+<tr><td><code>Promise.new(function() ... end)</code></td><td>Runs the function as its own coroutine, so <code>:await()</code> can pause it.</td></tr>
+<tr><td><code>LuauClock.timeout(1):await()</code></td><td>Wait one second, then continue with the next line.</td></tr>
+<tr><td><code>Promise.new(function(resolve, _reject) ... end)</code></td><td>A promise you resolve yourself. It keeps <code>resolve</code> in <code>cancel</code> for later.</td></tr>
+<tr><td><code>Promise.race({ timeout, signalled })</code></td><td>Resolves when the first of the two resolves. TKBGolf uses this to hide an arrow early.</td></tr>
+</table>
+</section><section class="chapter" id="ch8"><h2><span class="num">8</span>Fun scripts to drop in</h2>
+<p>Ready-made scripts with slots, in <code>examples/</code> (and in your RigelScripts folder). Attach one and drag
+objects onto its slots.</p>
+<h3>Light switch: show and hide an object</h3>
+<figure class="code"><div class="cap">examples/07_light_switch.luau</div><pre><span class="c">--!strict</span>
+<span class="c">-- 07_light_switch.luau</span>
+<span class="c">-- A light switch that makes another object appear and disappear.</span>
+<span class="c">--</span>
+<span class="c">-- How to use it:</span>
+<span class="c">--   1. Place a Light Switch (or any switch) and the object it should control (a cube, a wall, a platform...).</span>
+<span class="c">--   2. Select the switch, open Details &gt; Luau script, pick LightSwitch and click &quot;Attach to this object&quot;.</span>
+<span class="c">--   3. In Details &gt; Game data, under &quot;Script LightSwitch.luau&quot;, drag the switch itself from the Outliner onto</span>
+<span class="c">--      the Switch slot, and the object onto the Target slot.</span>
+<span class="c">-- Flip the switch: the target shows when it&#x27;s on and hides (and stops blocking players) when it&#x27;s off.</span>
+
+<span class="c">-- External Dependencies (slots: drag objects onto these in the editor)</span>
+<span class="k">local</span> Switch: ToggleableComponent = <span class="k">nil</span>
+<span class="k">local</span> Target: PhysicalComponent = <span class="k">nil</span>
+<span class="c">-- End External Dependencies</span>
+
+<span class="k">local</span> <span class="k">function</span> apply(on: boolean)
+	<span class="k">if</span> on <span class="k">then</span>
+		Target:showLua()
+		Target:setDefaultCollision()
+	<span class="k">else</span>
+		Target:hideLua()
+		Target:disableCollisionLua()
+	<span class="k">end</span>
+<span class="k">end</span>
+
+<span class="k">function</span> BeginPlay()
+	<span class="k">local</span> missing = {}
+	<span class="k">if</span> (Switch :: ToggleableComponent?) == <span class="k">nil</span> <span class="k">then</span> table.insert(missing, <span class="s">&quot;Switch&quot;</span>) <span class="k">end</span>
+	<span class="k">if</span> (Target :: PhysicalComponent?) == <span class="k">nil</span> <span class="k">then</span> table.insert(missing, <span class="s">&quot;Target&quot;</span>) <span class="k">end</span>
+	<span class="k">if</span> #missing &gt; <span class="n">0</span> <span class="k">then</span>
+		log(<span class="s">&quot;LightSwitch: drag objects onto these slots in the editor: &quot;</span> .. table.concat(missing, <span class="s">&quot;, &quot;</span>))
+		<span class="k">return</span>
+	<span class="k">end</span>
+	Switch.blueprintOnEnabled.Listen(<span class="k">function</span>() apply(<span class="k">true</span>) <span class="k">end</span>)
+	Switch.blueprintOnDisabled.Listen(<span class="k">function</span>() apply(<span class="k">false</span>) <span class="k">end</span>)
+	apply(Switch.isEnabled)
+	log(<span class="s">&quot;LightSwitch ready&quot;</span>)
+<span class="k">end</span></pre></figure>
+<h3>Vanishing platform</h3>
+<figure class="code"><div class="cap">examples/08_vanishing_platform.luau</div><pre><span class="c">--!strict</span>
+<span class="c">-- 08_vanishing_platform.luau</span>
+<span class="c">-- A platform that disappears a moment after a player touches it, then comes back. Great for parkour.</span>
+<span class="c">--</span>
+<span class="c">-- Attach it to the platform (a cube or any mesh) and drag that same object onto the Platform slot.</span>
+
+<span class="c">-- External Dependencies</span>
+<span class="k">local</span> Platform: PhysicalComponent = <span class="k">nil</span>
+<span class="c">-- End External Dependencies</span>
+
+<span class="k">local</span> VANISH_AFTER = <span class="n">0.6</span>   <span class="c">-- seconds after the first touch</span>
+<span class="k">local</span> COME_BACK_AFTER = <span class="n">3</span>  <span class="c">-- seconds hidden</span>
+
+<span class="k">local</span> busy = <span class="k">false</span>
+
+<span class="k">function</span> BeginPlay()
+	<span class="k">if</span> (Platform :: PhysicalComponent?) == <span class="k">nil</span> <span class="k">then</span>
+		log(<span class="s">&quot;VanishingPlatform: drag the platform onto the Platform slot&quot;</span>)
+		<span class="k">return</span>
+	<span class="k">end</span>
+	Platform.onOverlapByPlayerSimple.Listen(<span class="k">function</span>()
+		<span class="k">if</span> busy <span class="k">then</span> <span class="k">return</span> <span class="k">end</span>
+		busy = <span class="k">true</span>
+		LuauClock.timeout(VANISH_AFTER):andThen(<span class="k">function</span>()
+			Platform:hideLua()
+			Platform:disableCollisionLua()
+			<span class="k">return</span> LuauClock.timeout(COME_BACK_AFTER)
+		<span class="k">end</span>):andThen(<span class="k">function</span>()
+			Platform:showLua()
+			Platform:setDefaultCollision()
+			busy = <span class="k">false</span>
+		<span class="k">end</span>)
+	<span class="k">end</span>)
+<span class="k">end</span></pre></figure>
+<h3>Blinker</h3>
+<figure class="code"><div class="cap">examples/09_blinker.luau</div><pre><span class="c">--!strict</span>
+<span class="c">-- 09_blinker.luau</span>
+<span class="c">-- Makes an object blink on and off forever: a timing puzzle for parkour, or just a flashing sign.</span>
+<span class="c">--</span>
+<span class="c">-- Attach it to anything and drag the object that should blink onto the Target slot.</span>
+
+<span class="c">-- External Dependencies</span>
+<span class="k">local</span> Target: PhysicalComponent = <span class="k">nil</span>
+<span class="c">-- End External Dependencies</span>
+
+<span class="k">local</span> ON_SECONDS = <span class="n">2</span>
+<span class="k">local</span> OFF_SECONDS = <span class="n">1.5</span>
+
+<span class="k">local</span> <span class="k">function</span> cycle()
+	Target:showLua()
+	Target:setDefaultCollision()
+	LuauClock.timeout(ON_SECONDS):andThen(<span class="k">function</span>()
+		Target:hideLua()
+		Target:disableCollisionLua()
+		<span class="k">return</span> LuauClock.timeout(OFF_SECONDS)
+	<span class="k">end</span>):andThen(cycle)
+<span class="k">end</span>
+
+<span class="k">function</span> BeginPlay()
+	<span class="k">if</span> (Target :: PhysicalComponent?) == <span class="k">nil</span> <span class="k">then</span>
+		log(<span class="s">&quot;Blinker: drag an object onto the Target slot&quot;</span>)
+		<span class="k">return</span>
+	<span class="k">end</span>
+	cycle()
+<span class="k">end</span></pre></figure>
+<h3>Secret door</h3>
+<figure class="code"><div class="cap">examples/10_secret_door.luau</div><pre><span class="c">--!strict</span>
+<span class="c">-- 10_secret_door.luau</span>
+<span class="c">-- A secret door: a button opens it for a few seconds, then it closes again by itself.</span>
+<span class="c">--</span>
+<span class="c">-- Attach it to the button, then drag the button onto the Button slot and the wall/door onto the Door slot.</span>
+
+<span class="c">-- External Dependencies</span>
+<span class="k">local</span> Button: BasicButtonComponent = <span class="k">nil</span>
+<span class="k">local</span> Door: PhysicalComponent = <span class="k">nil</span>
+<span class="c">-- End External Dependencies</span>
+
+<span class="k">local</span> OPEN_SECONDS = <span class="n">5</span>
+<span class="k">local</span> open = <span class="k">false</span>
+
+<span class="k">function</span> BeginPlay()
+	<span class="k">if</span> (Button :: BasicButtonComponent?) == <span class="k">nil</span> <span class="k">or</span> (Door :: PhysicalComponent?) == <span class="k">nil</span> <span class="k">then</span>
+		log(<span class="s">&quot;SecretDoor: drag objects onto the Button and Door slots&quot;</span>)
+		<span class="k">return</span>
+	<span class="k">end</span>
+	Button.onButtonPressEvent.Listen(<span class="k">function</span>()
+		<span class="k">if</span> open <span class="k">then</span> <span class="k">return</span> <span class="k">end</span>
+		open = <span class="k">true</span>
+		Door:hideLua()
+		Door:disableCollisionLua()
+		LuauClock.timeout(OPEN_SECONDS):andThen(<span class="k">function</span>()
+			Door:showLua()
+			Door:setDefaultCollision()
+			open = <span class="k">false</span>
+		<span class="k">end</span>)
+	<span class="k">end</span>)
+<span class="k">end</span></pre></figure>
+</section><section class="chapter" id="ch9"><h2><span class="num">9</span>Worked examples: components and the game&#x27;s scripts</h2>
+<h3>Example 4: a button that toggles a door</h3>
+<figure class="code"><div class="cap">examples/04_button_toggles_door.luau</div><pre><span class="c">--!strict</span>
+<span class="c">-- 04_button_toggles_door.luau</span>
+<span class="c">-- React to an event from a referenced component and drive another one.</span>
+<span class="c">--</span>
+<span class="c">-- IMPORTANT: the two locals in the External Dependencies block are filled in by the game from</span>
+<span class="c">-- the object&#x27;s `references` wiring, matching by name. The Spec Editor does not configure</span>
+<span class="c">-- references yet, so on a plain sandbox object they stay nil. The nil checks below keep the</span>
+<span class="c">-- script from erroring in that case.</span>
+
+<span class="c">-- External Dependencies</span>
+<span class="k">local</span> Button: BasicButtonComponent = <span class="k">nil</span>
+<span class="k">local</span> Door: PhysicalComponent = <span class="k">nil</span>
+<span class="c">-- End External Dependencies</span>
+
+<span class="k">local</span> doorOpen = <span class="k">false</span>
+
+<span class="k">local</span> <span class="k">function</span> setDoor(open: boolean)
+	doorOpen = open
+	<span class="k">if</span> open <span class="k">then</span>
+		Door:hideLua()               <span class="c">-- make it invisible ...</span>
+		Door:disableCollisionLua()   <span class="c">-- ... and let players walk through</span>
+	<span class="k">else</span>
+		Door:showLua()
+		Door:setDefaultCollision()
+	<span class="k">end</span>
+	log(<span class="s">&quot;door &quot;</span> .. (<span class="k">if</span> open <span class="k">then</span> <span class="s">&quot;opened&quot;</span> <span class="k">else</span> <span class="s">&quot;closed&quot;</span>))
+<span class="k">end</span>
+
+<span class="k">function</span> BeginPlay()
+	<span class="k">if</span> (Button :: BasicButtonComponent?) == <span class="k">nil</span> <span class="k">or</span> (Door :: PhysicalComponent?) == <span class="k">nil</span> <span class="k">then</span>
+		log(<span class="s">&quot;Button/Door references are not wired; nothing to do&quot;</span>)
+		<span class="k">return</span>
+	<span class="k">end</span>
+
+	<span class="c">-- Events are listened to with a DOT: component.eventName.Listen(function(...) end)</span>
+	Button.onButtonPressEvent.Listen(<span class="k">function</span>()
+		setDoor(<span class="k">not</span> doorOpen)
+	<span class="k">end</span>)
+
+	setDoor(<span class="k">false</span>)
+<span class="k">end</span></pre></figure>
+<table class="linebyline">
+<tr><td><code>local Button: BasicButtonComponent = nil</code></td><td>Filled from a reference named <code>Button</code>. The type gives you <code>Button.onButtonPressEvent</code> and <code>Button:luaEnableButton()</code>.</td></tr>
+<tr><td><code>(Button :: BasicButtonComponent?) == nil</code></td><td>The cast to an optional type lets strict mode accept a <code>nil</code> comparison. At runtime it's a plain nil check.</td></tr>
+<tr><td><code>Door:hideLua()</code> / <code>disableCollisionLua()</code></td><td><code>PhysicalComponent</code> methods. Scraprun opens its forcefields with this exact pair.</td></tr>
+<tr><td><code>Button.onButtonPressEvent.Listen(...)</code></td><td>Dot + <code>Listen</code>. Scraprun hooks every trap button this way.</td></tr>
+</table>
+
+<h3>Example 5: a trigger zone</h3>
+<figure class="code"><div class="cap">examples/05_trigger_zone.luau</div><pre><span class="c">--!strict</span>
+<span class="c">-- 05_trigger_zone.luau</span>
+<span class="c">-- A PhysicalComponent used as a trigger volume: greet players who walk into it,</span>
+<span class="c">-- and hand out a quest event.</span>
+<span class="c">--</span>
+<span class="c">-- As in 04, `Zone` comes from the object&#x27;s references wiring, which the editor</span>
+<span class="c">-- cannot set up yet.</span>
+
+<span class="c">-- External Dependencies</span>
+<span class="k">local</span> Zone: PhysicalComponent = <span class="k">nil</span>
+<span class="c">-- End External Dependencies</span>
+
+<span class="k">local</span> visits: { [number]: number } = {}
+
+<span class="k">function</span> BeginPlay()
+	<span class="k">if</span> (Zone :: PhysicalComponent?) == <span class="k">nil</span> <span class="k">then</span>
+		log(<span class="s">&quot;Zone reference is not wired&quot;</span>)
+		<span class="k">return</span>
+	<span class="k">end</span>
+
+	<span class="c">-- Make the volume a trigger (overlaps fire, nothing blocks).</span>
+	Zone:setTriggerCollision()
+
+	<span class="c">-- Fires on the server with the index of the player who entered.</span>
+	Zone.onOverlapByPlayerServer.Listen(<span class="k">function</span>(playerIndex: number)
+		visits[playerIndex] = (visits[playerIndex] <span class="k">or</span> <span class="n">0</span>) + <span class="n">1</span>
+		<span class="k">local</span> name = VRPawn.getPlayerName(playerIndex)
+		<span class="k">local</span> team = VRPawn.getTeamIndexByID(playerIndex)
+		log(<span class="s">`{name} (team {team}) entered the zone, visit #{visits[playerIndex]}`</span>)
+	<span class="k">end</span>)
+
+	<span class="c">-- Fires on the machine of the player who entered (no argument): good for per-player</span>
+	<span class="c">-- effects such as quest progress. -1 means &quot;the local player&quot;, as in the golf scripts.</span>
+	Zone.onOverlapByPlayerClientside.Listen(<span class="k">function</span>()
+		Quests.event(-<span class="n">1</span>, <span class="s">&quot;MyZone_Entered&quot;</span>)
+	<span class="k">end</span>)
+<span class="k">end</span></pre></figure>
+<p><code>onOverlapByPlayerServer</code> passes the player index, and <code>onOverlapByPlayerClientside</code>
+passes nothing and fires on the entering player's own machine. That split is the one
+<code>TKBGolf__Course.luau</code> uses to start a hole for the player who walked in.</p>
+
+<h3>Example 6: vectors and balls</h3>
+<figure class="code"><div class="cap">examples/06_vectors_and_balls.luau</div><pre><span class="c">--!strict</span>
+<span class="c">-- 06_vectors_and_balls.luau</span>
+<span class="c">-- Vector maths plus a ball spawner: spawn a personal ball for the local player, then</span>
+<span class="c">-- launch it straight up whenever it comes to rest. Mirrors TKBGolf&#x27;s Course.luau.</span>
+<span class="c">--</span>
+<span class="c">-- `Spawner` comes from the object&#x27;s references wiring (not configurable in the editor yet).</span>
+
+<span class="c">-- External Dependencies</span>
+<span class="k">local</span> Spawner: BallSpawnerComponent = <span class="k">nil</span>
+<span class="c">-- End External Dependencies</span>
+
+<span class="c">-- Vectors support + - * / and have .x .y .z</span>
+<span class="k">local</span> <span class="k">function</span> length(v: Vector): number
+	<span class="k">return</span> math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z)
+<span class="k">end</span>
+
+<span class="k">local</span> <span class="k">function</span> launch(ball: DiscEntity)
+	<span class="k">local</span> up = ball:getGravityDirection() * -<span class="n">1</span>    <span class="c">-- opposite of gravity</span>
+	ball:setVelocity(up * <span class="n">1500</span>)                   <span class="c">-- Unreal units: cm/s</span>
+	log(<span class="s">`launched; speed now {math.floor(length(ball:getDiscVelocity()))}`</span>)
+<span class="k">end</span>
+
+<span class="k">function</span> BeginPlay()
+	<span class="k">if</span> (Spawner :: BallSpawnerComponent?) == <span class="k">nil</span> <span class="k">then</span>
+		log(<span class="s">&quot;Spawner reference is not wired&quot;</span>)
+		<span class="k">return</span>
+	<span class="k">end</span>
+
+	<span class="k">local</span> params = BallSpawnParameters.new({
+		position = Spawner:getActorLocationLuau() + Vector.new(<span class="n">0</span>, <span class="n">0</span>, <span class="n">100</span>),
+		isPersonalBall = <span class="k">true</span>,
+		targetPlayerIndex = VRPawn.getLocalPlayerIndex(),
+	})
+
+	<span class="c">-- spawnBallWithParameters returns a promise that resolves with the ball on this machine.</span>
+	Spawner:spawnBallWithParameters(params):andThen(<span class="k">function</span>(ball: DiscEntity)
+		ball:setEnableHUDIndicator(<span class="k">true</span>)
+		ball.onGoToSleep.Listen(<span class="k">function</span>()
+			launch(ball)
+		<span class="k">end</span>)
+	<span class="k">end</span>)
+<span class="k">end</span></pre></figure>
+<p>The spawn call follows TKBGolf's course script. <code>spawnBallWithParameters</code> is declared in C++ as
+returning <code>ADiscEntity*</code>, but in Luau it returns a <b>promise</b> of the ball (the game script
+chains <code>:andThen(function(Disc: DiscEntity) ...)</code>). The definitions include that correction.</p>
+
+<h3>From the game: starting a hole (TKBGolf)</h3>
+<figure class="code"><div class="cap">game-scripts/TKBGolf__Course.luau, lines 130-151</div><pre>	<span class="k">local</span> Parameters = BallSpawnParameters.new({
+		position = Vector.new(<span class="n">1</span>, <span class="n">2</span>, <span class="n">3</span>),
+		isPersonalBall = <span class="k">true</span>,
+		targetPlayerIndex = VRPawn.getLocalPlayerIndex(),
+		<span class="k">type</span> = BallType,
+	});
+	<span class="c">--log(&quot;Spawning Ball&quot;)</span>
+
+
+	Tee:spawnBallWithParameters(Parameters):andThen(<span class="k">function</span>(Disc: DiscEntity)
+		<span class="c">--log(&quot;Ball Now Spawned On Client&quot;)</span>
+		<span class="c">-- Disc:SetEnableHUDIndicator2(true)</span>
+		Disc:setEnableHUDIndicator(<span class="k">true</span>)
+		SpawnedBalls[Tee] = Disc
+		MyBall = Disc
+
+		<span class="c">-- When the ball goes to sleep/rest. Lift it up 10 units slowly</span>
+		Disc.onGoToSleep.Listen(<span class="k">function</span>()
+			<span class="c">--log(&quot;onGoToSleep&quot;)</span>
+			Disc:addSmoothOffset(Disc:getGravityDirection() * -<span class="n">10</span>)
+		<span class="k">end</span>)
+	<span class="k">end</span>)</pre></figure>
+<table class="linebyline">
+<tr><td><code>BallSpawnParameters.new({ ... })</code></td><td>C++ struct <code>FBallSpawnParameters</code>, keys in lowerCamel.</td></tr>
+<tr><td><code>targetPlayerIndex = VRPawn.getLocalPlayerIndex()</code></td><td>Each client spawns its own personal ball.</td></tr>
+<tr><td><code>Tee:spawnBallWithParameters(Parameters):andThen(...)</code></td><td>A promise of the spawned <code>DiscEntity</code>.</td></tr>
+<tr><td><code>Disc.onGoToSleep.Listen(...)</code></td><td>An event on the ball, fired when it comes to rest.</td></tr>
+<tr><td><code>Disc:getGravityDirection() * -10</code></td><td>Vector times number. (<code>addSmoothOffset</code> is a <code>BallSpawnerComponent</code> method in the dump, not a <code>DiscEntity</code> one, so this call can't be confirmed from the dump.)</td></tr>
+</table>
+
+<h3>From the game: a state machine driven by timers (ScraprunPrime)</h3>
+<figure class="code"><div class="cap">game-scripts/ScraprunPrime__gamemode.luau, lines 362-370</div><pre><span class="k">function</span> SwitchState(state: number)
+    GameStateManager:updateGameState(state)
+    currentState = state
+    stateMachineOnEnters[currentState].onEnter()
+    <span class="k">local</span> length = stateMachineOnEnters[currentState].basicTimerLength
+    <span class="k">if</span> length ~= <span class="k">nil</span> <span class="k">then</span>
+        BasicTimer:start(length)
+    <span class="k">end</span>
+<span class="k">end</span></pre></figure>
+<figure class="code"><div class="cap">game-scripts/ScraprunPrime__gamemode.luau, lines 757-764</div><pre><span class="k">function</span> BeginPlay()
+	BasicTimer.finished.Listen(BasicTimerFinished)
+	GameTimer.onCountdownEnd.Listen(OnTimerCountdownFinished)
+	GameTimer.onTimerStopped.Listen(OnTimerFinished)
+	GameTimer.enterGameState.Listen(SwitchState)
+	KillerTeamChanger.teamSizeDecreased.Listen(PlayerLeftTeam)
+	RunnerTeamChanger.teamSizeDecreased.Listen(PlayerLeftTeam)
+    StartButton.onButtonPressEvent.Listen(OnStartGameButtonPress)</pre></figure>
+<p><code>BasicTimer</code> is a <code>TimerComponent</code>. <code>BasicTimer:start(length)</code> starts it, and
+<code>BasicTimer.finished</code> fires when it runs out. The script keeps a table of states, and each state has an
+<code>onEnter</code> function, an optional <code>nextState</code> and an optional timer length.</p>
+
+<h3>From the game: passing data to the server (TKBGolf)</h3>
+<figure class="code"><div class="cap">game-scripts/TKBGolf__ServerCourseLogic.luau, lines 108-116</div><pre>    EventComponent.serverEventData.Listen(<span class="k">function</span> (Data: any)
+        <span class="c">-- --log(`Handling Event: ${Data.EventType}`)</span>
+        <span class="k">if</span> EventHandlers[Data.EventType] <span class="k">then</span>
+            <span class="c">-- --log(&quot;Handling Event&quot;)</span>
+            EventHandlers[Data.EventType](Data)
+        <span class="k">else</span>
+            <span class="c">-- --log(&quot;Event not handled&quot;)</span>
+                <span class="k">end</span>
+    <span class="k">end</span>)</pre></figure>
+<p>The course script (on every client) calls <code>MainEventRepeater:triggerEventWithData({ EventType = ..., ... })</code>,
+and the server-side scoreboard script receives the same table through <code>EventComponent.serverEventData</code>.
+Any Luau table can be sent this way (the <code>Ref</code> type).</p>
+</section><section class="chapter" id="ch10"><h2><span class="num">10</span>Setting up VS Code</h2>
+<ol class="steps">
+<li><b>Install VS Code</b> from <code>code.visualstudio.com</code>.</li>
+<li><b>Install the extension.</b> Open Extensions (<code>Ctrl+Shift+X</code>), search <b>Luau Language Server</b>
+by <i>JohnnyMorganz</i> (<code>JohnnyMorganz.luau-lsp</code>) and click Install.</li>
+<li><b>Open the kit folder.</b> <i>File &rarr; Open Folder...</i> and choose <code>SpecEditor\luau</code>
+itself. The settings in <code>.vscode/settings.json</code> use paths relative to this folder.</li>
+<li><b>Check it works.</b> Open <code>examples/01_hello.luau</code> and hover <code>log</code>: you should see
+<code>log(...: any): ()</code>. Type <code>VRPawn.</code> and the static functions appear.</li>
+<li><b>Write your script</b> as a new <code>.luau</code> file in <code>Documents\RigelScripts</code> (the editor's
+<b>Open folder in VS Code</b> button opens it with these settings), then attach it (chapter 2). Saving the
+file re-sends it.</li>
+</ol>
+
+<h3>What the settings do</h3>
+<figure class="code"><div class="cap">.vscode/settings.json</div><pre>{
+    <span class="s">&quot;luau-lsp.platform.type&quot;</span>: <span class="s">&quot;standard&quot;</span>,
+    <span class="s">&quot;luau-lsp.sourcemap.enabled&quot;</span>: <span class="k">false</span>,
+    <span class="s">&quot;luau-lsp.types.definitionFiles&quot;</span>: { <span class="s">&quot;@rigel&quot;</span>: <span class="s">&quot;types/rigel.d.luau&quot;</span> },
+    <span class="s">&quot;luau-lsp.ignoreGlobs&quot;</span>: [<span class="s">&quot;game-scripts/**&quot;</span>]
+}</pre></figure>
+<ul>
+<li><code>platform.type: "standard"</code> makes this plain Luau, with no Roblox globals.</li>
+<li><code>types.definitionFiles</code> loads the game API. The setting is a map from a name to a file, as
+the current extension expects.</li>
+<li><code>ignoreGlobs</code> hides problems in the dumped game scripts, which call a few things the
+definitions can't know about.</li>
+</ul>
+<figure class="code"><div class="cap">.luaurc</div><pre>{
+    <span class="s">&quot;languageMode&quot;</span>: <span class="s">&quot;strict&quot;</span>,
+    <span class="s">&quot;lint&quot;</span>: { <span class="s">&quot;*&quot;</span>: <span class="k">true</span>, <span class="s">&quot;FunctionUnused&quot;</span>: <span class="k">false</span> },
+    <span class="s">&quot;lintErrors&quot;</span>: <span class="k">false</span>,
+    <span class="s">&quot;typeErrors&quot;</span>: <span class="k">true</span>
+}</pre></figure>
+<p><code>FunctionUnused</code> is off because nothing in the file calls <code>BeginPlay</code> and <code>EndPlay</code>
+(the game does).</p>
+
+<h3>What you get</h3>
+<ul>
+<li>Completion after <code>obj:</code> (methods) and <code>obj.</code> (events, properties), with parameter hints.</li>
+<li>Red underlines for misspelt methods, wrong argument types and wrong argument counts.</li>
+<li>Typed event callbacks: in <code>Cup.onBallInCup_Multicast.Listen(function(cup, score, disc) ...)</code> the
+editor knows <code>score</code> is a number.</li>
+</ul>
+<div class="note"><b>Definition syntax</b>
+<code>rigel.d.luau</code> uses <code>declare extern type Name with ... end</code>, the syntax current luau-lsp
+releases expect (checked with luau-lsp 1.70). Older releases used <code>declare class</code> and newer ones reject it.
+If an old extension shows "Failed to read definitions file", update it.</div>
+<div class="tip"><b>Regenerating</b>
+Run <code>python generate_defs.py</code> in the folder after the SDK dump changes, then
+<i>Luau: Restart Language Server</i> from the command palette.</div>
+</section><section class="chapter" id="ch11"><h2><span class="num">11</span>Troubleshooting</h2>
+<h3>Where the output goes</h3>
+<p>Every machine writes its own log. On a PC client it is
+<code>%LOCALAPPDATA%\A2\Saved\Logs\A2*.log</code> (the newest is <code>A2.log</code>; older runs are
+<code>A2_2.log</code> and so on). The server writes its own log on the server machine.</p>
+<table class="t">
+<tr><th>You wrote</th><th>The log shows</th></tr>
+<tr><td><code>log("hi")</code></td><td><code>LogLuau: Display: [MyScript.luau]: hi</code></td></tr>
+<tr><td><code>warn("hi")</code></td><td><code>LogLuau: Warning: [MyScript.luau]: hi</code></td></tr>
+</table>
+<p>Search for <code>[MyScript.luau]</code> to see only your script's lines.</p>
+
+<div class="tip"><b>Errors pop up in the editor</b>
+When one of your scripts hits an error on any machine, the editor shows a popup with the file, the line, what
+went wrong in plain words and how to fix it, plus an <b>Open in VS Code</b> button that jumps to the line.</div>
+<div class="note"><b>Errors can't crash the game</b>
+The server adds a small safety net to the end of every script: <code>BeginPlay</code>, <code>EndPlay</code> and
+<code>Tick</code> run inside <code>pcall</code>, and the game already catches errors in event listeners and timers.
+A mistake stops that one function and is reported; the object, the server and every player keep running.
+(The safety net is added after your last line, so line numbers in errors match your file.)</div>
+
+<h3>Nothing appears</h3>
+<ul>
+<li><b>Compile errors.</b> The editor checks every script for typos before sending it. If there's a typo, a
+popup names the line and what's wrong, and the script isn't sent. VS Code also shows syntax errors as you type. Then search the log for your script name and for <code>LogLuau</code> lines
+of Warning or Error verbosity. The exact error format hasn't been captured yet.</li>
+<li><b>Only top-level code ran.</b> Check that <code>BeginPlay</code> is a global function with that exact spelling.</li>
+<li><b>An early error in BeginPlay.</b> A runtime error stops the rest of the function. A <code>nil</code> dependency
+(no references wiring) is the usual cause, so check for it and log it, as the examples do.</li>
+<li><b>Wrong machine.</b> Server-side events (<code>onOverlapByPlayerServer</code>) only fire on the server, so
+look in the server log for those.</li>
+</ul>
+
+<h3>The object changed after I attached a script</h3>
+<p>That's expected. Attaching <b>rebuilds the object</b> with the new component entry. Any runtime state
+it had is lost, and the script starts again from <code>BeginPlay</code>. Reloading a level does the same.</p>
+
+<h3>Something runs twice (or once per player)</h3>
+<p>The script runs on every machine (chapter 1). Guard work that should happen once: do authoritative work
+in server events, and per-player work in client-side events or behind a
+<code>VRPawn.getLocalPlayerIndex()</code> check.</p>
+
+<h3>VS Code problems</h3>
+<table class="t">
+<tr><th>Symptom</th><th>Fix</th></tr>
+<tr><td>"Unknown global 'log'", no completions</td><td>Open <code>SpecEditor\luau</code> as the folder (not the repo root), then <i>Luau: Restart Language Server</i>.</td></tr>
+<tr><td>"Failed to read definitions file"</td><td>Update the Luau Language Server extension, or re-run <code>generate_defs.py</code>.</td></tr>
+<tr><td>"Key 'Foo' not found in external type"</td><td>That method isn't in the class dump for that type. Check spelling (lowerCamel) and Appendix A.</td></tr>
+<tr><td>"cannot be compared with ~= / =="</td><td>Cast to an optional type first: <code>(Door :: PhysicalComponent?) == nil</code>.</td></tr>
+<tr><td>"Unknown require"</td><td><code>require("OtherScript")</code> resolves inside the game, not on disk.</td></tr>
+</table>
+</section><section class="chapter" id="ch12"><h2><span class="num">12</span>Limitations</h2>
+<div class="warn"><b>Read this before building something big</b>
+The kit combines verified facts, game scripts and a class dump. They aren't equally reliable.</div>
+<table class="t">
+<tr><th>Topic</th><th>Status</th></tr>
+<tr><td>Attaching, compiling and running on every machine; <code>log</code></td><td><b>Verified</b> in Rigel (server, editor client, unmodded client).</td></tr>
+<tr><td>Saving scripts with levels, re-attaching on load</td><td><b>Verified</b> as editor behaviour.</td></tr>
+<tr><td><code>LuauClock</code>, <code>Promise</code>, events, <code>Vector</code>, <code>VRPawn.*</code>, <code>Quests.*</code>, <code>Gamemode</code></td><td>Used by the game's own scripts, so they exist in the game's Luau environment. Not yet exercised from an editor-attached script.</td></tr>
+<tr><td>Method lists in <code>rigel.d.luau</code></td><td><b>Generated from the class dump.</b> Every UFunction of every component is listed, but not every one is necessarily exposed to Luau or safe to call (some are network RPCs or engine callbacks such as <code>overlapBegin</code>). Prefer methods the game scripts call. <b>Test in a local server first.</b></td></tr>
+<tr><td>Properties</td><td>Public simple-typed fields are listed (the scripts read e.g. <code>disc.rollbackRecentPlayerHit</code>), but whether a particular field is readable or writable from Luau is unknown.</td></tr>
+<tr><td>External Dependencies / references</td><td><b>Wired by dragging</b> from the Outliner onto a slot. The target must be in the same gamemode area as the scripted object.</td></tr>
+<tr><td>Blueprint-backed types, PascalCase spellings</td><td>Inferred from the game scripts (e.g. <code>GolfTeeComponent</code> &rarr; <code>BP_GolfTee_C</code>).</td></tr>
+<tr><td>Return values</td><td>Object returns are typed as never-nil for convenience, but at runtime they can be <code>nil</code> (e.g. <code>getSpawnedBall()</code> before a ball exists). Check before use.</td></tr>
+<tr><td>The game scripts themselves</td><td>They contain a few calls the dump doesn't back (<code>Disc:addSmoothOffset</code> on a <code>DiscEntity</code>, <code>resetBall</code> with extra arguments). Don't copy those as-is.</td></tr>
+</table>
+<h3>Safe habits</h3>
+<ul>
+<li>Test on a local server with a mock or second client before a live station. Never try a new script on a server with players on it.</li>
+<li>Start with <code>log</code> lines around every call you haven't used before.</li>
+<li>Check every dependency for <code>nil</code>, and give every loop a stop condition.</li>
+</ul>
+</section><section class="chapter newpage" id="appA"><h2><span class="num">A</span>Appendix: component and class reference</h2>
+<p>Every class in <code>rigel.d.luau</code>, with up to six key methods (engine callbacks and network
+RPCs left out), and its first few events. Call methods with <code>:</code> and listen to events with
+<code>.name.Listen(fn)</code>. The full lists, with C++ declarations, are in the definitions file.</p>
+<div class="apigrid"><div class="api">
+  <h4>LuauBehavior</h4>
+  <div class="origin">C++ ULuauBehavior &middot; SandboxEngine &middot; LuauBehavior component</div>
+  <ul class="methods"><li><code>:isNetworkReady(): boolean</code></li></ul>
+  <div class="evs"><b>Events:</b> <em>none</em></div>
+  
+</div>
+<div class="api">
+  <h4>A2Object <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ UA2Object &middot; SandboxEngine &middot; LuauBehavior component</div>
+  <ul class="methods"><li><code>:getGamePosition(): Vector</code></li></ul>
+  <div class="evs"><b>Events:</b> <em>none</em></div>
+  
+</div>
+<div class="api">
+  <h4>ArenaSignUpComponent <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ UArenaSignUpComponent &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li><code>:getTicketManager(): ()</code></li></ul>
+  <div class="evs"><b>Events:</b> <em>none</em></div>
+  
+</div>
+<div class="api">
+  <h4>BallSpawnerComponent <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ UBallSpawnerComponent &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li><code>:addSmoothOffset(offset: Vector): ()</code></li><li><code>:beginListeningForBallGrounded(): ()</code></li><li><code>:checkForDeletedBalls(): ()</code></li><li><code>:checkIfBallGroundedUponHit(hit: any, oldVelocity: Vector): ()</code></li><li><code>:destroyBall(entity: DiscEntity): ()</code></li><li><code>:discWasHit(): ()</code></li><li class="more">+ 22 more in rigel.d.luau</li></ul>
+  <div class="evs"><b>Events:</b> <code>.discWasSpawned</code>, <code>.discBeingDestroyed</code>, <code>.discWasSpawnedWithDiscArg</code>, <code>.onBallGrounded</code>, <code>.playerHitLuau</code></div>
+  
+</div>
+<div class="api">
+  <h4>BallLauncherComponent <span class="par">extends BallSpawnerComponent</span></h4>
+  <div class="origin">C++ UBallLauncherComponent &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li><code>:grabBlock(blockGrabbed: any): ()</code></li><li><code>:onBallThrown(grabComponent: any, throwVelocity: Vector, throwAngularVelocity: Vector): ()</code></li><li><code>:onGoal(): ()</code></li><li><code>:releaseBlock(): ()</code></li><li><code>:setPlayerTarget(inPlayerTarget: any): ()</code></li></ul>
+  <div class="evs"><b>Events:</b> <code>.onBallLaunched</code></div>
+  
+</div>
+<div class="api">
+  <h4>BasicButtonComponent <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ UBasicButtonComponent &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li><code>:luaDisableButton(): ()</code></li><li><code>:luaEnableButton(): ()</code></li><li><code>:setButtonText(newText: string): ()</code></li><li><code>:setOnCooldown(newBool: boolean): ()</code></li></ul>
+  <div class="evs"><b>Events:</b> <code>.onButtonPressEvent</code></div>
+  
+</div>
+<div class="api">
+  <h4>DataTableComponent <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ UDataTableComponent &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li><code>:beginDataTransaction(): ()</code></li><li><code>:clearCellBackgroundColor(text: LinearColor, row: number, col: number): ()</code></li><li><code>:clearCellTextColor(text: LinearColor, row: number, col: number): ()</code></li><li><code>:endDataTransaction(): ()</code></li><li><code>:getIndex(test: string): number</code></li><li><code>:getTest(): any</code></li><li class="more">+ 7 more in rigel.d.luau</li></ul>
+  <div class="evs"><b>Events:</b> <em>none</em></div>
+  
+</div>
+<div class="api">
+  <h4>DriftballControlPanelComponent <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ UDriftballControlPanelComponent &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li><code>:practiceButtonOverlappedOnServer(): ()</code></li><li><code>:practiceModeButtonEmitNetEvent(): ()</code></li><li><code>:restartButtonEmitNetEvent(): ()</code></li><li><code>:restartButtonOverlappedOnServer(): ()</code></li></ul>
+  <div class="evs"><b>Events:</b> <code>.restartButtonHit</code>, <code>.practiceModeButtonHit</code></div>
+  
+</div>
+<div class="api">
+  <h4>EffectVolume <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ UEffectVolume &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li><code>:checkOverlappingComponents(): ()</code></li><li><code>:onOverlapBegin(overlappedActor: any, otherActor: any): ()</code></li><li><code>:onOverlapEnd(overlappedActor: any, otherActor: any): ()</code></li></ul>
+  <div class="evs"><b>Events:</b> <em>none</em></div>
+  
+</div>
+<div class="api">
+  <h4>EventComponent <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ UEventComponent &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li><code>:eventCompleteWithDiscArgument(disc: DiscEntity): ()</code></li><li><code>:getLocalPosition(): Vector</code></li><li><code>:triggerEventWithData(ref: Ref): ()</code></li><li><code>:triggerEventWithInt(integerArg: number): ()</code></li><li><code>:triggerMulticastEventWithData(ref: Ref): ()</code></li></ul>
+  <div class="evs"><b>Events:</b> <code>.serverEvent</code>, <code>.serverEventData</code>, <code>.on_MulticastEventData</code>, <code>.eventCompleted</code>, <code>.eventCompleteWithInt</code></div>
+  
+</div>
+<div class="api">
+  <h4>GameStateManagerComponent <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ UGameStateManagerComponent &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li><code>:ballHitEvent_Multicast(i: number): ()</code></li><li><code>:ballHitEvent_Server(i: number): ()</code></li><li><code>:callBallHitsStartTrigger(): ()</code></li><li><code>:skipGameStateTimer(): ()</code></li><li><code>:updateGameState(newState: number): ()</code></li></ul>
+  <div class="evs"><b>Events:</b> <code>.skipGameState</code>, <code>.forceBallHitStartTrigger</code>, <code>.onGameStateChanged</code>, <code>.getArenaWalls</code>, <code>.ballHitEvent</code> <span class="more">+1 more</span></div>
+  
+</div>
+<div class="api">
+  <h4>GameTimeComponent <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ UGameTimeComponent &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li><code>:getCountdownMinutes(): string</code></li><li><code>:getCountdownSeconds(): string</code></li><li><code>:getGameMinutes(): string</code></li><li><code>:getGameSeconds(): string</code></li><li><code>:getGameTime(): string</code></li><li><code>:getMsInGameClock(): number</code></li><li class="more">+ 14 more in rigel.d.luau</li></ul>
+  <div class="evs"><b>Events:</b> <code>.onGetGameTime</code>, <code>.onGetSoundManager</code>, <code>.onGetCountdownTime</code>, <code>.onTimerStopped</code>, <code>.onCountdownEnd</code> <span class="more">+1 more</span></div>
+  
+</div>
+<div class="api">
+  <h4>GamemodeLoaderComponent <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ UGamemodeLoaderComponent &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li class="more">no methods of its own</li></ul>
+  <div class="evs"><b>Events:</b> <em>none</em></div>
+  
+</div>
+<div class="api">
+  <h4>GoalComponent <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ UGoalComponent &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li><code>:enableGoal(enable: boolean): ()</code></li><li><code>:getForwardVectorLuau(): Vector</code></li><li><code>:getPosition(): Vector</code></li><li><code>:resetColor(bResetBlocks: boolean): ()</code></li><li><code>:setColor(goalColor: LinearColor): ()</code></li><li><code>:setColorByIndex(teamIndex: number): ()</code></li><li class="more">+ 6 more in rigel.d.luau</li></ul>
+  <div class="evs"><b>Events:</b> <code>.blueprintOnEffectOn</code>, <code>.blueprintOnEffectOff</code>, <code>.setGoalieBlocks</code>, <code>.setNeutralGoalieBlocks</code>, <code>.playSound</code> <span class="more">+5 more</span></div>
+  
+</div>
+<div class="api">
+  <h4>GoalieTrainingComponent <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ UGoalieTrainingComponent &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li><code>:endBecausePlayerLeft(): ()</code></li><li><code>:getRelevantPawn(): VRPawn</code></li><li><code>:getSlot(): ()</code></li><li><code>:luaDisable(): ()</code></li><li><code>:luaEnable(): ()</code></li><li><code>:playerHasJoined(): ()</code></li><li class="more">+ 4 more in rigel.d.luau</li></ul>
+  <div class="evs"><b>Events:</b> <code>.blueprintOnDiscSpawned</code>, <code>.blueprintOnDisabled</code>, <code>.blueprintOnEnabled</code>, <code>.blueprintEndBecausePlayerLeft</code>, <code>.blueprintGoalieDifficultyChanged</code> <span class="more">+2 more</span></div>
+  
+</div>
+<div class="api">
+  <h4>GolfCupComponent <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ UGolfCupComponent &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li><code>:ballInCup(score: number, entity: DiscEntity): ()</code></li><li><code>:setCupVisibility(show: boolean): ()</code></li><li><code>:setEnableArrowIndicator(enable: boolean): ()</code></li><li><code>:setEnableHUDIndicator(enable: boolean): ()</code></li><li><code>:setOutlineVisibility(show: boolean): ()</code></li><li class="more">+ 1 more in rigel.d.luau</li></ul>
+  <div class="evs"><b>Events:</b> <code>.onBallInCup_Server</code>, <code>.onBallInCup_Multicast</code>, <code>.onSetCupVisibility</code>, <code>.onSetOutlineVisibility</code>, <code>.onSetEnableHUDIndicator</code> <span class="more">+1 more</span></div>
+  
+</div>
+<div class="api">
+  <h4>HandholdComponent <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ UHandholdComponent &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li><code>:getGrabbableComponent(): any</code></li><li><code>:setHandHoldColor(color: LinearColor): ()</code></li></ul>
+  <div class="evs"><b>Events:</b> <em>none</em></div>
+  
+</div>
+<div class="api">
+  <h4>LevelSwapperComponent <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ ULevelSwapperComponent &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li class="more">no methods of its own</li></ul>
+  <div class="evs"><b>Events:</b> <em>none</em></div>
+  
+</div>
+<div class="api">
+  <h4>LuauBlueprintComponent <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ ULuauBlueprintComponent &middot; SandboxEngine &middot; LuauBehavior component</div>
+  <ul class="methods"><li class="more">no methods of its own</li></ul>
+  <div class="evs"><b>Events:</b> <code>.fLoadInInitialPersistents</code>, <code>.fLoadInGameDataFromPersistents</code>, <code>.fBeginGamemode</code>, <code>.fSetup</code></div>
+  
+</div>
+<div class="api">
+  <h4>NetVarModifierComponent <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ UNetVarModifierComponent &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li class="more">no methods of its own</li></ul>
+  <div class="evs"><b>Events:</b> <em>none</em></div>
+  
+</div>
+<div class="api">
+  <h4>NetworkRepeater <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ UNetworkRepeater &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li class="more">no methods of its own</li></ul>
+  <div class="evs"><b>Events:</b> <em>none</em></div>
+  
+</div>
+<div class="api">
+  <h4>PasserSpawnerComponent <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ UPasserSpawnerComponent &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li><code>:reachBegin(overlappedComponent: any, otherActor: any, otherComp: any, otherBodyIndex: number, fromSweep: boolean, sweepResult: any): ()</code></li><li><code>:reachEnd(overlappedComponent: any, otherActor: any, otherComp: any, otherBodyIndex: number): ()</code></li><li class="more">+ 2 more in rigel.d.luau</li></ul>
+  <div class="evs"><b>Events:</b> <em>none</em></div>
+  
+</div>
+<div class="api">
+  <h4>PhysicalComponent <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ UPhysicalComponent &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li><code>:disableCollisionLua(): ()</code></li><li><code>:getLocalPosition(): Vector</code></li><li><code>:hideLua(): ()</code></li><li><code>:hideLuaClientside(): ()</code></li><li><code>:setDefaultCollision(): ()</code></li><li><code>:setTriggerCollision(): ()</code></li><li class="more">+ 5 more in rigel.d.luau</li></ul>
+  <div class="evs"><b>Events:</b> <code>.onHitByDisc</code>, <code>.onOverlapByDisc</code>, <code>.onOverlapByPlayer</code>, <code>.onOverlapByDiscSimple</code>, <code>.onOverlapEndByDiscSimple</code> <span class="more">+5 more</span></div>
+  
+</div>
+<div class="api">
+  <h4>ProgressionButtonComponent <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ UProgressionButtonComponent &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li><code>:onPressed(): ()</code></li></ul>
+  <div class="evs"><b>Events:</b> <em>none</em></div>
+  
+</div>
+<div class="api">
+  <h4>ProgressionKioskComponent <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ UProgressionKioskComponent &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li class="more">no methods of its own</li></ul>
+  <div class="evs"><b>Events:</b> <em>none</em></div>
+  
+</div>
+<div class="api">
+  <h4>RedCoinTimedQuestComponent <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ URedCoinTimedQuestComponent &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li><code>:onBeforeEnterCoinEditMode(): ()</code></li><li><code>:onEnterCoinEditMode(): ()</code></li><li><code>:onExitCoinEditMode(): ()</code></li><li><code>:onThrustersStateChanged(pawn: VRPawn, isOn: boolean): ()</code></li></ul>
+  <div class="evs"><b>Events:</b> <em>none</em></div>
+  
+</div>
+<div class="api">
+  <h4>RockWallQuestComponent <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ URockWallQuestComponent &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li class="more">no methods of its own</li></ul>
+  <div class="evs"><b>Events:</b> <code>.onCleanupEvent</code>, <code>.onEndInspectionEvent</code>, <code>.onQuestEndEvent</code>, <code>.onQuestStartEvent</code>, <code>.onServerDataChangedEvent</code> <span class="more">+1 more</span></div>
+  
+</div>
+<div class="api">
+  <h4>ScoreComponent <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ UScoreComponent &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li><code>:blueTest(): ()</code></li><li><code>:decrementScoreBlue(): ()</code></li><li><code>:decrementScoreRed(): ()</code></li><li><code>:getTeamPoints(teamIndex: number): number</code></li><li><code>:incrementScore(goalInfo: GoalInfo): ()</code></li><li><code>:incrementScoreBlue(): ()</code></li><li class="more">+ 5 more in rigel.d.luau</li></ul>
+  <div class="evs"><b>Events:</b> <code>.onScored</code>, <code>.updateFastestGoal</code>, <code>.updateLongestGoal</code>, <code>.updateBouncesGoal</code>, <code>.updatePassesGoal</code></div>
+  
+</div>
+<div class="api">
+  <h4>ShootingTrainingComponent <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ UShootingTrainingComponent &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li><code>:endBecausePlayerLeft(): ()</code></li><li><code>:getRelevantPawn(): VRPawn</code></li><li><code>:getSlot(): ()</code></li><li><code>:luaDisable(): ()</code></li><li><code>:luaEnable(): ()</code></li><li><code>:playerHasJoined(): ()</code></li><li class="more">+ 4 more in rigel.d.luau</li></ul>
+  <div class="evs"><b>Events:</b> <code>.blueprintOnDiscSpawned</code>, <code>.blueprintOnDisabled</code>, <code>.blueprintOnEnabled</code>, <code>.blueprintEndBecausePlayerLeft</code>, <code>.blueprintShootingDifficultyChanged</code> <span class="more">+2 more</span></div>
+  
+</div>
+<div class="api">
+  <h4>TeamBasedComponent <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ UTeamBasedComponent &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li class="more">no methods of its own</li></ul>
+  <div class="evs"><b>Events:</b> <code>.teamColorsChanged</code></div>
+  
+</div>
+<div class="api">
+  <h4>TeamChangeComponent <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ UTeamChangeComponent &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li><code>:getTeamSize(): number</code></li><li><code>:onTeamSizesChanged(teamName: number, teamSize: number, maxSize: number): ()</code></li><li><code>:onTicketManagerRemoved(): ()</code></li><li><code>:onTicketManagerSpawned(manager: any): ()</code></li><li><code>:populateVRPawnTeamChangerArray(): ()</code></li><li><code>:removeSelfFromVRPawnTeamChangersArray(): ()</code></li><li class="more">+ 4 more in rigel.d.luau</li></ul>
+  <div class="evs"><b>Events:</b> <code>.teamSizeIncreased</code>, <code>.teamSizeDecreased</code></div>
+  
+</div>
+<div class="api">
+  <h4>TextComponent <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ UTextComponent &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li class="more">no methods of its own</li></ul>
+  <div class="evs"><b>Events:</b> <em>none</em></div>
+  
+</div>
+<div class="api">
+  <h4>TicketManagerSpawnerComponent <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ UTicketManagerSpawnerComponent &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li><code>:getSpawnedTicketManager(): any</code></li><li><code>:killTicketManager(): ()</code></li><li><code>:spawnTicketManager(newMaximumTeamSizes: any, newTeamColors: any): ()</code></li></ul>
+  <div class="evs"><b>Events:</b> <code>.ticketManagerSpawned</code></div>
+  
+</div>
+<div class="api">
+  <h4>TimerComponent <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ UTimerComponent &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li><code>:start(length: number): ()</code></li><li><code>:startCountUpFromZero(): ()</code></li><li><code>:stopAndResetTimer(): ()</code></li></ul>
+  <div class="evs"><b>Events:</b> <code>.finished</code>, <code>.finished2</code></div>
+  
+</div>
+<div class="api">
+  <h4>ToggleableComponent <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ UToggleableComponent &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li><code>:luaDisable(): ()</code></li><li><code>:luaEnable(): ()</code></li></ul>
+  <div class="evs"><b>Events:</b> <code>.blueprintOnDisabled</code>, <code>.blueprintOnEnabled</code></div>
+  
+</div>
+<div class="api">
+  <h4>TriggerComponent <span class="par">extends LuauBehavior</span></h4>
+  <div class="origin">C++ UTriggerComponent &middot; A2 &middot; LuauBehavior component</div>
+  <ul class="methods"><li class="more">no methods of its own</li></ul>
+  <div class="evs"><b>Events:</b> <em>none</em></div>
+  
+</div>
+<div class="api">
+  <h4>DiscEntity</h4>
+  <div class="origin">C++ ADiscEntity &middot; A2 &middot; used by the game scripts</div>
+  <ul class="methods"><li><code>:ballStolen(ballLocation: Vector): ()</code></li><li><code>:forceUpdate(): ()</code></li><li><code>:freeze(hideOutline: boolean): ()</code></li><li><code>:getCosmeticLoadout(): any</code></li><li><code>:getDiscBounces(): number</code></li><li><code>:getDiscPasses(): number</code></li><li class="more">+ 32 more in rigel.d.luau</li></ul>
+  <div class="evs"><b>Events:</b> <code>.onGoToSleep</code>, <code>.playerHit</code></div>
+  
+</div>
+<div class="api">
+  <h4>VRPawn</h4>
+  <div class="origin">C++ AVRPawn &middot; A2 &middot; used by the game scripts</div>
+  <ul class="methods"><li><code>:addImpulse(move: Vector, bAddToPushOffMomentum: boolean): ()</code></li><li><code>:addItemToInventoryByGameplayTag(inItemType: any, inGameplayTag: any): number</code></li><li><code>:addItemToInventoryById(inItemId: string): number</code></li><li><code>:addTicketSystemCooldown(seconds: number): ()</code></li><li><code>:arenaSignUpReadyAlert(): ()</code></li><li><code>:attemptTakeOwnershipProp(actor: any, previousOwner: any, lastSeenTimestamp: number, isHolding: boolean, isLeftHandHolding: boolean): ()</code></li><li class="more">+ 164 more in rigel.d.luau</li></ul>
+  <div class="evs"><b>Events:</b> <code>.onHighFive</code>, <code>.onBeforeDestroy</code>, <code>.fLaserStateUpdatedForBlueprint</code>, <code>.initialPlayerEnteredArena</code>, <code>.lastPlayerLeftArena</code> <span class="more">+14 more</span></div>
+  
+</div>
+<div class="api">
+  <h4>ModuleStateLuaAPI</h4>
+  <div class="origin">C++ UModuleStateLuaAPI &middot; SandboxEngine &middot; used by the game scripts</div>
+  <ul class="methods"><li><code>:broadcastEvent(eventName: string): ()</code></li><li><code>:broadcastEventBool(eventName: string, value: boolean): ()</code></li><li><code>:broadcastEventNumber(eventName: string, value: number): ()</code></li><li><code>:broadcastEventString(eventName: string, string: string): ()</code></li><li><code>:emitStatEventForAllPlayers(string: string, i: number): ()</code></li><li><code>:emitStatEventForAllPlayersOnTeam(teamIndex: number, string: string, i: number): ()</code></li><li class="more">+ 14 more in rigel.d.luau</li></ul>
+  <div class="evs"><b>Events:</b> <code>.onConfigChanged</code></div>
+  
+</div>
+<div class="api">
+  <h4>GameStateManagerBlueprintComponent</h4>
+  <div class="origin">C++ ABP_GameStateManager_C &middot; BP_GameStateManager &middot; blueprint-backed component used by a game script</div>
+  <ul class="methods"><li><code>:getSetArenaWall(): ()</code></li><li><code>:getSlot(): any</code></li><li><code>:playClearEvent(): ()</code></li><li><code>:playEspeciallyGoodShotEvent(): ()</code></li><li><code>:playSaveEvent(): ()</code></li><li><code>:playShotEvent(): ()</code></li><li class="more">+ 3 more in rigel.d.luau</li></ul>
+  <div class="evs"><b>Events:</b> <code>.gameCountdownStarting</code></div>
+  
+</div>
+<div class="api">
+  <h4>DriftballControlPanelBlueprintComponent</h4>
+  <div class="origin">C++ ABP_DriftballControlPanel_C &middot; BP_DriftballControlPanel &middot; blueprint-backed component used by a game script</div>
+  <ul class="methods"><li><code>:bIsRestartableChanged(value: boolean): ()</code></li><li><code>:handScannerEndOverlapped(overlappedComponent: any, otherActor: any, otherComp: any, otherBodyIndex: number): ()</code></li><li><code>:handScannerOverlapped(overlappedComponent: any, otherActor: any, otherComp: any, otherBodyIndex: number, bFromSweep: boolean, sweepResult: any): ()</code></li><li><code>:playLockSound(): ()</code></li><li><code>:playPracticeButtonSound(): ()</code></li><li><code>:playRestartButtonSound(): ()</code></li><li class="more">+ 3 more in rigel.d.luau</li></ul>
+  <div class="evs"><b>Events:</b> <em>none</em></div>
+  
+</div>
+<div class="api">
+  <h4>TrapSpinnerComponent</h4>
+  <div class="origin">C++ ABP_Trap_Spinner_C &middot; BP_Trap_Spinner &middot; blueprint-backed component used by a game script</div>
+  <ul class="methods"><li><code>:reverseDirection(): ()</code></li><li><code>:setCanMove(bNewCanMove: boolean): ()</code></li><li><code>:setRevolutionsPerCycle(setRevolutionsPerCycle: number): ()</code></li><li><code>:trapActivate(): ()</code></li><li><code>:trapDeactivate(): ()</code></li><li class="more">+ 3 more in rigel.d.luau</li></ul>
+  <div class="evs"><b>Events:</b> <em>none</em></div>
+  
+</div>
+<div class="api">
+  <h4>TrapRotatingPlatformComponent</h4>
+  <div class="origin">C++ ABP_Trap_RotatingPlatform_C &middot; BP_Trap_RotatingPlatform &middot; blueprint-backed component used by a game script</div>
+  <ul class="methods"><li><code>:reverseDirection(): ()</code></li><li><code>:setCanMove(bNewCanMove: boolean): ()</code></li><li><code>:setRevolutionsPerCycle(setRevolutionsPerCycle: number): ()</code></li><li><code>:trapActivate(): ()</code></li><li><code>:trapDeactivate(): ()</code></li><li class="more">+ 3 more in rigel.d.luau</li></ul>
+  <div class="evs"><b>Events:</b> <em>none</em></div>
+  
+</div>
+<div class="api">
+  <h4>SlidingPlatformComponent</h4>
+  <div class="origin">C++ ABP_SlidingPlatform_C &middot; BP_SlidingPlatform &middot; blueprint-backed component used by a game script</div>
+  <ul class="methods"><li><code>:bIsBlackChanged(value: boolean): ()</code></li><li><code>:setCanMove(bNewCanMove: boolean): ()</code></li><li><code>:setIsBlack(bNewIsBlack: boolean): ()</code></li><li><code>:trapActivate(): ()</code></li><li><code>:trapDeactivate(): ()</code></li></ul>
+  <div class="evs"><b>Events:</b> <em>none</em></div>
+  
+</div>
+<div class="api">
+  <h4>DeathrunResetTeleporterComponent</h4>
+  <div class="origin">C++ ABP_DeathrunResetTeleporter_C &middot; BP_DeathrunResetTeleporter &middot; blueprint-backed component used by a game script</div>
+  <ul class="methods"><li><code>:onRep(value: boolean): ()</code></li><li><code>:toggleRegularResetTeleporter(): ()</code></li><li><code>:toggleSpleefTeleporter(): ()</code></li></ul>
+  <div class="evs"><b>Events:</b> <em>none</em></div>
+  
+</div>
+<div class="api">
+  <h4>aa_se_BP_TeleporterComponent</h4>
+  <div class="origin">C++ ALE_BP_Teleporter_C &middot; LE_BP_Teleporter &middot; blueprint-backed component used by a game script</div>
+  <ul class="methods"><li><code>:activateTeleporter(): ()</code></li><li><code>:deActivateTeleporter(): ()</code></li><li><code>:setTeleportLocationRelativeToModuleSlot(locationRelativeToModuleSlot: Vector): ()</code></li><li><code>:teleporterActiveNetvarChanged(value: boolean): ()</code></li><li><code>:teleportLocationChanged(value: Vector): ()</code></li></ul>
+  <div class="evs"><b>Events:</b> <em>none</em></div>
+  
+</div>
+<div class="api">
+  <h4>GolfTeeComponent</h4>
+  <div class="origin">C++ ABP_GolfTee_C &middot; BP_GolfTee &middot; blueprint-backed component used by a game script</div>
+  <ul class="methods"><li><code>:ballScored(playerName: string): ()</code></li><li><code>:deactivateBall(): ()</code></li><li><code>:getActorRef(): any</code></li><li><code>:getActorTags(): any</code></li><li><code>:resetBallToTee(): ()</code></li><li><code>:resetStoredScore(playerId: number): ()</code></li><li class="more">+ 12 more in rigel.d.luau</li></ul>
+  <div class="evs"><b>Events:</b> <code>.onManualStart</code>, <code>.onManualDespawn</code>, <code>.onManualReset</code>, <code>.onManualEnd</code>, <code>.onTeeActivated</code> <span class="more">+2 more</span></div>
+  
+</div></div>
+</section>
+<section class="chapter" id="appB"><h2><span class="num">B</span>Appendix: global tables</h2>
+<p>Static functions and constructors available as globals, in addition to <code>log</code>, <code>warn</code>,
+<code>Logging</code>, <code>Promise</code>, <code>Vector</code>/<code>Vec3</code>, <code>LinearColor</code> and
+<code>Enum.TextJustify</code>.</p>
+<table class='t'><tr><th>Global</th><th>Members</th></tr><tr><td><code>VRPawn</code></td><td><code>getLocalInstance: () -&gt; VRPawn</code><br><code>getLocalInstanceWithWorld: () -&gt; VRPawn</code><br><code>getLocalPlayer: () -&gt; VRPawn</code><br><code>getLocalPlayerIndex: () -&gt; number</code><br><code>getLocalVRPawn: () -&gt; VRPawn</code><br><code>getPlayer: (id: number) -&gt; VRPawn</code><br><code>getPlayerByID: (id: number) -&gt; VRPawn</code><br><code>getPlayerName: (id: number) -&gt; string</code><br><code>getPositionByID: (id: number) -&gt; Vector</code><br><code>getTeamIndexByID: (id: number) -&gt; number</code></td></tr><tr><td><code>Quests</code></td><td><code>complete: (playerId: number, questID: string) -&gt; ()</code><br><code>event: (playerId: number, eventID: string) -&gt; ()</code><br><code>eventNumber: (playerId: number, eventID: string, number: number) -&gt; ()</code></td></tr><tr><td><code>LuauClock</code></td><td><code>createTimer: (betweenTime: number, callback: () -&gt; ()) -&gt; number</code><br><code>getTime: () -&gt; number</code><br><code>timeout: (seconds: number) -&gt; Promise&lt;()&gt;</code></td></tr><tr><td><code>BallSpawnParameters</code></td><td><code>new: (fields: { position: Vector?, isPersonalBall: boolean?, targetPlayerIndex: number?, type: string? }) -&gt; BallSpawnParameters</code></td></tr><tr><td><code>GoalInfo</code></td><td><code>new: (fields: { [string]: any }) -&gt; GoalInfo</code></td></tr><tr><td><code>CellStyle</code></td><td><code>new: (fields: { [string]: any }) -&gt; CellStyle</code></td></tr><tr><td><code>LayoutSettings</code></td><td><code>new: (fields: { [string]: any }) -&gt; LayoutSettings</code></td></tr><tr><td><code>LayoutGap</code></td><td><code>new: (targetIndex: number, gap: number) -&gt; LayoutGap</code></td></tr><tr><td><code>StyleOverRange</code></td><td><code>new: (style: CellStyle, startRow: number, startCol: number, endRow: number, endCol: number) -&gt; StyleOverRange</code></td></tr><tr><td><code>Gamemode</code></td><td><code>instance of ModuleStateLuaAPI</code></td></tr></table>
+</section></body></html>

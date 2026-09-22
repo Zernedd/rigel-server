@@ -1,0 +1,21 @@
+{
+	// Luau Language Server (JohnnyMorganz.luau-lsp) setup for Rigel / Spec Editor scripts.
+	// Open the SpecEditor/luau folder itself in VS Code so these paths resolve.
+
+	// Plain Luau, not Roblox: no Roblox globals, no Rojo sourcemap.
+	"luau-lsp.platform.type": "standard",
+	"luau-lsp.sourcemap.enabled": false,
+
+	// The game's API, generated from the class dump by generate_defs.py.
+	"luau-lsp.types.definitionFiles": {
+		"@rigel": "types/rigel.d.luau"
+	},
+
+	// The dumped game scripts use names the definitions cannot know about
+	// (require("ServerGolfLogic"), leftover debug calls); don't flood the Problems panel with them.
+	"luau-lsp.ignoreGlobs": ["game-scripts/**"],
+
+	"files.associations": {
+		"*.luau": "luau"
+	}
+}

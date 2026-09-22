@@ -1,0 +1,17 @@
+log T2 start
+enter
+wait 3
+spawnat LE_BP_LightSwitch_C -300 -2600 -27000 0
+wait 8
+data
+wait 3
+datadump
+dataset gd/IsEnabled bool 1
+wait 4
+datadump
+toggle off
+wait 3
+data
+wait 3
+datadump
+log T2 done

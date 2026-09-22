@@ -1,0 +1,7 @@
+log RF start
+enter
+wait 3
+raw SE|LGMDESC|TKBGolf
+raw SE|LGMDESC|ScraprunPrime
+wait 4
+log RF done

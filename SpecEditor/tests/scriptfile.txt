@@ -1,0 +1,13 @@
+log SF start
+enter
+wait 3
+spawnat BP_DebugCube_C 200 -2600 -27000 0
+wait 6
+luaufile MyScript
+wait 10
+data
+wait 3
+datadump
+log SF attached
+wait 40
+log SF done

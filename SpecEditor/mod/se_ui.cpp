@@ -15,6 +15,10 @@
 #include <cmath>
 #include <cstring>
 #include <unordered_map>
+#include <unordered_set>
+#include <filesystem>
+#include <shlobj.h>
+#include <shellapi.h>
 
 namespace se {
 namespace {
@@ -465,6 +469,8 @@ void DrawBox(ImDrawList* dl, const View& v, const Vec3& c, const Vec3& h, ImU32 
 
 std::string PrettyName(const std::string& cls);
 
+bool SlotPickTake(const std::string& h);   // below (Outliner)
+
 void DrawViewportMarkers(const Snapshot& snap)
 {
     const View v = MakeView(snap);
@@ -503,6 +509,7 @@ void DrawViewportMarkers(const Snapshot& snap)
     }
 
     if (!canPick || !ImGui::IsMouseClicked(ImGuiMouseButton_Left)) return;
+    if (hovered && SlotPickTake(hovered->handle)) return;
     if (hovered)
     {
         if (hovered->handle == g_selected || hovered->lockedByOther) return;
@@ -744,7 +751,7 @@ void DrawMainMenu(const Snapshot& snap, const SceneObject* sel)
         ImGui::BulletText("Click a marker to select, drag a gizmo handle");
         ImGui::BulletText("Drag an asset into the viewport: it lands on the surface");
         ImGui::BulletText("Ctrl+D duplicate, Delete removes, Esc deselects");
-        ImGui::BulletText("INSERT hides the editor and returns your view");
+        ImGui::BulletText("F12 hides the editor and returns your view");
         ImGui::EndMenu();
     }
     // Level name on the right, as UE5 shows the open map there.
@@ -788,7 +795,11 @@ void DrawMainToolbar(const Snapshot& snap, ImVec2 pos, float w, float h)
             if (ImGui::BeginMenu(cat.c_str()))
             {
                 for (size_t k = i; k < end; ++k)
+                {
+                    ImGui::PushID(static_cast<int>(k));     // LE_BP_X and LE_SM_X both read "X"
                     if (ImGui::MenuItem(PrettyName(snap.palette[k].name).c_str())) SpawnInFront(snap, snap.palette[k]);
+                    ImGui::PopID();
+                }
                 ImGui::EndMenu();
             }
             i = end;
@@ -880,8 +891,24 @@ void DrawPlaceActors(const Snapshot& snap, ImVec2 pos, ImVec2 size)
 }
 
 // ---- Outliner --------------------------------------------------------------------------------
+// "Click an object for this slot": set by clicking a script slot's field; the next object clicked (in the
+// viewport or the Outliner) is wired to the slot instead of being selected.
+struct SlotPick { bool on = false; std::string owner, script, slot, type; };
+SlotPick g_slotPick;
+bool SlotPickTake(const std::string& h)
+{
+    if (!g_slotPick.on) return false;
+    Command c{ CmdType::LuauRef };
+    c.str = g_slotPick.owner; c.str2 = g_slotPick.script; c.str3 = g_slotPick.slot; c.str4 = g_slotPick.type; c.str5 = h;
+    State().Push(c);
+    Notes().Set("Wiring " + g_slotPick.slot + "...");
+    g_slotPick.on = false;
+    return true;
+}
+
 void SelectHandle(const std::string& h)
 {
+    if (SlotPickTake(h)) return;
     if (h == g_selected) return;
     if (!g_selected.empty()) { Command d{ CmdType::DeselectObject }; d.str = g_selected; State().Push(d); }
     g_selected = h;
@@ -892,8 +919,35 @@ void DrawOutlinerPanel(const Snapshot& snap, ImVec2 pos, ImVec2 size)
 {
     if (!BeginPanel("##outliner", pos, size)) { ImGui::End(); return; }
     if (ImGui::BeginTabBar("##outtabs")) { if (ImGui::BeginTabItem("Outliner")) ImGui::EndTabItem(); ImGui::EndTabBar(); }
-    ImGui::SetNextItemWidth(-1);
+    static bool s_nearFirst = true;
+    ImGui::SetNextItemWidth(-110);
     ImGui::InputTextWithHint("##of", "Search...", g_outlinerFilter, sizeof(g_outlinerFilter));
+    ImGui::SameLine();
+    ImGui::Checkbox("Nearest first", &s_nearFirst);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Sort by distance from the camera. Click a row to select it, double-click to fly to it.");
+
+    // Row order: nearest first (or level order), and a running number on repeated names ("Light Switch 3")
+    // so the station's many identical objects can be told apart.
+    std::vector<int> order(snap.objects.size());
+    for (size_t i = 0; i < order.size(); ++i) order[i] = static_cast<int>(i);
+    auto dist2 = [&](const SceneObject& o) {
+        const double dx = o.location.x - snap.cameraPos.x, dy = o.location.y - snap.cameraPos.y, dz = o.location.z - snap.cameraPos.z;
+        return dx * dx + dy * dy + dz * dz;
+    };
+    if (s_nearFirst)
+        std::stable_sort(order.begin(), order.end(), [&](int a, int b) { return dist2(snap.objects[a]) < dist2(snap.objects[b]); });
+    std::unordered_map<std::string, int> seen;
+    std::vector<std::string> labels(snap.objects.size());
+    for (size_t i = 0; i < snap.objects.size(); ++i)
+    {
+        const std::string base = PrettyName(snap.objects[i].className);
+        const int k = ++seen[base];
+        labels[i] = k > 1 ? base + " " + std::to_string(k) : base;
+    }
+    // Scroll the list to an object picked in the viewport.
+    static std::string s_lastSel;
+    const bool selChanged = g_selected != s_lastSel;
+    s_lastSel = g_selected;
 
     if (ImGui::BeginTable("##ol", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_BordersInnerV |
                                         ImGuiTableFlags_Resizable, ImVec2(0, -20)))
@@ -914,17 +968,34 @@ void DrawOutlinerPanel(const Snapshot& snap, ImVec2 pos, ImVec2 size)
 
         ImGui::PushStyleColor(ImGuiCol_Header, kSelBlue);
         ImGui::PushStyleColor(ImGuiCol_HeaderHovered, IM_COL32(60, 60, 60, 255));
-        for (const auto& o : snap.objects)
+        for (const int oi : order)
         {
-            const std::string label = PrettyName(o.className);
+            const SceneObject& o = snap.objects[oi];
+            const std::string& label = labels[oi];
             if (!ContainsCi(label, g_outlinerFilter) && !ContainsCi(o.className, g_outlinerFilter)) continue;
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
             ImGui::PushID(o.handle.c_str());
             const ImVec2 p = ImGui::GetCursorScreenPos();
             ImGui::Indent(18);
-            if (ImGui::Selectable("##row", o.handle == g_selected, ImGuiSelectableFlags_SpanAllColumns, ImVec2(0, 18)) && !o.lockedByOther)
+            if (ImGui::Selectable("##row", o.handle == g_selected, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick,
+                                  ImVec2(0, 18)) && !o.lockedByOther)
+            {
                 SelectHandle(o.handle);
+                s_lastSel = o.handle;            // picked here: don't yank the scroll
+                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+                {
+                    Command c{ CmdType::FocusCamera }; c.loc = o.location; State().Push(c);
+                }
+            }
+            if (selChanged && o.handle == g_selected) ImGui::SetScrollHereY(0.4f);
+            if (ImGui::BeginDragDropSource())
+            {
+                // Drag an object onto a script slot (Details > Game data) to wire it.
+                ImGui::SetDragDropPayload("SE_OBJ", o.handle.c_str(), o.handle.size() + 1);
+                ImGui::Text("%s", PrettyName(o.className).c_str());
+                ImGui::EndDragDropSource();
+            }
             ImDrawList* dl = ImGui::GetWindowDrawList();
             IconFor(dl, ImVec2(p.x + 18, p.y + 1), 16, o.className);
             dl->AddText(ImVec2(p.x + 40, p.y + 2), o.lockedByOther ? IM_COL32(230, 150, 60, 255) : kFg, label.c_str());
@@ -933,7 +1004,7 @@ void DrawOutlinerPanel(const Snapshot& snap, ImVec2 pos, ImVec2 size)
                 ImGui::SetTooltip("%s\n(%.0f, %.0f, %.0f)%s", o.className.c_str(), o.location.x, o.location.y, o.location.z,
                                   o.lockedByOther ? "\nLocked by another editor" : "");
             ImGui::TableNextColumn();
-            ImGui::TextDisabled(o.className.rfind("LE_SM_", 0) == 0 ? "Static Mesh" : "Blueprint");
+            ImGui::TextDisabled("%s  %.0fm", o.className.rfind("LE_SM_", 0) == 0 ? "Mesh" : "Blueprint", std::sqrt(dist2(o)) / 100.0);
             ImGui::PopID();
         }
         ImGui::PopStyleColor(2);
@@ -955,6 +1026,7 @@ bool AxisRow(const char* label, float v[3], float speed, float mn = 0, float mx 
     ImGui::TextUnformatted(label);
     ImGui::TableNextColumn();
     const float w = (ImGui::GetContentRegionAvail().x - 8) / 3.0f;
+    ImGui::PushID(label);                                // table rows share one ID scope
     for (int i = 0; i < 3; ++i)
     {
         if (i) ImGui::SameLine(0, 4);
@@ -966,6 +1038,7 @@ bool AxisRow(const char* label, float v[3], float speed, float mn = 0, float mx 
         ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + 3, p.y + h), axis[i], 2.0f);
         ImGui::PopID();
     }
+    ImGui::PopID();
     return changed;
 }
 
@@ -1010,6 +1083,7 @@ void DrawProperties(const Snapshot& snap, const SceneObject* sel)
     {
         if (g_detailsFilter[0] && !ContainsCi(pi.name, g_detailsFilter)) continue;
         if (pi.owner != lastOwner) { lastOwner = pi.owner; ImGui::SeparatorText(pi.owner.c_str()); }
+        ImGui::PushID(pi.owner.c_str());                 // a name can repeat across the class hierarchy
         ImGui::PushID(pi.path.c_str());
         ImGui::AlignTextToFramePadding();
         if (pi.inert) ImGui::TextDisabled("%s", pi.name.c_str()); else ImGui::TextUnformatted(pi.name.c_str());
@@ -1117,10 +1191,22 @@ void DrawProperties(const Snapshot& snap, const SceneObject* sel)
             break;
         }
         ImGui::PopID();
+        ImGui::PopID();
     }
 }
 
 // ---- Quest Editor ------------------------------------------------------------------------------
+// The quest's GUID as the server derives it from the id (SeQuestGuid in the server's specedit.h), in hex.
+std::string QuestGuidHex(const std::string& questId)
+{
+    uint64_t h = 1469598103934665603ULL, h2 = 0x9E3779B97F4A7C15ULL;
+    for (char c : questId) { h ^= static_cast<unsigned char>(c); h *= 1099511628211ULL; }
+    for (char c : questId) { h2 ^= static_cast<unsigned char>(c); h2 *= 0x100000001B3ULL; h2 ^= h2 >> 29; }
+    char hx[40];
+    snprintf(hx, sizeof(hx), "%08X%08X%08X%08X", static_cast<uint32_t>(h), static_cast<uint32_t>(h >> 32),
+             static_cast<uint32_t>(h2), static_cast<uint32_t>(h2 >> 32) | 1u);
+    return hx;
+}
 std::string QuestIdFrom(const char* title)
 {
     std::string id = "SE_";
@@ -1143,6 +1229,56 @@ Vec3 InFront(const Snapshot& snap, double dist)
     Vec3 fwd, rgt, up;
     RotAxes(snap.cameraRot, fwd, rgt, up);
     return Add(snap.cameraPos, Mul(fwd, dist));
+}
+
+// Delete one of your quests: the server takes it out of every player's list (SE|QDEL) and removes its coin
+// run; its unpublished preview coins go, and groups that listed it drop it.
+void DeleteQuest(int i)
+{
+    if (i < 0 || i >= (int)g_quests.size()) return;
+    QuestDraft& q = g_quests[i];
+    if (!q.id.empty()) { Command c{ CmdType::SendRaw }; c.str = "SE|QDEL|" + q.id; State().Push(c); }
+    for (const auto& h : q.coinObjs) { Command d{ CmdType::DeleteObject }; d.str = h; State().Push(d); }
+    for (auto& g : g_quests)
+    {
+        const size_t before = g.parts.size();
+        g.parts.erase(std::remove(g.parts.begin(), g.parts.end(), q.id), g.parts.end());
+        if (g.parts.size() != before) g.dirty = true;
+    }
+    Notes().Set(std::string("Deleted quest '") + q.title + "'.");
+    g_quests.erase(g_quests.begin() + i);
+    if (g_pendingCp.quest == i) g_pendingCp.quest = -1; else if (g_pendingCp.quest > i) --g_pendingCp.quest;
+    g_questSel = g_quests.empty() ? -1 : (std::min)(i, (int)g_quests.size() - 1);
+}
+
+// Quests published on this server by any editor (and by loaded levels) that aren't in your list -- e.g.
+// made in an earlier session. They can be deleted from here.
+void DrawServerQuests(const Snapshot& snap)
+{
+    std::vector<const Snapshot::QuestRef*> mine;
+    for (const auto& r : snap.quests)
+    {
+        const std::string tag = " (editor)";
+        if (r.title.size() <= tag.size() || r.title.compare(r.title.size() - tag.size(), tag.size(), tag) != 0) continue;
+        bool local = false;
+        for (const auto& d : g_quests) if (!d.id.empty() && QuestGuidHex(d.id) == r.id) local = true;
+        if (!local) mine.push_back(&r);
+    }
+    if (mine.empty()) return;
+    if (!ImGui::TreeNode("##srvq", "On the server, not in your list (%d)", (int)mine.size())) return;
+    for (const auto* r : mine)
+    {
+        ImGui::PushID(r->id.c_str());
+        ImGui::BulletText("%s", r->title.substr(0, r->title.size() - 9).c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Delete"))
+        {
+            Command c{ CmdType::SendRaw }; c.str = "SE|QDEL|" + r->id; State().Push(c);
+            Notes().Set("Deleted quest '" + r->title.substr(0, r->title.size() - 9) + "'.");
+        }
+        ImGui::PopID();
+    }
+    ImGui::TreePop();
 }
 
 void PublishQuest(QuestDraft& q)
@@ -1479,7 +1615,19 @@ void DrawQuestEditor(const Snapshot& snap, const SceneObject* sel)
         }
         ImGui::EndListBox();
     }
+    DrawServerQuests(snap);
     if (g_questSel < 0 || g_questSel >= (int)g_quests.size()) { ImGui::TextDisabled("Pick a quest to edit it."); return; }
+    if (ImGui::SmallButton("Delete quest")) ImGui::OpenPopup("##qdel");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Removes it from every player's quest list, with its coins / start button.");
+    if (ImGui::BeginPopup("##qdel"))
+    {
+        ImGui::Text("Delete '%s' for everyone?", g_quests[g_questSel].title);
+        if (ImGui::Button("Delete")) { DeleteQuest(g_questSel); ImGui::CloseCurrentPopup(); }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    if (g_questSel < 0 || g_questSel >= (int)g_quests.size()) return;
     QuestDraft& q = g_quests[g_questSel];
     ImGui::Separator();
 
@@ -1604,6 +1752,440 @@ void DrawQuestEditor(const Snapshot& snap, const SceneObject* sel)
 }
 
 
+// ---- Luau: scripts are files you write in VS Code ---------------------------------------------------------
+// Your scripts live in Documents\RigelScripts (created on first use and seeded with the IntelliSense kit:
+// type definitions, VS Code settings, examples, the guide). Pick a file and attach it to the selected object;
+// every save in VS Code is sent again automatically and the objects running it pick up the new code.
+struct ScriptFile { std::wstring path; std::string name, rel; };
+std::vector<ScriptFile> g_scriptFiles;
+int g_scriptSel = -1;
+double g_scriptsListed = -100.0;
+bool g_autoResend = true;
+struct WatchedScript { std::wstring path; std::string name; FILETIME written{}; };
+std::vector<WatchedScript> g_watched;
+int g_scriptPick = -1;
+bool g_showGameScripts = false;
+
+std::wstring ScriptsDir()
+{
+    static std::wstring dir;
+    if (!dir.empty()) return dir;
+    wchar_t docs[MAX_PATH] = {};
+    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_PERSONAL, nullptr, 0, docs))) dir = std::wstring(docs) + L"\\RigelScripts";
+    else dir = L"C:\\RigelScripts";
+    // Every launch: copy in the kit shipped beside the game (RigelLuau\) -- new examples and ready-made
+    // scripts are added and your own files are never touched; the type definitions and guides are kept
+    // current (they are the kit's, not yours).
+    const bool fresh = GetFileAttributesW(dir.c_str()) == INVALID_FILE_ATTRIBUTES;
+    if (fresh) CreateDirectoryW(dir.c_str(), nullptr);
+    {
+        wchar_t exe[MAX_PATH] = {};
+        GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        std::wstring root(exe);
+        for (int up = 0; up < 4; ++up) { const size_t c = root.find_last_of(L'\\'); if (c == std::wstring::npos) break; root.resize(c); }
+        const std::wstring kit = root + L"\\RigelLuau";
+        std::error_code ec;
+        if (std::filesystem::exists(kit, ec))
+        {
+            std::filesystem::copy(kit, dir, std::filesystem::copy_options::recursive | std::filesystem::copy_options::skip_existing, ec);
+            for (const wchar_t* ours : { L"types", L"tools", L"Rigel-Luau-Guide.pdf", L"Rigel-Quest-Guide.pdf", L"README.md" })
+            {
+                const std::wstring from = kit + L"\\" + ours, to = dir + L"\\" + ours;
+                if (std::filesystem::exists(from, ec))
+                    std::filesystem::copy(from, to, std::filesystem::copy_options::recursive | std::filesystem::copy_options::overwrite_existing, ec);
+            }
+        }
+    }
+    if (fresh)
+    {
+        const std::wstring hello = dir + L"\\MyScript.luau";
+        if (GetFileAttributesW(hello.c_str()) == INVALID_FILE_ATTRIBUTES)
+            if (FILE* f = _wfopen(hello.c_str(), L"wb"))
+            {
+                const char* t = "--!strict\n-- Attach me to an object in the Spec Editor (Details > Luau script).\n"
+                                "-- Every save here is sent to the game automatically.\n"
+                                "log(\"Hello from MyScript\")\n";
+                fwrite(t, 1, strlen(t), f);
+                fclose(f);
+            }
+    }
+    return dir;
+}
+std::string ReadFileUtf8(const std::wstring& path)
+{
+    std::string out;
+    if (FILE* f = _wfopen(path.c_str(), L"rb"))
+    {
+        char buf[8192];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof(buf), f)) > 0 && out.size() < 400000) out.append(buf, n);
+        fclose(f);
+    }
+    return out;
+}
+FILETIME WrittenAt(const std::wstring& path)
+{
+    WIN32_FILE_ATTRIBUTE_DATA a{};
+    FILETIME t{};
+    if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &a)) t = a.ftLastWriteTime;
+    return t;
+}
+void ListScripts()
+{
+    g_scriptFiles.clear();
+    const std::wstring dir = ScriptsDir();
+    std::error_code ec;
+    for (auto it = std::filesystem::recursive_directory_iterator(dir, ec); !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec))
+    {
+        if (!it->is_regular_file(ec) || it->path().extension() != L".luau") continue;
+        const std::wstring rel = std::filesystem::relative(it->path(), dir, ec).wstring();
+        if (rel.rfind(L"types", 0) == 0 || rel.rfind(L"game-scripts", 0) == 0) continue;   // not attachable
+        ScriptFile f;
+        f.path = it->path().wstring();
+        f.name = it->path().stem().string();
+        f.rel = std::string(rel.begin(), rel.end());
+        g_scriptFiles.push_back(f);
+    }
+    std::sort(g_scriptFiles.begin(), g_scriptFiles.end(), [](const ScriptFile& a, const ScriptFile& b) { return a.rel < b.rel; });
+    g_scriptsListed = ImGui::GetTime();
+}
+void WatchScript(const std::wstring& path, const std::string& name)
+{
+    for (auto& w : g_watched) if (w.path == path) { w.name = name; w.written = WrittenAt(path); return; }
+    g_watched.push_back({ path, name, WrittenAt(path) });
+}
+// Every frame: a watched file that changed on disk is sent again (VS Code save -> game).
+// ---- script problems: explained in plain words, with the line to look at --------------------------------
+// Syntax errors are caught BEFORE a script is sent (luau-compile from the kit, RigelScripts\tools) -- the game
+// itself silently skips a script that doesn't compile. Runtime errors are read from this game's own log,
+// where every machine's Luau reports them, and shown as a popup too.
+std::string ExplainLuauError(const std::string& msg)
+{
+    auto has = [&](const char* t) { return msg.find(t) != std::string::npos; };
+    if (has("SyntaxError") || has("Expected ") || has("Incomplete statement") || has("Malformed"))
+        return "The script has a typo, so none of it can run. Look at the line shown: usually a missing 'then' (after if), "
+               "'do' (after for / while), 'end', or a bracket or quote that isn't closed. VS Code underlines these in red as you type.";
+    if (has("attempt to index nil"))
+    {
+        std::string what;
+        const size_t q = msg.find('\'', msg.find("attempt to index nil"));
+        if (q != std::string::npos) what = msg.substr(q + 1, msg.find('\'', q + 1) - q - 1);
+        return "Something was nil (empty) when the script used '" + what + "' on it. If it's a slot (a line like  "
+               "local Target: PhysicalComponent = nil), it isn't wired yet: select the scripted object, open Details > Game data, "
+               "click the slot and then click the object it should use. Otherwise make sure the variable has a value before "
+               "that line, or guard it with  if x ~= nil then ... end.";
+    }
+    if (has("attempt to call"))
+        return "The script called a function that doesn't exist. Check the spelling and capitals (VS Code's autocomplete lists "
+               "the real names) and use ':' for methods, e.g. Target:hideLua() rather than Target.hideLua().";
+    if (has("attempt to perform arithmetic"))
+        return "The script did maths on something that isn't a number (often nil). Make sure both sides are numbers, "
+               "e.g. (x or 0) + 1 or tonumber(x).";
+    if (has("attempt to concatenate"))
+        return "Joining text with .. only works on text and numbers. Wrap other values in tostring(...), e.g. \"hits: \" .. tostring(n).";
+    if (has("attempt to compare"))
+        return "The script compared two values that can't be compared (e.g. a number with nil). Check both sides have a value of the same kind.";
+    if (has("stack overflow"))
+        return "A function keeps calling itself forever. Add a condition that makes it stop.";
+    if (has("timeout") || has("exhausted"))
+        return "The script ran too long without pausing - probably a loop that never ends. Wait with LuauClock.timeout(seconds) instead.";
+    return "The script stopped at the line shown; the message above says what went wrong. Nothing else is affected - the "
+           "object and the game keep running.";
+}
+
+std::string WideToUtf8(const std::wstring& w)
+{
+    std::string out(WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), out.data(), (int)out.size(), nullptr, nullptr);
+    return out;
+}
+std::wstring Utf8ToWide(const std::string& s)
+{
+    std::wstring out(MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), out.data(), (int)out.size());
+    return out;
+}
+
+// luau-compile --null <file>: "" when the file compiles (or the checker isn't installed), else its error line.
+std::string LuauSyntaxError(const std::wstring& file, int* line)
+{
+    const std::wstring exe = ScriptsDir() + L"\\tools\\luau-compile.exe";
+    if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) return std::string();
+    SECURITY_ATTRIBUTES sa{ sizeof(sa), nullptr, TRUE };
+    HANDLE rd = nullptr, wr = nullptr;
+    if (!CreatePipe(&rd, &wr, &sa, 0)) return std::string();
+    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    si.hStdOutput = wr;
+    si.hStdError = wr;
+    PROCESS_INFORMATION pi{};
+    std::wstring cmd = L"\"" + exe + L"\" --null \"" + file + L"\"";
+    std::string out;
+    if (CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi))
+    {
+        CloseHandle(wr);
+        wr = nullptr;
+        char buf[1024];
+        DWORD n = 0;
+        while (out.size() < 16000 && ReadFile(rd, buf, sizeof(buf), &n, nullptr) && n > 0) out.append(buf, n);   // until it exits
+        WaitForSingleObject(pi.hProcess, 3000);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+    }
+    if (wr) CloseHandle(wr);
+    CloseHandle(rd);
+    // "C:/.../Name.luau(4,3): SyntaxError: Expected 'then' when parsing if statement, got 'log'"
+    size_t b = 0;
+    while (b < out.size())
+    {
+        size_t e = out.find('\n', b);
+        if (e == std::string::npos) e = out.size();
+        std::string l = out.substr(b, e - b);
+        b = e + 1;
+        while (!l.empty() && (l.back() == '\r' || l.back() == ' ')) l.pop_back();
+        if (l.find("Error") == std::string::npos || l.rfind("Compiled", 0) == 0) continue;
+        const size_t paren = l.find(".luau(");
+        if (paren != std::string::npos)
+        {
+            if (line) *line = atoi(l.c_str() + paren + 6);
+            const size_t colon = l.find("): ", paren);
+            if (colon != std::string::npos) l = l.substr(colon + 3);
+        }
+        return l;
+    }
+    return std::string();
+}
+
+// True when the file is fine to send; otherwise explains the problem in a popup.
+bool CheckScriptFile(const std::wstring& path, const std::string& name)
+{
+    int line = 0;
+    const std::string err = LuauSyntaxError(path, &line);
+    if (err.empty()) return true;
+    ProblemBox::Item it;
+    it.title = "Typo in " + name + ".luau" + (line ? " (line " + std::to_string(line) + ")" : std::string()) + " - not sent";
+    it.text = err + "\n\n" + ExplainLuauError(err) + "\n\nFix it and save the file. A script that's already attached is sent again automatically; otherwise click Attach again.";
+    it.file = WideToUtf8(path);
+    it.line = line;
+    Problems().Push(it);
+    return false;
+}
+
+// Runtime errors from this game's log (%LOCALAPPDATA%\A2\Saved\Logs): the newest A2*.log created since we started.
+void WatchLuauErrors()
+{
+    static double s_last = -10.0;
+    if (ImGui::GetTime() - s_last < 1.0) return;
+    s_last = ImGui::GetTime();
+    static std::wstring s_log;
+    static long long s_off = 0;
+    if (s_log.empty())
+    {
+        wchar_t la[MAX_PATH] = {};
+        if (!GetEnvironmentVariableW(L"LOCALAPPDATA", la, MAX_PATH)) return;
+        const std::wstring dir = std::wstring(la) + L"\\A2\\Saved\\Logs\\";
+        FILETIME created{}, ex{}, kt{}, ut{};
+        GetProcessTimes(GetCurrentProcess(), &created, &ex, &kt, &ut);
+        ULARGE_INTEGER since; since.LowPart = created.dwLowDateTime; since.HighPart = created.dwHighDateTime;
+        since.QuadPart -= 10ULL * 10000000ULL;                 // 10 s of slack
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW((dir + L"A2*.log").c_str(), &fd);
+        ULONGLONG best = 0;
+        if (h != INVALID_HANDLE_VALUE)
+        {
+            do
+            {
+                if (wcsstr(fd.cFileName, L"backup")) continue;
+                ULARGE_INTEGER c; c.LowPart = fd.ftCreationTime.dwLowDateTime; c.HighPart = fd.ftCreationTime.dwHighDateTime;
+                if (c.QuadPart >= since.QuadPart && c.QuadPart > best) { best = c.QuadPart; s_log = dir + fd.cFileName; }
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+        if (s_log.empty()) return;
+    }
+    HANDLE f = CreateFileW(s_log.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) { s_log.clear(); return; }
+    LARGE_INTEGER size{};
+    GetFileSizeEx(f, &size);
+    if (size.QuadPart < s_off) s_off = 0;
+    std::string text;
+    if (size.QuadPart > s_off)
+    {
+        const long long want = (std::min)(size.QuadPart - s_off, 1LL << 20);
+        text.resize(static_cast<size_t>(want));
+        LARGE_INTEGER at; at.QuadPart = s_off;
+        SetFilePointerEx(f, at, nullptr, FILE_BEGIN);
+        DWORD got = 0;
+        ReadFile(f, text.data(), static_cast<DWORD>(want), &got, nullptr);
+        text.resize(got);
+        const size_t lastNl = text.rfind('\n');
+        text.resize(lastNl == std::string::npos ? 0 : lastNl + 1);   // only whole lines
+        s_off += static_cast<long long>(text.size());
+    }
+    CloseHandle(f);
+    if (!text.empty() && ImGui::GetTime() - g_scriptsListed > 5.0) ListScripts();   // know your script names
+    static std::unordered_set<std::string> s_seen;
+    size_t b = 0;
+    while (b < text.size())
+    {
+        size_t e = text.find('\n', b);
+        if (e == std::string::npos) e = text.size();
+        std::string l = text.substr(b, e - b);
+        b = e + 1;
+        // [string "Name.luau"]:5: attempt to index nil with 'hideLua'
+        const size_t st = l.find("[string \"");
+        if (st == std::string::npos) continue;
+        if (l.find("LogLuau: Error") == std::string::npos && l.find("[RigelError]") == std::string::npos &&
+            l.find("Traceback") == std::string::npos) continue;
+        const size_t ne = l.find('"', st + 9);
+        if (ne == std::string::npos) continue;
+        std::string name = l.substr(st + 9, ne - st - 9);
+        if (name.size() > 5 && name.compare(name.size() - 5, 5, ".luau") == 0) name.resize(name.size() - 5);
+        const ScriptFile* sf = nullptr;
+        for (const auto& fl : g_scriptFiles) if (fl.name == name) sf = &fl;
+        if (!sf) continue;                                     // only scripts from your folder, not the game's own
+        int line = 0;
+        std::string msg;
+        if (ne + 3 < l.size() && l[ne + 1] == ']' && l[ne + 2] == ':')
+        {
+            line = atoi(l.c_str() + ne + 3);
+            const size_t c = l.find(':', ne + 3);
+            msg = c == std::string::npos ? std::string() : l.substr(c + 1);
+        }
+        const size_t tb = msg.find(" Traceback");
+        if (tb != std::string::npos) msg.resize(tb);
+        while (!msg.empty() && (msg.front() == ' ')) msg.erase(msg.begin());
+        while (!msg.empty() && (msg.back() == '\r' || msg.back() == ' ')) msg.pop_back();
+        if (!s_seen.insert(name + ":" + std::to_string(line) + ":" + msg).second) continue;   // once per session
+        ProblemBox::Item it;
+        it.title = "Error in " + name + ".luau" + (line ? " (line " + std::to_string(line) + ")" : std::string());
+        it.text = msg + "\n\n" + ExplainLuauError(msg);
+        it.file = WideToUtf8(sf->path);
+        it.line = line;
+        Problems().Push(it);
+    }
+}
+
+// The popup: one problem at a time, with the fix and a jump to the line.
+void DrawProblems()
+{
+    ProblemBox::Item it;
+    if (!Problems().Front(it)) return;
+    if (!ImGui::IsPopupOpen("Problem##problems")) ImGui::OpenPopup("Problem##problems");
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f, vp->WorkPos.y + vp->WorkSize.y * 0.4f), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(560, 0), ImGuiCond_Always);
+    if (ImGui::BeginPopupModal("Problem##problems", nullptr, ImGuiWindowFlags_NoSavedSettings))
+    {
+        ImGui::TextColored(ImVec4(1.0f, 0.62f, 0.25f, 1.0f), "%s", it.title.c_str());
+        ImGui::Separator();
+        ImGui::TextWrapped("%s", it.text.c_str());
+        ImGui::Spacing();
+        if (!it.file.empty())
+        {
+            if (ImGui::Button("Open in VS Code"))
+            {
+                const std::wstring arg = L"-g \"" + Utf8ToWide(it.file) + L":" + std::to_wstring(it.line > 0 ? it.line : 1) + L"\"";
+                if (reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", L"code", arg.c_str(), nullptr, SW_HIDE)) <= 32)
+                    ShellExecuteW(nullptr, L"open", Utf8ToWide(it.file).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            }
+            ImGui::SameLine();
+        }
+        if (ImGui::Button("OK", ImVec2(80, 0)) || ImGui::IsKeyPressed(ImGuiKey_Enter))
+        {
+            Problems().Pop();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
+void ResendChangedScripts()
+{
+    static double s_last = 0;
+    if (!g_autoResend || ImGui::GetTime() - s_last < 1.0) return;
+    s_last = ImGui::GetTime();
+    for (auto& w : g_watched)
+    {
+        const FILETIME t = WrittenAt(w.path);
+        if (CompareFileTime(&t, &w.written) == 0) continue;
+        w.written = t;
+        if (!CheckScriptFile(w.path, w.name)) continue;          // typo: explained, not sent
+        Command c{ CmdType::LuauUpdate }; c.str2 = w.name; c.str3 = ReadFileUtf8(w.path); State().Push(c);
+        Notes().Set("Sent " + w.name + ".luau again (saved in your editor).");
+    }
+}
+const ScriptFile* ScriptCombo(const char* id, int& sel)
+{
+    const char* cur = sel >= 0 && sel < (int)g_scriptFiles.size() ? g_scriptFiles[sel].rel.c_str() : "Pick a script file";
+    if (ImGui::BeginCombo(id, cur))
+    {
+        for (int i = 0; i < (int)g_scriptFiles.size(); ++i)
+            if (ImGui::Selectable(g_scriptFiles[i].rel.c_str(), i == sel)) sel = i;
+        ImGui::EndCombo();
+    }
+    return sel >= 0 && sel < (int)g_scriptFiles.size() ? &g_scriptFiles[sel] : nullptr;
+}
+void AttachScriptFile(const SceneObject* sel, const ScriptFile& f, const std::string& asName)
+{
+    if (!CheckScriptFile(f.path, f.name)) return;             // typo: explained, not attached
+    WatchScript(f.path, asName);
+    Command c{ CmdType::LuauAttach }; c.str = sel->handle; c.str2 = asName; c.str3 = ReadFileUtf8(f.path); State().Push(c);
+    WatchScript(f.path, asName);
+}
+
+void DrawLuau(const Snapshot& snap, const SceneObject* sel)
+{
+    if (ImGui::GetTime() - g_scriptsListed > 5.0) ListScripts();
+    const std::wstring dir = ScriptsDir();
+    ImGui::TextWrapped("Write scripts in VS Code (IntelliSense included) in your RigelScripts folder, then attach "
+                       "one here. It runs for every player, is saved with levels, and every save is sent again "
+                       "automatically.");
+    if (ImGui::Button("Open folder in VS Code"))
+    {
+        if (reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", L"code", (L"\"" + dir + L"\"").c_str(), nullptr, SW_HIDE)) <= 32)
+            ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Open folder")) ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    ImGui::SameLine();
+    if (ImGui::Button("Refresh##luau")) ListScripts();
+    ImGui::SetNextItemWidth(-1);
+    const ScriptFile* f = ScriptCombo("##scriptfile", g_scriptSel);
+    if (g_scriptFiles.empty()) ImGui::TextDisabled("No .luau files yet - create one in the folder.");
+    ImGui::BeginDisabled(!f || !snap.inEditor);
+    ImGui::PushStyleColor(ImGuiCol_Button, kSelBlue);
+    if (ImGui::Button("Attach to this object", ImVec2(-1, 0)) && f) AttachScriptFile(sel, *f, f->name);
+    ImGui::PopStyleColor();
+    ImGui::EndDisabled();
+    ImGui::Checkbox("Send again every time I save the file", &g_autoResend);
+    if (!g_watched.empty())
+    {
+        ImGui::TextDisabled("Watching:");
+        for (const auto& w : g_watched) { ImGui::SameLine(); ImGui::TextDisabled("%s.luau", w.name.c_str()); }
+    }
+    if (ImGui::Button("Copy the game's own scripts into the folder (examples)"))
+    {
+        Command c{ CmdType::ScanScripts }; State().Push(c);
+        g_showGameScripts = true;
+    }
+    if (g_showGameScripts && !snap.gameScripts.empty())
+    {
+        const std::wstring gdir = dir + L"\\game-scripts";
+        CreateDirectoryW(gdir.c_str(), nullptr);
+        for (const auto& gs : snap.gameScripts)
+        {
+            std::wstring fn = gdir + L"\\" + std::wstring(gs.where.begin(), gs.where.end()) + L"__" + std::wstring(gs.name.begin(), gs.name.end());
+            if (FILE* out = _wfopen(fn.c_str(), L"wb")) { fwrite(gs.source.data(), 1, gs.source.size(), out); fclose(out); }
+        }
+        Notes().Set("Copied " + std::to_string(snap.gameScripts.size()) + " game script(s) into RigelScripts\\game-scripts.");
+        g_showGameScripts = false;
+    }
+}
+
 // ---- Game data: every value the game syncs for the selected object ---------------------------------------
 // What the game's own level editor configures -- a kiosk's quests, a button's target quest, a run's timer,
 // a switch's state -- read from the server and written back through the replicated setters, so every player
@@ -1622,6 +2204,7 @@ std::string DataLabel(const std::string& path)
         out += n[i] == '_' ? ' ' : n[i];
     }
     if (path.rfind("gd/", 0) == 0) out += "  (live state)";
+    if (path.rfind("script/", 0) == 0) out = "Script " + path.substr(7);
     return out;
 }
 const char* QuestTitle(const Snapshot& snap, const std::string& id)
@@ -1649,6 +2232,143 @@ bool QuestPicker(const Snapshot& snap, const char* label, std::string& id)
     return changed;
 }
 
+// The slots a script declares: `local Name: SomethingComponent = nil` (the game's "External Dependencies").
+struct ScriptSlot { std::string name, type; };
+std::vector<ScriptSlot> ParseSlots(const std::string& src)
+{
+    std::vector<ScriptSlot> out;
+    size_t b = 0;
+    while (b < src.size())
+    {
+        size_t e = src.find('\n', b);
+        if (e == std::string::npos) e = src.size();
+        std::string line = src.substr(b, e - b);
+        b = e + 1;
+        size_t i = line.find_first_not_of(" \t");
+        if (i == std::string::npos || line.compare(i, 6, "local ") != 0) continue;
+        i += 6;
+        size_t n0 = i; while (i < line.size() && (isalnum((unsigned char)line[i]) || line[i] == '_')) ++i;
+        const std::string name = line.substr(n0, i - n0);
+        while (i < line.size() && line[i] == ' ') ++i;
+        if (name.empty() || i >= line.size() || line[i] != ':') continue;
+        ++i; while (i < line.size() && line[i] == ' ') ++i;
+        size_t t0 = i; while (i < line.size() && (isalnum((unsigned char)line[i]) || line[i] == '_')) ++i;
+        const std::string type = line.substr(t0, i - t0);
+        const std::string rest = line.substr(i);
+        if (type.size() > 9 && type.compare(type.size() - 9, 9, "Component") == 0 && rest.find("nil") != std::string::npos)
+            out.push_back({ name, type });
+    }
+    return out;
+}
+// Under a script in Game data: each slot, what it points at, and a drop target (drag from the Outliner).
+void DrawScriptSlots(const Snapshot& snap, const SceneObject* sel, const std::string& script)
+{
+    std::string stem = script;
+    if (stem.size() > 5 && stem.compare(stem.size() - 5, 5, ".luau") == 0) stem.resize(stem.size() - 5);
+    const ScriptFile* file = nullptr;
+    for (const auto& f : g_scriptFiles) if (f.name == stem) file = &f;
+    if (!file) { ImGui::TextDisabled("  (no %s.luau in your RigelScripts folder - its slots can't be shown)", stem.c_str()); return; }
+    const auto slots = ParseSlots(ReadFileUtf8(file->path));
+    if (slots.empty()) { ImGui::TextDisabled("  No slots. Declare one with:  local Target: PhysicalComponent = nil"); return; }
+    for (const auto& sl : slots)
+    {
+        ImGui::PushID(sl.name.c_str());
+        std::string current = "drop an object here";
+        for (const auto& d : snap.data)
+            if (d.kind == "slot" && d.path == "slot/" + script + "/" + sl.name)
+                current = PrettyName(d.value.substr(0, d.value.find('@')));
+        ImGui::Bullet();
+        ImGui::SameLine();
+        ImGui::Text("%s", sl.name.c_str());
+        ImGui::SameLine();
+        ImGui::TextDisabled("(%s)", sl.type.c_str());
+        ImGui::SameLine(ImGui::GetWindowWidth() * 0.5f);
+        const bool picking = g_slotPick.on && g_slotPick.owner == sel->handle && g_slotPick.script == script && g_slotPick.slot == sl.name;
+        if (picking) ImGui::PushStyleColor(ImGuiCol_Button, kSelBlue);
+        if (ImGui::Button(picking ? "click an object... (Esc)" : current.c_str(), ImVec2(-52, 0)))
+        {
+            if (picking) g_slotPick.on = false;
+            else g_slotPick = { true, sel->handle, script, sl.name, sl.type };
+        }
+        if (picking) ImGui::PopStyleColor();
+        if (ImGui::BeginDragDropTarget())
+        {
+            if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("SE_OBJ"))
+            {
+                Command c{ CmdType::LuauRef }; c.str = sel->handle; c.str2 = script; c.str3 = sl.name; c.str4 = sl.type;
+                c.str5 = static_cast<const char*>(pl->Data);
+                State().Push(c);
+            }
+            ImGui::EndDragDropTarget();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Click here, then click the object in the viewport or the Outliner -- or drag it here from the Outliner,\n"
+                              "or pick from the list (v). It must have a %s.", sl.type.c_str());
+        ImGui::SameLine();
+        if (ImGui::ArrowButton("##cands", ImGuiDir_Down))
+        {
+            Command c{ CmdType::SlotScan }; c.str = sl.type; State().Push(c);
+            ImGui::OpenPopup("##slotcands");
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Objects that fit this slot (they have a %s)", sl.type.c_str());
+        if (ImGui::BeginPopup("##slotcands"))
+        {
+            ImGui::TextDisabled("Objects with a %s", sl.type.c_str());
+            ImGui::Separator();
+            int shown = 0;
+            std::vector<std::string> kinds;                  // item types that have this component
+            if (snap.slotCandType == sl.type)
+            {
+                std::vector<std::pair<double, const Snapshot::SlotCand*>> list;
+                // Objects the editor placed are named with their GUID id; the station's own can't be wired.
+                auto placed = [](const std::string& h) { return h.size() >= 36 && h[8] == '-' && h[13] == '-' && h[18] == '-' && h[23] == '-'; };
+                for (const auto& cand : snap.slotCands)
+                    for (const auto& ob : snap.objects)
+                        if (ob.handle == cand.handle)
+                        {
+                            const std::string k = PrettyName(ob.className);
+                            if (std::find(kinds.begin(), kinds.end(), k) == kinds.end() && kinds.size() < 12) kinds.push_back(k);
+                            if (!placed(ob.handle)) continue;
+                            const double dx = ob.location.x - snap.cameraPos.x, dy = ob.location.y - snap.cameraPos.y, dz = ob.location.z - snap.cameraPos.z;
+                            list.push_back({ std::sqrt(dx * dx + dy * dy + dz * dz), &cand });
+                        }
+                std::sort(list.begin(), list.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+                for (const auto& [dist, cand] : list)
+                {
+                    if (shown >= 40) break;
+                    std::string cls;
+                    for (const auto& ob : snap.objects) if (ob.handle == cand->handle) cls = ob.className;
+                    const std::string label = PrettyName(cls) + (cand->handle == sel->handle ? "  (this object)" : "") +
+                                              "   " + cand->comp + "  " + std::to_string(static_cast<int>(dist / 100.0)) + "m##" + cand->handle;
+                    if (ImGui::Selectable(label.c_str()))
+                    {
+                        Command c{ CmdType::LuauRef }; c.str = sel->handle; c.str2 = script; c.str3 = sl.name; c.str4 = sl.type; c.str5 = cand->handle;
+                        State().Push(c);
+                    }
+                    ++shown;
+                }
+            }
+            if (!shown) ImGui::TextDisabled(snap.slotCandType == sl.type ? "None of your placed objects has one yet." : "Looking...");
+            if (snap.slotCandType == sl.type && !kinds.empty())
+            {
+                std::string k;
+                for (const auto& x : kinds) k += (k.empty() ? "" : ", ") + x;
+                ImGui::Separator();
+                ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 360);
+                ImGui::TextDisabled("Items that have one: %s", k.c_str());
+                ImGui::PopTextWrapPos();
+            }
+            ImGui::EndPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("X"))
+        {
+            Command c{ CmdType::LuauRef }; c.str = sel->handle; c.str2 = script; c.str3 = sl.name; c.str4 = sl.type; State().Push(c);
+        }
+        ImGui::PopID();
+    }
+}
+
 void DrawGameData(const Snapshot& snap, const SceneObject* sel)
 {
     auto request = [&]() { Command c{ CmdType::DataRequest }; c.str = sel->handle; State().Push(c); };
@@ -1667,6 +2387,7 @@ void DrawGameData(const Snapshot& snap, const SceneObject* sel)
     const float lw = 150.0f;
     for (const auto& e : snap.data)
     {
+        if (e.kind == "slot") continue;                  // drawn under its script
         ImGui::PushID(e.path.c_str());
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted(DataLabel(e.path).c_str());
@@ -1708,6 +2429,23 @@ void DrawGameData(const Snapshot& snap, const SceneObject* sel)
                 for (size_t i = 0; i < ids.size(); ++i) v += (i ? "," : "") + ids[i];
                 set(e, v);
             }
+        }
+        else if (e.kind == "script")
+        {
+            // A script this object already runs (the game's own, or one attached earlier): replace its code
+            // with a file from RigelScripts.
+            ImGui::NewLine();
+            ImGui::SetNextItemWidth(-90);
+            static int pick = -1;
+            const ScriptFile* sf = ScriptCombo("##rep", pick);
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!sf);
+            if (ImGui::Button("Replace") && sf) AttachScriptFile(sel, *sf, e.value);
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Sends the file's code as %s. Objects you placed are rebuilt with it right away; "
+                                  "station objects give it to players who join from now on.", e.value.c_str());
+            DrawScriptSlots(snap, sel, e.value);
         }
         else if (e.kind == "hex")
             ImGui::TextDisabled("(%zu bytes, not editable here)", e.value.size() / 2);
@@ -1779,70 +2517,6 @@ void DrawLevels(const Snapshot& snap)
     ImGui::TextDisabled("Autoload on server boot is set on the dashboard (station > Editor levels).");
 }
 
-
-// ---- Luau: attach your own script to an object ---------------------------------------------------------
-// The script is stored in the object's gamemode (every machine compiles it) and attached the way the station
-// attaches its own Luau. The object is rebuilt to pick it up. Scripts are saved with levels.
-char g_luauName[48] = "MyScript";
-std::string g_luauSrc =
-    "--!strict\n"
-    "-- Runs on every machine that has this object. See the game's own scripts (below) for the API:\n"
-    "-- components, events (x.onSomething.Listen(fn)), LuauClock.timeout(sec):andThen(fn), log(...).\n"
-    "log(\"Hello from a Spec Editor script\")\n";
-int g_scriptPick = -1;
-bool g_showGameScripts = false;
-int ResizeCb(ImGuiInputTextCallbackData* d)
-{
-    if (d->EventFlag == ImGuiInputTextFlags_CallbackResize)
-    {
-        auto* s = static_cast<std::string*>(d->UserData);
-        s->resize(d->BufTextLen);
-        d->Buf = s->data();
-    }
-    return 0;
-}
-void DrawLuau(const Snapshot& snap, const SceneObject* sel)
-{
-    ImGui::TextWrapped("Attach a Luau script to this object. It runs for every player (it is stored in the "
-                       "object's gamemode, like the station's own scripts) and is saved with levels.");
-    ImGui::SetNextItemWidth(160);
-    ImGui::InputText("Script name", g_luauName, sizeof(g_luauName), ImGuiInputTextFlags_CharsNoBlank);
-    g_luauSrc.reserve(4096);
-    ImGui::InputTextMultiline("##luau", g_luauSrc.data(), g_luauSrc.capacity() + 1, ImVec2(-1, 180),
-                              ImGuiInputTextFlags_CallbackResize | ImGuiInputTextFlags_AllowTabInput, ResizeCb, &g_luauSrc);
-    ImGui::BeginDisabled(!g_luauName[0] || !snap.inEditor);
-    ImGui::PushStyleColor(ImGuiCol_Button, kSelBlue);
-    if (ImGui::Button("Attach script to this object", ImVec2(-1, 0)))
-    {
-        Command c{ CmdType::LuauAttach }; c.str = sel->handle; c.str2 = g_luauName; c.str3 = g_luauSrc.c_str(); State().Push(c);
-    }
-    ImGui::PopStyleColor();
-    ImGui::EndDisabled();
-    if (ImGui::Checkbox("Show the game's own scripts (examples of the API)", &g_showGameScripts) && g_showGameScripts)
-    {
-        Command c{ CmdType::ScanScripts }; State().Push(c);
-    }
-    if (g_showGameScripts)
-    {
-        if (snap.gameScripts.empty()) ImGui::TextDisabled("(none found yet)");
-        std::string label = g_scriptPick >= 0 && g_scriptPick < (int)snap.gameScripts.size()
-                                ? snap.gameScripts[g_scriptPick].where + " / " + snap.gameScripts[g_scriptPick].name : "Pick a script";
-        ImGui::SetNextItemWidth(-1);
-        if (ImGui::BeginCombo("##gs", label.c_str()))
-        {
-            for (int i = 0; i < (int)snap.gameScripts.size(); ++i)
-                if (ImGui::Selectable((snap.gameScripts[i].where + " / " + snap.gameScripts[i].name + "##" + std::to_string(i)).c_str(), i == g_scriptPick))
-                    g_scriptPick = i;
-            ImGui::EndCombo();
-        }
-        if (g_scriptPick >= 0 && g_scriptPick < (int)snap.gameScripts.size())
-        {
-            const std::string& src = snap.gameScripts[g_scriptPick].source;
-            ImGui::InputTextMultiline("##gsrc", const_cast<char*>(src.c_str()), src.size() + 1, ImVec2(-1, 200), ImGuiInputTextFlags_ReadOnly);
-            if (ImGui::SmallButton("Copy into my script")) g_luauSrc = src;
-        }
-    }
-}
 
 void DrawDetailsPanel(const Snapshot& snap, const SceneObject* sel, ImVec2 pos, ImVec2 size)
 {
@@ -2203,7 +2877,7 @@ void DrawStatusBar(const Snapshot& snap, ImVec2 pos, float w, float h)
         ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "|  %s", note.c_str());
     else
         ImGui::TextDisabled("|  %s  |  %d prefabs  |  RMB: look / fly", snap.status.c_str(), static_cast<int>(snap.palette.size()));
-    const char* hint = "INSERT hides the editor";
+    const char* hint = "F12 hides the editor";
     ImGui::SameLine(w - ImGui::CalcTextSize(hint).x - 14);
     ImGui::TextDisabled("%s", hint);
     ImGui::End();
@@ -2237,6 +2911,7 @@ void HandleShortcuts()
     if (ImGui::IsKeyPressed(ImGuiKey_W)) g_gizmo = GizmoMode::Translate;
     if (ImGui::IsKeyPressed(ImGuiKey_E)) g_gizmo = GizmoMode::Rotate;
     if (ImGui::IsKeyPressed(ImGuiKey_R)) g_gizmo = GizmoMode::Scale;
+    if (g_slotPick.on && ImGui::IsKeyPressed(ImGuiKey_Escape)) { g_slotPick.on = false; return; }   // cancel "click an object"
     if (ImGui::IsKeyPressed(ImGuiKey_Escape) && !g_selected.empty())
     {
         Command c{ CmdType::DeselectObject }; c.str = g_selected; State().Push(c);
@@ -2320,6 +2995,9 @@ void DrawEditorUI()
     DrawViewportMarkers(snap);
     HandleAssetDrag(snap);
     AdoptPreviewCoins(snap);
+    ResendChangedScripts();
+    WatchLuauErrors();
+    DrawProblems();
 }
 
 // Test-script entry (se_game.cpp): the red coin run publish, through the UI's own path.
@@ -2354,6 +3032,15 @@ int ScriptCoinPreviewAdopted()
 void ScriptCoinPreviewPublish()
 {
     if (!g_quests.empty()) PublishQuest(g_quests.back());
+}
+
+// Test-script entry: attach <RigelScripts>/<name>.luau to an object, exactly like the Attach button.
+bool ScriptAttachFile(const std::string& handle, const std::string& name)
+{
+    ListScripts();
+    for (const auto& f : g_scriptFiles)
+        if (f.name == name) { SceneObject so; so.handle = handle; AttachScriptFile(&so, f, f.name); return true; }
+    return false;
 }
 
 }  // namespace se
