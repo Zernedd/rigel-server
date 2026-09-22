@@ -3375,8 +3375,9 @@ static int SeLuauNodeCore(void* lgmHandle, uint64_t scriptsBits, uint64_t nameBi
         find(lgmHandle, itS, scriptsBits, 0);
         if (!itS[0x48]) { NvReleaseIter(base, itS); return -10; }
         find(itS, itOld, nameBits, 0);
-        if (itOld[0x48]) SbRemoveCore(itOld);
-        else NvReleaseIter(base, itOld);
+        const bool exists = itOld[0x48] != 0;
+        NvReleaseIter(base, itOld);
+        if (exists) { NvReleaseIter(base, itS); return -11; }   // never remove a live source node (see SeLuauPutSource)
         uint8_t* n = mal(96);
         memset(n, 0, 96);
         uint64_t nm = nameBits;
@@ -3423,8 +3424,21 @@ static bool SeLuauPutSource(SDK::UObject* lgm, const std::string& name, const st
         w.resize(MultiByteToWideChar(CP_UTF8, 0, src.data(), static_cast<int>(src.size()), nullptr, 0));
         MultiByteToWideChar(CP_UTF8, 0, src.data(), static_cast<int>(src.size()), w.data(), static_cast<int>(w.size()));
     }
-    const int r = SeLuauNodeCore(reinterpret_cast<uint8_t*>(lgm) + 0x218, NvNameBits(NvName("Scripts")), NvNameBits(NvName(name)),
-                                 w.c_str(), static_cast<int>(w.size()));
+    // Already on the server (a re-apply, or a second object running it): change its text in place with the
+    // game's replicated string setter. Removing the node and adding a new one crashed the server -- the
+    // replication pass still walked the removed node.
+    int r = 0;
+    {
+        const uint64_t segs[2] = { NvNameBits(NvName("Scripts")), NvNameBits(NvName(name)) };
+        NvWalk wk{}; void* parent = nullptr; int failAt = -1;
+        if (NvWorldWalk(reinterpret_cast<uint8_t*>(lgm) + 0x218, segs, 1, &wk, &parent, &failAt))
+            r = NvWriteNative(parent, segs[1], NvNative::TString, 0.0f, 0, w.c_str(), static_cast<int32_t>(w.size()) + 1, nullptr);
+        NvWalkRelease(&wk);
+        if (r == 1) HxLog("[HalcyonA2][SPECEDIT] luau %s: source updated in place\n", name.c_str());
+    }
+    if (r == -1 || r == 0)                               // not there yet: create it
+        r = SeLuauNodeCore(reinterpret_cast<uint8_t*>(lgm) + 0x218, NvNameBits(NvName("Scripts")), NvNameBits(NvName(name)),
+                           w.c_str(), static_cast<int>(w.size()));
     if (SDK::AActor* slot = *reinterpret_cast<SDK::AActor**>(reinterpret_cast<uintptr_t>(lgm) + 0x320))
         if (r == 1) static_cast<SDK::AModuleSlot*>(slot)->PushNetVars();
     HxLog("[HalcyonA2][SPECEDIT] luau %s (%zu chars) -> %s: %d\n", name.c_str(), src.size(), lgm->GetName().c_str(), r);
@@ -3463,7 +3477,9 @@ static std::string SbRespawnKeep(SDK::AActor* a, const SbOwned& keep, const char
     return idx;
 }
 
-static std::string SeLuauAttach(SDK::AActor* a, const std::string& name, const std::string& src)
+// name/src by VALUE: callers pass strings that live inside g_sbOwned, which the rebuild below changes
+// (a reference into it dangled -- use-after-free, seen as a fault in the log line).
+static std::string SeLuauAttach(SDK::AActor* a, const std::string name, const std::string src)
 {
     SDK::UObject* pc = SbPrefabOf(a);
     if (!pc) return std::string();
@@ -3654,7 +3670,8 @@ static std::string SbRebuildScripted(SbOwned& o)
 {
     SDK::AActor* a = SbActorForIdx(o.idx);
     if (!a || o.scripts.empty()) return std::string();
-    return SeLuauAttach(a, o.scripts.front().first, o.scripts.front().second);
+    const std::string name = o.scripts.front().first, src = o.scripts.front().second;   // copies: o is rebuilt
+    return SeLuauAttach(a, name, src);
 }
 
 // A script slot binds to one of the target's Luau components by its NAME, first letter lowered: the game's

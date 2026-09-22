@@ -67,6 +67,7 @@ struct QuestDraft
     struct PendingCoin { Vec3 at; double since; };
     std::vector<PendingCoin> pendingCoins;
     int         runSeconds = 60;
+    double      coinLift = 50.0;     // a preview coin's box centre above its origin (published = centre)
     int         thrusters = 0;       // 0 = allowed (boost pads work), 1 = boosting fails the run (like TKB)
     bool        published = false;
     bool        dirty = true;        // changed since it was last published
@@ -1330,8 +1331,15 @@ void PublishQuest(QuestDraft& q)
         {
             const Snapshot snap = State().ReadSnapshot();
             q.coins.clear();
+            // A live coin appears centred on its position, so publish the centre of each preview coin's box
+            // (where its stand-in shows it) -- the object's origin sits at the bottom of the box, on the ground.
             for (const auto& h : q.coinObjs)
-                if (const SceneObject* o = FindObject(snap, h)) q.coins.push_back(o->location);
+                if (const SceneObject* o = FindObject(snap, h))
+                {
+                    const double up = o->boundsExt.z > 0.0 ? o->boundsOff.z : 50.0;
+                    q.coinLift = up;
+                    q.coins.push_back(Vec3{ o->location.x, o->location.y, o->location.z + up });
+                }
             for (const auto& h : q.coinObjs) { Command d{ CmdType::DeleteObject }; d.str = h; State().Push(d); }
             q.coinObjs.clear();
         }
@@ -1524,7 +1532,7 @@ void DrawCoinRun(const Snapshot& snap, QuestDraft& q, float lw)
     {
         ImGui::Text("%d coin(s) in the published run.", (int)q.coins.size());
         if (ImGui::Button("Edit coins (show them)", ImVec2(-1, 0)))
-            for (const auto& c : q.coins) placeCoin(c);
+            for (const auto& c : q.coins) placeCoin(Vec3{ c.x, c.y, c.z - q.coinLift });   // back to the box's bottom
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Brings the coins back as movable objects. Update the run when you're done.");
     }
     else ImGui::TextDisabled("No coins yet. Fly to a spot and add one.");
@@ -2998,6 +3006,37 @@ void DrawEditorUI()
     const SceneObject* sel = nullptr;
     for (const auto& o : snap.objects)
         if (o.handle == g_selected) { sel = &o; break; }
+    // A rebuilt object (script attached / removed, slot wired) comes back as a new actor under the same id: keep
+    // it selected -- find the same kind of object where the selection was -- so Details (and its Game data,
+    // scripts and slots) stays up instead of going blank.
+    {
+        static std::string s_cls;
+        static Vec3 s_at;
+        static double s_lostAt = -1.0;
+        if (sel) { s_cls = sel->className; s_at = sel->location; s_lostAt = -1.0; }
+        else if (!g_selected.empty() && !s_cls.empty())
+        {
+            if (s_lostAt < 0.0) s_lostAt = ImGui::GetTime();
+            if (ImGui::GetTime() - s_lostAt < 10.0)
+            {
+                const SceneObject* best = nullptr;
+                double bestD = 100.0 * 100.0;
+                for (const auto& o : snap.objects)
+                {
+                    if (o.className != s_cls) continue;
+                    const Vec3 d = Sub(o.location, s_at);
+                    if (Dot(d, d) < bestD) { bestD = Dot(d, d); best = &o; }
+                }
+                if (best)
+                {
+                    g_selected = best->handle;
+                    Command c{ CmdType::SelectObject }; c.str = g_selected; State().Push(c);
+                    sel = best;
+                    s_lostAt = -1.0;
+                }
+            }
+        }
+    }
 
     HandleShortcuts();
 
