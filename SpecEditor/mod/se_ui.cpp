@@ -516,7 +516,7 @@ void DrawViewportMarkers(const Snapshot& snap)
         Vec3 hit;
         { PickState& ps = Pick(); std::lock_guard<std::mutex> lk(ps.mx); hasHit = ps.hasHit; hit = ps.hit; }
         ImVec2 sp;
-        if (hasHit && W2S(v, Vec3{ hit.x, hit.y, hit.z + 60.0 }, sp))
+        if (hasHit && W2S(v, Vec3{ hit.x, hit.y, hit.z + 50.0 }, sp))   // where the coin will be (its box rests on the surface)
         {
             dl->AddCircle(sp, 12.0f, IM_COL32(255, 70, 60, 255), 24, 2.5f);
             dl->AddCircleFilled(sp, 4.0f, IM_COL32(255, 70, 60, 255));
@@ -1540,7 +1540,7 @@ void DrawCoinRun(const Snapshot& snap, QuestDraft& q, float lw)
         g_clickPlacedSeen = snap.clickPlaced.size();
     }
     if (constructing) ImGui::PopStyleColor();
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Click in the world to drop a coin where you click (it floats at pickup height above the surface).\n"
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Click in the world to drop a coin where you click (it rests on the surface you click).\n"
                                                   "Right-drag still flies the camera. Esc stops.");
     ImGui::EndDisabled();
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))

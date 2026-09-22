@@ -839,12 +839,15 @@ void HandleCommands()
         case CmdType::PlaceTraced:
         {
             // Construction mode: on the surface the click hit, lifted so the coin floats at pickup height.
+            // A red coin's box (its pickup trigger, what the selection box shows) starts at its origin and reaches
+            // 1 m up, so the origin goes on the surface: the box rests on the ground, the coin floats in its middle.
+            const double lift = 2.0;
             Vec3 at;
-            if (TraceWorld(c.loc, c.dir, 50000.0, at)) at.z += 60.0;
+            if (TraceWorld(c.loc, c.dir, 50000.0, at)) at.z += lift;
             else at = { c.loc.x + c.dir.x * 1500.0, c.loc.y + c.dir.y * 1500.0, c.loc.z + c.dir.z * 1500.0 };
             SendToServer("SE|SPAWN|" + c.str + "|" + Fmt3(at) + "|0,0,0");
             g_clickPlaced.push_back(at);
-            Log("[game] construction: placed at (%.0f, %.0f, %.0f)", at.x, at.y, at.z);
+            Log("[game] construction: placed at (%.0f, %.0f, %.0f), lift %.0f", at.x, at.y, at.z, lift);
             break;
         }
 
@@ -2473,6 +2476,7 @@ void CoinStandinTick(const Snapshot& snap)
             {
                 st.meshOff = { b.Origin.X - st.at.x, b.Origin.Y - st.at.y, b.Origin.Z - st.at.z };
                 st.measured = true;
+                Log("[coins] stand-in mesh centre offset z=%.0f; coin box offset z=%.0f half-height %.0f", st.meshOff.z, o.boundsOff.z, o.boundsExt.z);
                 st.at = { 1e30, 1e30, 1e30 };                        // re-place it centred below
             }
         }
