@@ -45,6 +45,7 @@ static_assert(static_cast<int>(sereflect::PType::Object) == se::PT_Object &&
 #include <cstdlib>
 
 namespace se {
+std::atomic<bool> g_sceneDirty{ false };   // se_core.h
 namespace {
 
 typedef void(__fastcall* ProcessEvent_t)(void*, void*, void*);
@@ -204,9 +205,14 @@ bool CallStringRpc(SDK::UObject* target, const char* cls, const char* fnName, co
 // works from anywhere on the station. (The first version used only the level-editor pawn's
 // Server_AttemptLockObject, which a player on the station is never in -- so "Enter Level Editor" could
 // not even be sent.) The server claims anything starting "SE|"; a real Vivox id never does.
+
 void SendToServer(const std::string& payload)
 {
     if (payload.rfind("SE|", 0) != 0) { Log("[game] refusing to send a non-editor string"); return; }
+    // Anything that changes what is built marks the open level unsaved (the menu bar shows "*").
+    static const char* kEdits[] = { "SE|SPAWN|", "SE|XFORM|", "SE|DELETE|", "SE|SBDUP|", "SE|SBSET|", "SE|LUAU|", "SE|LUAUREF|",
+                                    "SE|LUAUDEL|", "SE|PROP|", "SE|QUEST|", "SE|COINRUN|", "SE|SBADD|" };
+    for (const char* e : kEdits) if (payload.rfind(e, 0) == 0) { g_sceneDirty = true; break; }
     if (g_pc && CallStringRpc(g_pc, "VRPlayerController", "Server_SetVivoxParticipantID", payload)) return;
     if (g_lePawn && CallStringRpc(g_lePawn, "LevelEditorPawn", "Server_AttemptLockObject", payload)) return;
     Log("[game] no transport (no controller yet) - dropped: %.60s", payload.c_str());
@@ -885,7 +891,7 @@ void HandleCommands()
             break;
 
         case CmdType::LevelExport:
-            SendToServer("SE|LVEXPORT|" + c.str);
+            SendToServer("SE|LVEXPORT|" + c.str + (c.str2 == "tag" ? "|1" : ""));   // tag: saving the open scene
             Log("[levels] export '%s' requested", c.str.c_str());
             break;
 
@@ -2342,6 +2348,18 @@ void RunScript(const Snapshot& snap)
         const double d = std::fabs(g_cam.up[0] - u[0]) + std::fabs(g_cam.up[1] - u[1]) + std::fabs(g_cam.up[2] - u[2]);
         Log("[script] %s expectup: camera up (%.2f,%.2f,%.2f), wanted (%.2f,%.2f,%.2f); rot(p=%.1f,y=%.1f,r=%.1f)", d < 0.15 ? "PASS" : "FAIL",
             g_cam.up[0], g_cam.up[1], g_cam.up[2], u[0], u[1], u[2], g_cam.rp, g_cam.ry, g_cam.rr);
+        return;
+    }
+    if (!strcmp(op, "scene")) { RequestUiSelect("!scene " + rest); return; }                     // scene save|saveas|open|new|upload|autosave [name]
+    if (!strcmp(op, "expectscene")) { RequestUiSelect("!expectscene " + rest); return; }         // expectscene <name|-> <dirty 0|1>
+    if (!strcmp(op, "expectlvfile"))          // expectlvfile <name> 0|1 -- Documents\RigelLevels\<name>.a2level exists
+    {
+        const size_t sp = rest.find(' ');
+        const std::string name = rest.substr(0, sp);
+        const bool want = sp != std::string::npos && rest.substr(sp + 1) == "1";
+        const DWORD at = GetFileAttributesW((LevelsDir() + L"\\" + std::wstring(name.begin(), name.end()) + L".a2level").c_str());
+        const bool have = at != INVALID_FILE_ATTRIBUTES;
+        Log("[script] %s expectlvfile %s want=%d have=%d", have == want ? "PASS" : "FAIL", name.c_str(), (int)want, (int)have);
         return;
     }
     if (!strcmp(op, "fav"))                   // fav <palette substring> -- star/unstar it (Favorites), then log its state

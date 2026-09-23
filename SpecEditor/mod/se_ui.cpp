@@ -1162,6 +1162,105 @@ bool BeginPanel(const char* id, ImVec2 pos, ImVec2 size)
 }
 
 // ---- main menu -------------------------------------------------------------------------------
+// ---- the open level (a Unity-style scene) ------------------------------------------------------------
+// One .a2level is "open" at a time (Documents\RigelLevels\<name>.a2level). Ctrl+S saves it (Save As the
+// first time), it autosaves every 2 minutes while there are unsaved edits, opening another level closes this
+// one (its objects leave the server) after saving it, and Upload puts it on the server's saved levels.
+std::string g_sceneName;                     // "" = untitled (nothing open)
+bool   g_saveAsOpen = false;
+char   g_saveAsBuf[64] = "";
+double g_sceneSavedAt = 0.0;
+double g_autosaveSec = 120.0;
+std::string SceneClean(const std::string& n)
+{
+    std::string c;
+    for (char ch : n) if (isalnum(static_cast<unsigned char>(ch)) || ch == ' ' || ch == '_' || ch == '-') c += ch;
+    return c.size() > 64 ? c.substr(0, 64) : c;
+}
+std::string SceneReadFile(const std::string& name)
+{
+    std::string text;
+    FILE* fp = nullptr;
+    if (_wfopen_s(&fp, (LevelsDir() + L"\\" + std::wstring(name.begin(), name.end()) + L".a2level").c_str(), L"rb") == 0 && fp)
+    {
+        char buf[4096];
+        for (size_t r; (r = fread(buf, 1, sizeof(buf), fp)) > 0;) text.append(buf, r);
+        fclose(fp);
+    }
+    return text;
+}
+void SceneSave(const std::string& rawName, bool autosave = false)
+{
+    const std::string name = SceneClean(rawName);
+    if (name.empty()) return;
+    Command c{ CmdType::LevelExport }; c.str = name; c.str2 = "tag"; State().Push(c);
+    g_sceneName = name;
+    g_sceneDirty = false;
+    g_sceneSavedAt = ImGui::GetTime();
+    Log("[scene] %s '%s'", autosave ? "autosave" : "save", name.c_str());
+    if (autosave) Notes().Set("Autosaved '" + name + "'.");
+}
+void SceneClose()
+{
+    if (g_sceneName.empty()) return;
+    if (g_sceneDirty) SceneSave(g_sceneName, true);           // never lose work on a switch
+    Command c{ CmdType::SendRaw }; c.str = "SE|LVCLOSE|" + g_sceneName; State().Push(c);
+    Log("[scene] close '%s'", g_sceneName.c_str());
+    g_sceneName.clear();
+    g_sceneDirty = false;
+}
+void SceneOpen(const std::string& rawName)
+{
+    const std::string name = SceneClean(rawName);
+    if (name.empty()) return;
+    const std::string text = SceneReadFile(name);
+    if (text.empty()) { Notes().Set("Couldn't read " + name + ".a2level."); return; }
+    SceneClose();
+    Command c{ CmdType::LevelImport }; c.str = name; c.str2 = "load"; c.str3 = text; State().Push(c);
+    g_sceneName = name;
+    g_sceneDirty = false;
+    g_sceneSavedAt = ImGui::GetTime();
+    Log("[scene] open '%s' (%zu bytes)", name.c_str(), text.size());
+}
+void SceneNew() { SceneClose(); Notes().Set("New level: place things, then Ctrl+S to save it."); }
+void SceneUpload()
+{
+    if (g_sceneName.empty()) { g_saveAsOpen = true; return; }
+    if (g_sceneDirty) SceneSave(g_sceneName);
+    Command c{ CmdType::SendRaw }; c.str = "SE|LVSAVE|" + g_sceneName; State().Push(c);
+    Log("[scene] upload '%s'", g_sceneName.c_str());
+}
+void SceneSaveOrAsk()
+{
+    if (g_sceneName.empty()) { g_saveAsOpen = true; strncpy_s(g_saveAsBuf, "", _TRUNCATE); }
+    else SceneSave(g_sceneName);
+}
+// Every frame: autosave, and the Save As prompt.
+void SceneTick(const Snapshot& snap)
+{
+    static double dirtyAt = 0.0;               // autosave N seconds after the first unsaved edit, not after the last save
+    static bool wasDirty = false;
+    if (g_sceneDirty && !wasDirty) dirtyAt = ImGui::GetTime();
+    wasDirty = g_sceneDirty;
+    if (snap.inEditor && !g_sceneName.empty() && g_sceneDirty && ImGui::GetTime() - dirtyAt > g_autosaveSec)
+        SceneSave(g_sceneName, true);
+    if (g_saveAsOpen) { ImGui::OpenPopup("Save Level As"); g_saveAsOpen = false; }
+    if (ImGui::BeginPopupModal("Save Level As", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        ImGui::TextUnformatted("Level name (saved to Documents\\RigelLevels):");
+        ImGui::SetNextItemWidth(320);
+        const bool enter = ImGui::InputText("##saveas", g_saveAsBuf, sizeof(g_saveAsBuf), ImGuiInputTextFlags_EnterReturnsTrue);
+        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere(-1);
+        const bool ok = !SceneClean(g_saveAsBuf).empty();
+        ImGui::BeginDisabled(!ok);
+        if (ImGui::Button("Save", ImVec2(120, 0)) || (enter && ok)) { SceneSave(g_saveAsBuf); ImGui::CloseCurrentPopup(); }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+}
+
 void DrawMainMenu(const Snapshot& snap, const SceneObject* sel)
 {
     if (!ImGui::BeginMainMenuBar()) return;
@@ -1178,6 +1277,15 @@ void DrawMainMenu(const Snapshot& snap, const SceneObject* sel)
         if (ImGui::MenuItem(snap.inEditor ? "Exit Level Editor" : "Enter Level Editor"))
             State().Push({ snap.inEditor ? CmdType::ExitEditor : CmdType::EnterEditor });
         if (ImGui::MenuItem("Refresh Content")) State().Push({ CmdType::RefreshPalette });
+        ImGui::Separator();
+        ImGui::BeginDisabled(!snap.inEditor);
+        if (ImGui::MenuItem("New Level")) SceneNew();
+        if (ImGui::MenuItem("Open Level...")) { g_showContent = true; g_cbFolder = "*levels"; }
+        if (ImGui::MenuItem("Save Level", "Ctrl+S")) SceneSaveOrAsk();
+        if (ImGui::MenuItem("Save Level As...")) { g_saveAsOpen = true; strncpy_s(g_saveAsBuf, g_sceneName.c_str(), _TRUNCATE); }
+        if (ImGui::MenuItem("Upload Level to Server", nullptr, false, !g_sceneName.empty())) SceneUpload();
+        if (ImGui::MenuItem("Close Level", nullptr, false, !g_sceneName.empty())) SceneClose();
+        ImGui::EndDisabled();
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Edit"))
@@ -1223,7 +1331,10 @@ void DrawMainMenu(const Snapshot& snap, const SceneObject* sel)
         ImGui::EndMenu();
     }
     // Level name on the right, as UE5 shows the open map there.
-    const char* lvl = snap.inEditor ? "Station  (editing)" : "Station";
+    std::string lvlS = g_sceneName.empty() ? std::string(snap.inEditor ? "Untitled level" : "Station")
+                                            : "Level: " + g_sceneName + (g_sceneDirty ? " *" : "");
+    if (snap.inEditor && g_sceneName.empty() && g_sceneDirty) lvlS += " *";
+    const char* lvl = lvlS.c_str();
     ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::CalcTextSize(lvl).x - 16);
     ImGui::TextDisabled("%s", lvl);
     ImGui::EndMainMenuBar();
@@ -3348,6 +3459,9 @@ void DrawContentBrowser(const Snapshot& snap, ImVec2 pos, ImVec2 size)
         const ImVec2 fp = ImGui::GetCursorScreenPos();
         if (ImGui::Selectable("      Favorites", g_cbFolder == "*fav", ImGuiSelectableFlags_SpanAvailWidth)) g_cbFolder = "*fav";
         DrawStar(ImGui::GetWindowDrawList(), ImVec2(fp.x + 10, fp.y + 8), 7.0f, true, IM_COL32(250, 200, 60, 255));
+        const ImVec2 lp = ImGui::GetCursorScreenPos();
+        if (ImGui::Selectable("      Levels", g_cbFolder == "*levels", ImGuiSelectableFlags_SpanAvailWidth)) g_cbFolder = "*levels";
+        IconFolder(ImGui::GetWindowDrawList(), ImVec2(lp.x + 3, lp.y + 1), 15);
     }
     const ImVec2 p = ImGui::GetCursorScreenPos();
     const bool rootOpen = ImGui::TreeNodeEx("/Game", ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth |
@@ -3365,6 +3479,78 @@ void DrawContentBrowser(const Snapshot& snap, ImVec2 pos, ImVec2 size)
     const int perRow = (std::max)(1, static_cast<int>((ImGui::GetContentRegionAvail().x + pad) / (tileW + pad)));
     int col = 0, count = 0;
     auto nextTile = [&]() { if (col++ % perRow) ImGui::SameLine(0, pad); };
+    if (g_cbFolder == "*levels")
+    {
+        // Documents\RigelLevels: every .a2level as a tile. Double-click opens it (the open level closes first,
+        // saved if it had changes); right-click: Open / Upload / Show in Explorer. First tile: New Level.
+        static std::vector<std::wstring> s_files;
+        static double s_listed = -100.0;
+        if (ImGui::GetTime() - s_listed > 2.0)
+        {
+            s_listed = ImGui::GetTime();
+            s_files.clear();
+            WIN32_FIND_DATAW fd{};
+            HANDLE h = FindFirstFileW((LevelsDir() + L"\\*.a2level").c_str(), &fd);
+            if (h != INVALID_HANDLE_VALUE)
+            {
+                do { std::wstring f = fd.cFileName; s_files.push_back(f.substr(0, f.size() - 8)); } while (FindNextFileW(h, &fd));
+                FindClose(h);
+            }
+        }
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        nextTile();
+        {
+            const ImVec2 q = ImGui::GetCursorScreenPos();
+            ImGui::BeginDisabled(!snap.inEditor);
+            if (ImGui::InvisibleButton("##newlevel", ImVec2(tileW, tileH))) SceneNew();
+            ImGui::EndDisabled();
+            const bool hov = ImGui::IsItemHovered();
+            dl->AddRectFilled(q, ImVec2(q.x + tileW, q.y + tileH), hov ? IM_COL32(64, 64, 64, 255) : IM_COL32(44, 44, 44, 255), 3);
+            dl->AddText(ImGui::GetFont(), 40.0f, ImVec2(q.x + tileW * 0.5f - 11, q.y + 18), kDim, "+");
+            dl->AddText(ImVec2(q.x + 6, q.y + 84), kFg, "New Level");
+        }
+        for (const auto& wf : s_files)
+        {
+            const std::string f(wf.begin(), wf.end());
+            nextTile();
+            ImGui::PushID(f.c_str());
+            const ImVec2 q = ImGui::GetCursorScreenPos();
+            ImGui::InvisibleButton("##lv", ImVec2(tileW, tileH));
+            const bool hov = ImGui::IsItemHovered(), open = f == g_sceneName;
+            if (hov && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && snap.inEditor) SceneOpen(f);
+            if (hov) ImGui::SetTooltip("%s.a2level\nDouble-click: open (the current level is saved and closed)\nRight-click: more", f.c_str());
+            if (ImGui::BeginPopupContextItem("##lvctx"))
+            {
+                if (ImGui::MenuItem("Open", nullptr, false, snap.inEditor)) SceneOpen(f);
+                if (ImGui::MenuItem("Upload to Server", nullptr, false, snap.inEditor))
+                {
+                    if (f == g_sceneName) SceneUpload();
+                    else { Command c{ CmdType::LevelImport }; c.str = SceneClean(f); c.str2 = "save"; c.str3 = SceneReadFile(f); State().Push(c); }
+                }
+                if (ImGui::MenuItem("Show in Explorer"))
+                    ShellExecuteW(nullptr, L"open", L"explorer.exe", (L"/select,\"" + LevelsDir() + L"\\" + wf + L".a2level\"").c_str(), nullptr, SW_SHOWNORMAL);
+                ImGui::EndPopup();
+            }
+            dl->AddRectFilled(q, ImVec2(q.x + tileW, q.y + tileH), hov ? IM_COL32(64, 64, 64, 255) : IM_COL32(44, 44, 44, 255), 3);
+            if (open) dl->AddRect(q, ImVec2(q.x + tileW, q.y + tileH), IM_COL32(240, 160, 40, 255), 3, 0, 2.0f);
+            // A level "map" glyph: a framed landscape.
+            dl->AddRectFilled(ImVec2(q.x + 14, q.y + 12), ImVec2(q.x + tileW - 14, q.y + 70), IM_COL32(30, 60, 90, 255), 3);
+            dl->AddTriangleFilled(ImVec2(q.x + 20, q.y + 64), ImVec2(q.x + 42, q.y + 30), ImVec2(q.x + 60, q.y + 64), IM_COL32(90, 150, 90, 255));
+            dl->AddTriangleFilled(ImVec2(q.x + 44, q.y + 64), ImVec2(q.x + 62, q.y + 40), ImVec2(q.x + tileW - 20, q.y + 64), IM_COL32(70, 120, 70, 255));
+            std::string n = f;
+            if (ImGui::CalcTextSize(n.c_str()).x > tileW - 6)
+            {
+                while (n.size() > 3 && ImGui::CalcTextSize((n + "...").c_str()).x > tileW - 6) n.pop_back();
+                n += "...";
+            }
+            dl->AddText(ImVec2(q.x + 4, q.y + 84), kFg, n.c_str());
+            dl->AddText(ImVec2(q.x + 4, q.y + 100), open ? IM_COL32(240, 160, 40, 255) : kDim, open ? (g_sceneDirty ? "Open *" : "Open") : "Level");
+            ImGui::PopID();
+        }
+        ImGui::EndChild();
+        ImGui::End();
+        return;
+    }
 
     if (!g_contentFilter[0])
         for (const auto& f : folders)
@@ -3577,6 +3763,7 @@ void HandleShortcuts()
     if (ImGui::IsKeyPressed(ImGuiKey_W)) g_gizmo = GizmoMode::Translate;
     if (ImGui::IsKeyPressed(ImGuiKey_E)) g_gizmo = GizmoMode::Rotate;
     if (ImGui::IsKeyPressed(ImGuiKey_R)) g_gizmo = GizmoMode::Scale;
+    if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false)) SceneSaveOrAsk();   // Ctrl+S: save the open level
     if (g_slotPick.on && ImGui::IsKeyPressed(ImGuiKey_Escape)) { g_slotPick.on = false; return; }   // cancel "click an object"
     if (g_coinPlaceQuest >= 0 && ImGui::IsKeyPressed(ImGuiKey_Escape)) { g_coinPlaceQuest = -1; return; }   // leave construction mode
     if (ImGui::IsKeyPressed(ImGuiKey_Escape) && !g_selected.empty())
@@ -3608,6 +3795,28 @@ void DrawEditorUI()
         { std::lock_guard<std::mutex> lk(g_uiSelectMx); req.swap(g_uiSelectReq); }
         if (req.empty()) {}
         else if (req[0] == '+') { ToggleMultiSel(req.substr(1)); Log("[ui] selection toggle %s -> %zu selected", req.c_str() + 1, g_selected.empty() ? 0 : 1 + g_multiSel.size()); }
+        else if (req.rfind("!expectscene ", 0) == 0)
+        {
+            char nm[80] = ""; int dirty = 0;
+            sscanf_s(req.c_str() + 13, "%79s %d", nm, (unsigned)sizeof(nm), &dirty);
+            const std::string want = strcmp(nm, "-") ? nm : "";
+            const bool ok = want == g_sceneName && dirty == (int)g_sceneDirty.load();
+            Log("[script] %s expectscene want='%s' dirty=%d have='%s' dirty=%d", ok ? "PASS" : "FAIL", want.c_str(), dirty,
+                g_sceneName.c_str(), (int)g_sceneDirty.load());
+        }
+        else if (req.rfind("!scene ", 0) == 0)
+        {
+            const std::string rest = req.substr(7);
+            const size_t sp = rest.find(' ');
+            const std::string op = rest.substr(0, sp), arg = sp == std::string::npos ? std::string() : rest.substr(sp + 1);
+            if (op == "saveas") SceneSave(arg);
+            else if (op == "save") SceneSaveOrAsk();
+            else if (op == "open") SceneOpen(arg);
+            else if (op == "new") SceneNew();
+            else if (op == "upload") SceneUpload();
+            else if (op == "autosave") g_autosaveSec = atof(arg.c_str());
+            Log("[ui] scene %s %s -> open='%s' dirty=%d", op.c_str(), arg.c_str(), g_sceneName.c_str(), (int)g_sceneDirty.load());
+        }
         else if (req.rfind("!uidrag ", 0) == 0)
         {
             int a = 0, b = 0, c = 0, d = 0;
@@ -3726,6 +3935,7 @@ void DrawEditorUI()
 
     HandleShortcuts();
     DupSelectTick(snap);
+    SceneTick(snap);
 
     // Details follows the selection: tell the game thread what to read properties from.
     static std::string s_inspected;

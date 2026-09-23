@@ -5034,7 +5034,9 @@ static void SeLvSave(SDK::UObject* ctx, const std::string& rawName)
 // Export: SE|LVEXPORT|<name> -> SE|LVDATA|<name>|<i>|<n>|<hex> to the caller (hex: every byte survives the
 // trip, titles included). Import: SE|LVPART|<hex> (repeated, in order) then SE|LVIMPORT|<name>|load|save.
 static std::unordered_map<std::string, std::string> g_lvImportBuf;   // caller id -> text so far
-static void SeLvExport(SDK::UObject* ctx, const std::string& rawName)
+// tag = the editor's open scene is being saved: what is built becomes that level's (so closing the scene
+// removes it, and opening another scene starts clean), exactly like a Unity scene owns its objects.
+static void SeLvExport(SDK::UObject* ctx, const std::string& rawName, bool tag = false)
 {
     SDK::UObject* pc = SeCallerPC(ctx);
     if (!pc) return;
@@ -5042,7 +5044,8 @@ static void SeLvExport(SDK::UObject* ctx, const std::string& rawName)
     for (char c : rawName) if (isalnum(static_cast<unsigned char>(c)) || c == ' ' || c == '_' || c == '-') name += c;
     if (name.empty()) name = "Untitled";
     int counts[3] = {};
-    const std::string text = SeLvBuild(name, counts, false);
+    const std::string text = SeLvBuild(name, counts, tag);
+    if (tag && std::find(g_lvLoaded.begin(), g_lvLoaded.end(), name) == g_lvLoaded.end()) { g_lvLoaded.push_back(name); g_lvStatusDirty = true; }
     static const char* hx = "0123456789ABCDEF";
     std::string hex;
     hex.reserve(text.size() * 2);
@@ -5345,7 +5348,12 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
     else if (op == "LVSAVE" && p.size() >= 3) SeLvSave(pawn, p[2]);
     else if (op == "SBDUP"  && p.size() >= 6) SeSandboxDuplicate(pawn, p[2], p[3], p[4], p[5]);
     else if (op == "LVLIST") SeLvList(pawn);
-    else if (op == "LVEXPORT" && p.size() >= 3) SeLvExport(pawn, p[2]);
+    else if (op == "LVEXPORT" && p.size() >= 3) SeLvExport(pawn, p[2], p.size() >= 4 && p[3] == "1");
+    else if (op == "LVCLOSE" && p.size() >= 3)                // the editor closes its open scene: remove it from this server
+    {
+        if (std::find(g_lvLoaded.begin(), g_lvLoaded.end(), p[2]) != g_lvLoaded.end()) SeLvUnload(p[2]);
+        HxLog("[HalcyonA2][LEVELS] scene '%s' closed by the editor\n", p[2].c_str());
+    }
     else if (op == "LVPART" && p.size() >= 3) SeLvImportPart(p[2]);
     else if (op == "LVIMPORT" && p.size() >= 4) SeLvImport(pawn, p[2], p[3]);
     else if (op == "LVLOAD" && p.size() >= 3) SeLvSetLoaded(pawn, p[2], true);
