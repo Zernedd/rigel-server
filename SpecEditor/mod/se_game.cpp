@@ -632,7 +632,7 @@ void HandleCommands()
             break;
 
         case CmdType::SpawnItem:
-            SendToServer("SE|SPAWN|" + c.str + "|" + Fmt3(c.loc) + "|" + Fmt3(c.rot));
+            SendToServer("SE|SPAWN|" + c.str + "|" + Fmt3(c.loc) + "|" + Fmt3(c.rot) + "|" + Fmt3(c.scale));
             Log("[game] spawn request: %s", c.str.c_str());
             break;
 
@@ -902,10 +902,15 @@ void HandleCommands()
 struct EditorCamera
 {
     SDK::UObject* actor = nullptr;
-    double x = 0, y = 0, z = 0, pitch = 0, yaw = 0;
+    double x = 0, y = 0, z = 0, pitch = 0, yaw = 0;   // pitch/yaw are relative to the gravity frame below
     float  speed = 1200.0f;          // units per second
     LARGE_INTEGER last{};
     bool   primed = false;
+    // Gravity frame: `up` is the way up where the camera is (world Z outside every gravity zone), `tan` a
+    // horizontal reference carried along as `up` turns (so the view never flips), and the world rotator the
+    // camera actor really gets.
+    double up[3] = { 0, 0, 1 }, tan[3] = { 1, 0, 0 }, fwd[3] = { 1, 0, 0 };
+    double rp = 0, ry = 0, rr = 0;
 };
 EditorCamera g_cam;
 
@@ -957,6 +962,185 @@ void SetViewTarget(SDK::UObject* target)
     CallNative(g_pc, "PlayerController", "SetViewTargetWithBlend", p);
 }
 
+// ── gravity zones ──────────────────────────────────────────────────────────────────────────────
+// The station is an O'Neill cylinder (gravity points away from its axis, so "up" is toward it), with
+// gravity volumes -- boxes whose own +Z is up while you are inside them -- for the ramps and side rooms.
+// The game turns players and its spectator camera with them; the editor camera used world Z as up, so
+// anywhere but the bottom of the cylinder the level showed sideways or upside down. The zones only act on
+// real pawns (a gravity component on the camera is never picked up), so the camera works out the same
+// "up" from the zones' own data: the smallest non-additive volume it is inside, else the cylinder around
+// it, else world Z.
+struct GravZone
+{
+    SDK::UObject* actor = nullptr;
+    bool   cylinder = false, invert = false;
+    double lo[3]{}, hi[3]{};                  // world bounds (a cheap first test)
+    double centre[3]{}, axis[3]{ 0, 1, 0 }, maxDist = 0;   // cylinder
+    SDK::FTransform box{};                    // volume: its trigger box's transform and unscaled extent
+    double extent[3]{}, up[3]{ 0, 0, 1 }, size = 0;
+};
+static std::vector<GravZone> g_gravZones;
+static ULONGLONG g_gravZonesAt = 0;
+struct GravVec { SDK::FVector ReturnValue; };
+
+static void GravZonesRefresh()
+{
+    g_gravZones.clear();
+    auto* ocls = SDK::UObject::FindClassFast("OneillGravityActor");
+    auto* vcls = SDK::UObject::FindClassFast("GravityVolumeActor");
+    auto* bcls = SDK::UObject::FindClassFast("GravityBoxActor");
+    const int32_t n = SDK::UObject::GObjects->Num();
+    for (int32_t i = 0; i < n; ++i)
+    {
+        SDK::UObject* ob = SDK::UObject::GObjects->GetByIndex(i);
+        if (!ob || !ob->Class || ob->IsDefaultObject()) continue;
+        const bool isO = ocls && ob->IsA(ocls), isV = vcls && ob->IsA(vcls), isB = bcls && ob->IsA(bcls);
+        if (!isO && !isV && !isB) continue;
+        const uintptr_t b = reinterpret_cast<uintptr_t>(ob);
+        GravZone z;
+        z.actor = ob;
+        SDK::Params::Actor_GetActorBounds ab{};
+        ab.bOnlyCollidingComponents = true;
+        if (!CallNative(ob, "Actor", "GetActorBounds", ab)) continue;
+        if (ab.BoxExtent.X + ab.BoxExtent.Y + ab.BoxExtent.Z < 1.0)     // no colliding part: take the whole actor
+        {
+            ab.bOnlyCollidingComponents = false;
+            if (!CallNative(ob, "Actor", "GetActorBounds", ab) || ab.BoxExtent.X + ab.BoxExtent.Y + ab.BoxExtent.Z < 1.0) continue;
+        }
+        z.lo[0] = ab.Origin.X - ab.BoxExtent.X; z.lo[1] = ab.Origin.Y - ab.BoxExtent.Y; z.lo[2] = ab.Origin.Z - ab.BoxExtent.Z;
+        z.hi[0] = ab.Origin.X + ab.BoxExtent.X; z.hi[1] = ab.Origin.Y + ab.BoxExtent.Y; z.hi[2] = ab.Origin.Z + ab.BoxExtent.Z;
+        if (isO)
+        {
+            z.cylinder = true;
+            SDK::Params::Actor_K2_GetActorLocation l{};
+            CallNative(ob, "Actor", "K2_GetActorLocation", l);
+            z.centre[0] = l.ReturnValue.X; z.centre[1] = l.ReturnValue.Y; z.centre[2] = l.ReturnValue.Z;
+            const double* ax = reinterpret_cast<const double*>(b + 0x308);           // RotationAxis
+            const double an = std::sqrt(ax[0] * ax[0] + ax[1] * ax[1] + ax[2] * ax[2]);
+            if (an > 0.5) { z.axis[0] = ax[0] / an; z.axis[1] = ax[1] / an; z.axis[2] = ax[2] / an; }
+            z.maxDist = *reinterpret_cast<float*>(b + 0x29C);                         // MaxGravityDistance
+            z.invert = *reinterpret_cast<bool*>(b + 0x302);                           // InvertGravity
+            z.size = 1e30;                                                             // volumes inside it win
+        }
+        else
+        {
+            if (isV && *reinterpret_cast<bool*>(b + 0x298)) continue;                // bIsAdditive: a nudge, not a floor
+            SDK::UObject* boxc = *reinterpret_cast<SDK::UObject**>(b + (isV ? 0x2A0 : 0x2B0));   // boxTrigger
+            if (!boxc || !ObjectAlive(boxc)) continue;
+            SDK::Params::SceneComponent_K2_GetComponentToWorld w{};
+            if (!CallNative(boxc, "SceneComponent", "K2_GetComponentToWorld", w)) continue;
+            z.box = w.ReturnValue;
+            const double* ext = reinterpret_cast<const double*>(reinterpret_cast<uintptr_t>(boxc) + 0x540);   // BoxExtent
+            z.extent[0] = ext[0]; z.extent[1] = ext[1]; z.extent[2] = ext[2];
+            GravVec u{};
+            if (!CallNative(ob, "Actor", "GetActorUpVector", u)) continue;
+            z.up[0] = u.ReturnValue.X; z.up[1] = u.ReturnValue.Y; z.up[2] = u.ReturnValue.Z;
+            if (isB && *reinterpret_cast<bool*>(b + 0x2A6)) { z.up[0] = -z.up[0]; z.up[1] = -z.up[1]; z.up[2] = -z.up[2]; }
+            z.size = (z.hi[0] - z.lo[0]) * (z.hi[1] - z.lo[1]) * (z.hi[2] - z.lo[2]);
+        }
+        g_gravZones.push_back(z);
+    }
+}
+
+// The way up where the camera is (world Z outside every zone). Returns the zone that decided it, if any.
+static const GravZone* CameraGravityUp(double out[3])
+{
+    out[0] = 0; out[1] = 0; out[2] = 1;
+    const ULONGLONG now = GetTickCount64();
+    if (now - g_gravZonesAt > 3000) { g_gravZonesAt = now; GravZonesRefresh(); }   // streaming levels come and go
+    const double pt[3] = { g_cam.x, g_cam.y, g_cam.z };
+    const GravZone* best = nullptr;
+    double bestUp[3] = { 0, 0, 1 };
+    for (const GravZone& z : g_gravZones)
+    {
+        if (best && z.size >= best->size) continue;
+        if (!ObjectAlive(z.actor)) continue;
+        bool inBounds = true;
+        for (int k = 0; k < 3; ++k) if (pt[k] < z.lo[k] - 1.0 || pt[k] > z.hi[k] + 1.0) inBounds = false;
+        if (!inBounds) continue;
+        double up[3];
+        if (z.cylinder)
+        {
+            double d[3] = { pt[0] - z.centre[0], pt[1] - z.centre[1], pt[2] - z.centre[2] };
+            const double along = d[0] * z.axis[0] + d[1] * z.axis[1] + d[2] * z.axis[2];
+            for (int k = 0; k < 3; ++k) d[k] -= along * z.axis[k];
+            const double r = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+            if (r < 50.0 || (z.maxDist > 0 && r > z.maxDist)) continue;              // on the axis: no floor
+            const double sgn = z.invert ? 1.0 : -1.0;                                 // up is toward the axis
+            for (int k = 0; k < 3; ++k) up[k] = sgn * d[k] / r;
+        }
+        else
+        {
+            SDK::Params::KismetMathLibrary_InverseTransformLocation it{};
+            it.T = z.box;
+            it.Location = SDK::FVector{ pt[0], pt[1], pt[2] };
+            if (!CallStatic("KismetMathLibrary", "InverseTransformLocation", it)) continue;
+            if (std::fabs(it.ReturnValue.X) > z.extent[0] || std::fabs(it.ReturnValue.Y) > z.extent[1] ||
+                std::fabs(it.ReturnValue.Z) > z.extent[2]) continue;
+            for (int k = 0; k < 3; ++k) up[k] = z.up[k];
+        }
+        best = &z;
+        for (int k = 0; k < 3; ++k) bestUp[k] = up[k];
+    }
+    if (best) for (int k = 0; k < 3; ++k) out[k] = bestUp[k];
+    return best;
+}
+static void Normalize3(double v[3], const double fallback[3])
+{
+    const double n = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    if (n < 1e-6) { v[0] = fallback[0]; v[1] = fallback[1]; v[2] = fallback[2]; return; }
+    v[0] /= n; v[1] /= n; v[2] /= n;
+}
+// Swing `up` toward the game's up over ~1/4 s (a zone boundary should not snap the view).
+static void CameraTurnToGravity(double dt)
+{
+    double target[3];
+    CameraGravityUp(target);
+    double* u = g_cam.up;
+    const double d = u[0] * target[0] + u[1] * target[1] + u[2] * target[2];
+    const double k = dt <= 0.0 ? 1.0 : (std::min)(1.0, dt * 5.0);
+    if (d < -0.95)                                               // a straight flip: go round via the reference
+        for (int i = 0; i < 3; ++i) u[i] += g_cam.tan[i] * 0.3;
+    for (int i = 0; i < 3; ++i) u[i] += (target[i] - u[i]) * k;
+    Normalize3(u, target);
+}
+// Build the view from the frame: forward and right from the local pitch/yaw, and the camera actor's world
+// rotator (the engine builds it from forward + up -- no hand-rolled rotator maths).
+static void CameraFrame(double right[3] = nullptr)
+{
+    double* u = g_cam.up;
+    double* t = g_cam.tan;
+    static const double wx[3] = { 1, 0, 0 }, wy[3] = { 0, 1, 0 };
+    const double tu = t[0] * u[0] + t[1] * u[1] + t[2] * u[2];
+    for (int i = 0; i < 3; ++i) t[i] -= tu * u[i];               // carry the reference along (no flips)
+    const double n = std::sqrt(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]);
+    if (n < 1e-3)                                                // it lined up with up: pick a fresh one
+    {
+        const double* w = std::fabs(u[0]) < 0.9 ? wx : wy;
+        const double wu = w[0] * u[0] + w[1] * u[1] + w[2] * u[2];
+        for (int i = 0; i < 3; ++i) t[i] = w[i] - wu * u[i];
+    }
+    Normalize3(t, wy);
+    const double b[3] = { u[1] * t[2] - u[2] * t[1], u[2] * t[0] - u[0] * t[2], u[0] * t[1] - u[1] * t[0] };   // up x tan
+    const double d2r = 3.14159265358979 / 180.0;
+    const double cp = std::cos(g_cam.pitch * d2r), sp = std::sin(g_cam.pitch * d2r);
+    const double cy = std::cos(g_cam.yaw * d2r),   sy = std::sin(g_cam.yaw * d2r);
+    for (int i = 0; i < 3; ++i) g_cam.fwd[i] = cp * cy * t[i] + cp * sy * b[i] + sp * u[i];
+    if (right) for (int i = 0; i < 3; ++i) right[i] = -sy * t[i] + cy * b[i];
+    if (u[2] > 0.99999)                                          // plain world-up: exactly the old camera
+    {
+        g_cam.rp = g_cam.pitch; g_cam.ry = g_cam.yaw + std::atan2(t[1], t[0]) / d2r; g_cam.rr = 0;
+        return;
+    }
+    SDK::Params::KismetMathLibrary_MakeRotFromXZ m{};
+    m.X = SDK::FVector{ g_cam.fwd[0], g_cam.fwd[1], g_cam.fwd[2] };
+    m.Z = SDK::FVector{ u[0], u[1], u[2] };
+    if (CallStatic("KismetMathLibrary", "MakeRotFromXZ", m))
+    {
+        g_cam.rp = m.ReturnValue.Pitch; g_cam.ry = m.ReturnValue.Yaw; g_cam.rr = m.ReturnValue.Roll;
+    }
+}
+
 void CameraActivate(const Snapshot& snap)
 {
     if (!ObjectAlive(g_cam.actor))
@@ -984,7 +1168,12 @@ void CameraActivate(const Snapshot& snap)
     // Start exactly where the player was looking, so entering the editor does not jump the view.
     g_cam.x = snap.cameraPos.x; g_cam.y = snap.cameraPos.y; g_cam.z = snap.cameraPos.z;
     g_cam.pitch = snap.cameraRot.pitch; g_cam.yaw = snap.cameraRot.yaw;
+    g_cam.up[0] = 0; g_cam.up[1] = 0; g_cam.up[2] = 1;
+    g_cam.tan[0] = 1; g_cam.tan[1] = 0; g_cam.tan[2] = 0;
     g_cam.primed = false;
+    g_gravZonesAt = 0;                                           // re-read the zones for this session
+    CameraGravityUp(g_cam.up);                                   // start already the right way up
+    CameraFrame();
     SetViewTarget(g_cam.actor);
     Cam().active = true;
 }
@@ -1005,7 +1194,7 @@ void CameraApply()
     if (!ObjectAlive(g_cam.actor)) return;
     SDK::Params::Actor_K2_SetActorLocationAndRotation p{};
     p.NewLocation = SDK::FVector{ g_cam.x, g_cam.y, g_cam.z };
-    p.NewRotation = SDK::FRotator{ g_cam.pitch, g_cam.yaw, 0.0 };
+    p.NewRotation = SDK::FRotator{ g_cam.rp, g_cam.ry, g_cam.rr };
     p.bSweep = false;
     p.bTeleport = true;
     CallNative(g_cam.actor, "Actor", "K2_SetActorLocationAndRotation", p);
@@ -1034,18 +1223,18 @@ void CameraTick()
         g_cam.yaw   += dx * 0.15;
         g_cam.pitch -= dy * 0.15;
         g_cam.pitch  = (std::max)(-89.0, (std::min)(89.0, g_cam.pitch));
-
+    }
+    CameraTurnToGravity(dt);
+    double r[3];
+    CameraFrame(r);
+    if (in.looking)
+    {
         auto down = [](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
-        const double d2r = 3.14159265358979 / 180.0;
-        const double cp = std::cos(g_cam.pitch * d2r), sp = std::sin(g_cam.pitch * d2r);
-        const double cy = std::cos(g_cam.yaw * d2r),   sy = std::sin(g_cam.yaw * d2r);
-        const double f[3] = { cp * cy, cp * sy, sp }, r[3] = { -sy, cy, 0 };
         double mv[3] = { 0, 0, 0 };
         const double fwd = (down('W') ? 1 : 0) - (down('S') ? 1 : 0);
         const double rgt = (down('D') ? 1 : 0) - (down('A') ? 1 : 0);
-        const double up  = (down('E') ? 1 : 0) - (down('Q') ? 1 : 0);
-        for (int i = 0; i < 3; ++i) mv[i] = f[i] * fwd + r[i] * rgt;
-        mv[2] += up;
+        const double up  = (down('E') ? 1 : 0) - (down('Q') ? 1 : 0);   // Q/E: along the local up
+        for (int i = 0; i < 3; ++i) mv[i] = g_cam.fwd[i] * fwd + r[i] * rgt + g_cam.up[i] * up;
         const double step = g_cam.speed * (down(VK_SHIFT) ? 3.0 : 1.0) * dt;
         g_cam.x += mv[0] * step; g_cam.y += mv[1] * step; g_cam.z += mv[2] * step;
     }
@@ -1056,10 +1245,7 @@ void CameraTick()
 void CameraFocus(const Vec3& p)
 {
     if (!Cam().active) return;
-    const double d2r = 3.14159265358979 / 180.0;
-    const double cp = std::cos(g_cam.pitch * d2r), sp = std::sin(g_cam.pitch * d2r);
-    const double cy = std::cos(g_cam.yaw * d2r),   sy = std::sin(g_cam.yaw * d2r);
-    g_cam.x = p.x - cp * cy * 500.0; g_cam.y = p.y - cp * sy * 500.0; g_cam.z = p.z - sp * 500.0;
+    g_cam.x = p.x - g_cam.fwd[0] * 500.0; g_cam.y = p.y - g_cam.fwd[1] * 500.0; g_cam.z = p.z - g_cam.fwd[2] * 500.0;
     CameraApply();
 }
 
@@ -1123,7 +1309,7 @@ void PublishCamera()
         }
     if (Cam().active && ObjectAlive(g_cam.actor))
     {
-        pos = { g_cam.x, g_cam.y, g_cam.z }; rot = { g_cam.pitch, g_cam.yaw, 0.0 };
+        pos = { g_cam.x, g_cam.y, g_cam.z }; rot = { g_cam.rp, g_cam.ry, g_cam.rr };
         have = true;
     }
     if (have) State().ApplyCamera(pos, rot, fov);
@@ -1645,9 +1831,10 @@ void RunScript(const Snapshot& snap)
         }
         const bool showing = !a->bHidden && shown > 0;
         const char* verdict = want == -1 ? "INFO" : (showing == (want == 1) ? "PASS" : "FAIL");
-        Log("[script] %s vis %s at (%.0f,%.0f,%.0f): %s (actor hidden=%d, %d/%d primitive(s) visible)", verdict,
-            a->GetName().c_str(), best->location.x, best->location.y, best->location.z, showing ? "SHOWING" : "HIDDEN",
-            a->bHidden ? 1 : 0, shown, prims);
+        Log("[script] %s vis %s at (%.0f,%.0f,%.0f) rot (%.0f,%.0f,%.0f) scale (%.2f,%.2f,%.2f): %s (actor hidden=%d, %d/%d primitive(s) visible)", verdict,
+            a->GetName().c_str(), best->location.x, best->location.y, best->location.z,
+            best->rotation.pitch, best->rotation.yaw, best->rotation.roll, best->scale.x, best->scale.y, best->scale.z,
+            showing ? "SHOWING" : "HIDDEN", a->bHidden ? 1 : 0, shown, prims);
         return;
     }
     if (!strcmp(op, "coinrun"))               // coinrun <sec> <questHex32> -- a red-coin run 4 m ahead: 3 coins + a start button
@@ -1670,6 +1857,53 @@ void RunScript(const Snapshot& snap)
         g_lastSpawnLoc = { bx, by, bz };
         g_lastHandle.clear();
         Log("[script] coinrun at (%.0f,%.0f,%.0f) %0.fs quest %s", bx, by, bz, sec, q);
+        return;
+    }
+    if (!strcmp(op, "gravprobe"))             // gravprobe -- the gravity zones in the level, and the camera's gravity
+    {
+        const int32_t n = SDK::UObject::GObjects->Num();
+        auto* acls = SDK::UObject::FindClassFast("Actor");
+        int found = 0;
+        for (int32_t i = 0; acls && i < n; ++i)
+        {
+            SDK::UObject* ob = SDK::UObject::GObjects->GetByIndex(i);
+            if (!ob || !ob->Class || ob->IsDefaultObject() || !ob->IsA(acls)) continue;
+            const std::string cn = ob->Class->GetName();
+            if (cn.find("Gravity") == std::string::npos) continue;
+            auto* a = static_cast<SDK::AActor*>(ob);
+            const SDK::FVector l = a->RootComponent ? a->RootComponent->RelativeLocation : SDK::FVector{};
+            const SDK::FRotator rr = a->RootComponent ? a->RootComponent->RelativeRotation : SDK::FRotator{};
+            Log("[script] GRAV %s (%s) at (%.0f,%.0f,%.0f) rot(%.0f,%.0f,%.0f)", ob->GetName().c_str(), cn.c_str(), l.X, l.Y, l.Z,
+                rr.Pitch, rr.Yaw, rr.Roll);
+            if (cn.find("Oneill") != std::string::npos)
+            {
+                const uintptr_t b = reinterpret_cast<uintptr_t>(ob);
+                const double* ax = reinterpret_cast<const double*>(b + 0x308);
+                Log("[script] GRAV   oneill type=%d axis=%d maxDist=%.0f width=%.0f meshR=%.0f arena=%.0f rotAxis=(%.2f,%.2f,%.2f) pawns=%d props=%d",
+                    *reinterpret_cast<uint8_t*>(b + 0x298), *reinterpret_cast<uint8_t*>(b + 0x29A), *reinterpret_cast<float*>(b + 0x29C),
+                    *reinterpret_cast<float*>(b + 0x2A0), *reinterpret_cast<float*>(b + 0x304), *reinterpret_cast<float*>(b + 0x2E4),
+                    ax[0], ax[1], ax[2], *reinterpret_cast<int32_t*>(b + 0x358), *reinterpret_cast<int32_t*>(b + 0x370));
+            }
+            if (++found >= 40) break;
+        }
+        double up[3];
+        g_gravZonesAt = 0;
+        const GravZone* by = CameraGravityUp(up);
+        for (const GravZone& z : g_gravZones)
+            Log("[script] GRAV   model %s %s bounds (%.0f,%.0f,%.0f)-(%.0f,%.0f,%.0f) up=(%.2f,%.2f,%.2f) maxDist=%.0f", z.actor->GetName().c_str(),
+                z.cylinder ? "CYL" : "VOL", z.lo[0], z.lo[1], z.lo[2], z.hi[0], z.hi[1], z.hi[2], z.up[0], z.up[1], z.up[2], z.maxDist);
+        Log("[script] GRAV camera at (%.0f,%.0f,%.0f) zone=%s up=(%.2f,%.2f,%.2f) frameUp=(%.2f,%.2f,%.2f) rot(p=%.1f,y=%.1f,r=%.1f); %d zone actor(s), %zu modelled",
+            g_cam.x, g_cam.y, g_cam.z, by ? by->actor->GetName().c_str() : "none", up[0], up[1], up[2],
+            g_cam.up[0], g_cam.up[1], g_cam.up[2], g_cam.rp, g_cam.ry, g_cam.rr, found, g_gravZones.size());
+        return;
+    }
+    if (!strcmp(op, "camto"))                 // camto x y z -- put the editor camera there
+    {
+        double x = 0, y = 0, z = 0;
+        if (sscanf_s(rest.c_str(), "%lf %lf %lf", &x, &y, &z) != 3) { Log("[script] FAIL camto: want x y z"); return; }
+        g_cam.x = x; g_cam.y = y; g_cam.z = z;
+        CameraApply();
+        Log("[script] camto (%.0f,%.0f,%.0f)", x, y, z);
         return;
     }
     if (!strcmp(op, "sbadd"))                 // sbadd <UniqueID> -- LOCAL TEST: sandbox-system placement in front of us

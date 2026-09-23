@@ -33,7 +33,54 @@ float     g_rotSnap = 15.0f;
 char g_paletteFilter[96] = {};
 char g_outlinerFilter[96] = {};
 std::string g_selected;          // handle
+std::vector<std::string> g_multiSel;   // Ctrl+click extras, besides g_selected (which keeps the gizmo and Details)
 int  g_activeTab = 0;            // 0 details, 1 quests
+
+bool IsMultiSel(const std::string& h)
+{
+    return std::find(g_multiSel.begin(), g_multiSel.end(), h) != g_multiSel.end();
+}
+// Ctrl+click: add an object to the selection, or take it out. Extras are not locked on the server -- the
+// lock is for the one being edited -- they are only duplicated or deleted together with it.
+void ToggleMultiSel(const std::string& h)
+{
+    if (h.empty()) return;
+    if (g_selected.empty())
+    {
+        g_selected = h;
+        Command s{ CmdType::SelectObject }; s.str = h; State().Push(s);
+        return;
+    }
+    if (h == g_selected)                  // the primary leaves: the next one takes the gizmo
+    {
+        Command d{ CmdType::DeselectObject }; d.str = g_selected; State().Push(d);
+        g_selected.clear();
+        if (!g_multiSel.empty())
+        {
+            g_selected = g_multiSel.front();
+            g_multiSel.erase(g_multiSel.begin());
+            Command s{ CmdType::SelectObject }; s.str = g_selected; State().Push(s);
+        }
+        return;
+    }
+    auto it = std::find(g_multiSel.begin(), g_multiSel.end(), h);
+    if (it != g_multiSel.end()) g_multiSel.erase(it); else g_multiSel.push_back(h);
+}
+void ClearSelection()
+{
+    g_multiSel.clear();
+    if (g_selected.empty()) return;
+    Command d{ CmdType::DeselectObject }; d.str = g_selected; State().Push(d);
+    g_selected.clear();
+}
+void DeleteSelected()
+{
+    for (const std::string& h : g_multiSel) { Command c{ CmdType::DeleteObject }; c.str = h; State().Push(c); }
+    g_multiSel.clear();
+    if (g_selected.empty()) return;
+    Command c{ CmdType::DeleteObject }; c.str = g_selected; State().Push(c);
+    g_selected.clear();
+}
 
 // ── quest authoring model, held on the render thread and compiled through the game thread ────
 struct QuestStep
@@ -497,7 +544,7 @@ void DrawViewportMarkers(const Snapshot& snap)
     if (v.valid)
         for (const auto& o : snap.objects)
         {
-            const bool isSel = o.handle == g_selected;
+            const bool isSel = o.handle == g_selected || IsMultiSel(o.handle);
             if (!isSel && &o != hovered) continue;
             Vec3 ctr = Add(o.location, o.boundsOff);
             if (isSel && g_dragAxis >= 0 && g_dragHandle == o.handle) ctr = Add(g_pendLoc, o.boundsOff);
@@ -535,18 +582,19 @@ void DrawViewportMarkers(const Snapshot& snap)
     }
     if (!canPick || !ImGui::IsMouseClicked(ImGuiMouseButton_Left)) return;
     if (hovered && SlotPickTake(hovered->handle)) return;
+    const bool ctrl = ImGui::GetIO().KeyCtrl;
     if (hovered)
     {
-        if (hovered->handle == g_selected || hovered->lockedByOther) return;
+        if (hovered->lockedByOther) return;
+        if (ctrl) { ToggleMultiSel(hovered->handle); return; }
+        g_multiSel.clear();
+        if (hovered->handle == g_selected) return;
         if (!g_selected.empty()) { Command d{ CmdType::DeselectObject }; d.str = g_selected; State().Push(d); }
         g_selected = hovered->handle;
         Command s{ CmdType::SelectObject }; s.str = g_selected; State().Push(s);
     }
-    else if (!g_selected.empty())
-    {
-        Command d{ CmdType::DeselectObject }; d.str = g_selected; State().Push(d);
-        g_selected.clear();
-    }
+    else if (!ctrl)
+        ClearSelection();
 }
 
 float Snap(float v, float step, bool on) { return (on && step > 0.0f) ? std::round(v / step) * step : v; }
@@ -661,6 +709,26 @@ void SpawnAt(const PaletteItem& it, const Vec3& loc, double yaw)
     g_recent.insert(g_recent.begin(), it.path);
     if (g_recent.size() > 10) g_recent.resize(10);
 }
+// A duplicate is the same object 1 m along X: its whole rotation and its size come with it (the spawn
+// used to carry only the yaw, so a tilted or resized piece duplicated flat and at 1x).
+static void DuplicateSelection(const Snapshot& snap, const SceneObject& sel)
+{
+    const PaletteItem* it = FindItem(snap, sel.className);
+    if (!it) return;
+    if (!it->blocked.empty()) { Notes().Set(PrettyName(it->name) + ": " + it->blocked); return; }
+    Command c{ CmdType::SpawnItem };
+    c.str   = it->path;
+    c.loc   = Add(sel.location, Vec3{ 100, 0, 0 });
+    c.rot   = sel.rotation;
+    c.scale = sel.scale;
+    State().Push(c);
+}
+// Ctrl+D / Edit > Duplicate: every selected object (Ctrl+click several to duplicate them together).
+static void DuplicateSelected(const Snapshot& snap)
+{
+    for (const auto& o : snap.objects)
+        if (o.handle == g_selected || IsMultiSel(o.handle)) DuplicateSelection(snap, o);
+}
 // Place along a ray, ON the first surface it hits (the game thread line-traces the level), falling back to
 // `fallback` units down the ray over empty space. Grid snap applies in X/Y so it stays on the surface.
 void SpawnTraced(const PaletteItem& it, const Vec3& from, const Vec3& dir, double fallback, double yaw)
@@ -737,12 +805,9 @@ void DrawMainMenu(const Snapshot& snap, const SceneObject* sel)
     if (ImGui::BeginMenu("Edit"))
     {
         if (ImGui::MenuItem("Duplicate", "Ctrl+D", false, sel != nullptr) && sel)
-            if (const PaletteItem* it = FindItem(snap, sel->className))
-                SpawnAt(*it, Add(sel->location, Vec3{ 100, 0, 0 }), sel->rotation.yaw);
+            DuplicateSelected(snap);
         if (ImGui::MenuItem("Delete", "Delete", false, sel != nullptr))
-        {
-            Command c{ CmdType::DeleteObject }; c.str = g_selected; State().Push(c); g_selected.clear();
-        }
+            DeleteSelected();
         ImGui::Separator();
         ImGui::MenuItem("Snapping", nullptr, &g_snapEnabled);
         ImGui::EndMenu();
@@ -758,9 +823,7 @@ void DrawMainMenu(const Snapshot& snap, const SceneObject* sel)
     if (ImGui::BeginMenu("Select"))
     {
         if (ImGui::MenuItem("Select None", "Esc", false, !g_selected.empty()))
-        {
-            Command c{ CmdType::DeselectObject }; c.str = g_selected; State().Push(c); g_selected.clear();
-        }
+            ClearSelection();
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Help"))
@@ -775,7 +838,7 @@ void DrawMainMenu(const Snapshot& snap, const SceneObject* sel)
         ImGui::BulletText("Q W E R: select / move / rotate / scale");
         ImGui::BulletText("Click a marker to select, drag a gizmo handle");
         ImGui::BulletText("Drag an asset into the viewport: it lands on the surface");
-        ImGui::BulletText("Ctrl+D duplicate, Delete removes, Esc deselects");
+        ImGui::BulletText("Ctrl+click adds to the selection; Ctrl+D duplicates it, Delete removes it, Esc deselects");
         ImGui::BulletText("F12 hides the editor and returns your view");
         ImGui::EndMenu();
     }
@@ -934,6 +997,7 @@ bool SlotPickTake(const std::string& h)
 void SelectHandle(const std::string& h)
 {
     if (SlotPickTake(h)) return;
+    g_multiSel.clear();
     if (h == g_selected) return;
     if (!g_selected.empty()) { Command d{ CmdType::DeselectObject }; d.str = g_selected; State().Push(d); }
     g_selected = h;
@@ -1003,10 +1067,12 @@ void DrawOutlinerPanel(const Snapshot& snap, ImVec2 pos, ImVec2 size)
             ImGui::PushID(o.handle.c_str());
             const ImVec2 p = ImGui::GetCursorScreenPos();
             ImGui::Indent(18);
-            if (ImGui::Selectable("##row", o.handle == g_selected, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick,
-                                  ImVec2(0, 18)) && !o.lockedByOther)
+            if (ImGui::Selectable("##row", o.handle == g_selected || IsMultiSel(o.handle),
+                                  ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick, ImVec2(0, 18)) &&
+                !o.lockedByOther)
             {
-                SelectHandle(o.handle);
+                if (ImGui::GetIO().KeyCtrl && !g_slotPick.on) ToggleMultiSel(o.handle);
+                else SelectHandle(o.handle);
                 s_lastSel = o.handle;            // picked here: don't yank the scroll
                 if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
                 {
@@ -2585,7 +2651,7 @@ void DrawGameData(const Snapshot& snap, const SceneObject* sel)
 
 // ---- Levels: save what you built to the backend, and load saved levels on this server ------------------
 // A level is everything placed in the editor (objects, their Game data, quests, groups, coin runs). Saving
-// stores your unsaved work plus the level's own content under that name. Autoload (load on server boot) is
+// stores everything built on the server (loaded levels included) under that name. Autoload (load on server boot) is
 // set on the dashboard; Load / Unload here or there apply to the server within ~15 s.
 char g_levelName[64] = "";
 double g_levelsAsked = -100.0;
@@ -2596,8 +2662,8 @@ void DrawLevels(const Snapshot& snap)
     if (snap.inEditor && ImGui::GetTime() - g_levelsAsked > 20.0) refresh();
 
     ImGui::SeparatorText("Save");
-    ImGui::TextWrapped("Saves everything you have placed that isn't part of another level -- objects, their Game "
-                       "data, quests, groups and coin runs -- plus this level's own content.");
+    ImGui::TextWrapped("Saves everything built on this server -- including levels you loaded -- under this name: "
+                       "objects, their Game data, quests, groups and coin runs.");
     ImGui::SetNextItemWidth(-110);
     ImGui::InputTextWithHint("##lvname", "Level name", g_levelName, sizeof(g_levelName),
                              ImGuiInputTextFlags_CallbackCharFilter, [](ImGuiInputTextCallbackData* d) {
@@ -3030,15 +3096,9 @@ void HandleShortcuts()
     if (g_slotPick.on && ImGui::IsKeyPressed(ImGuiKey_Escape)) { g_slotPick.on = false; return; }   // cancel "click an object"
     if (g_coinPlaceQuest >= 0 && ImGui::IsKeyPressed(ImGuiKey_Escape)) { g_coinPlaceQuest = -1; return; }   // leave construction mode
     if (ImGui::IsKeyPressed(ImGuiKey_Escape) && !g_selected.empty())
-    {
-        Command c{ CmdType::DeselectObject }; c.str = g_selected; State().Push(c);
-        g_selected.clear();
-    }
+        ClearSelection();
     if (ImGui::IsKeyPressed(ImGuiKey_Delete) && !g_selected.empty())
-    {
-        Command c{ CmdType::DeleteObject }; c.str = g_selected; State().Push(c);
-        g_selected.clear();
-    }
+        DeleteSelected();
 }
 
 }  // namespace
@@ -3059,6 +3119,12 @@ void DrawEditorUI()
     const SceneObject* sel = nullptr;
     for (const auto& o : snap.objects)
         if (o.handle == g_selected) { sel = &o; break; }
+    if (!snap.objects.empty())                             // extras that were deleted / rebuilt drop out
+        g_multiSel.erase(std::remove_if(g_multiSel.begin(), g_multiSel.end(), [&](const std::string& h) {
+                             if (h == g_selected) return true;
+                             for (const auto& o : snap.objects) if (o.handle == h) return false;
+                             return true;
+                         }), g_multiSel.end());
     // A rebuilt object (script attached / removed, slot wired) comes back as a new actor under the same id: keep
     // it selected -- find the same kind of object where the selection was -- so Details (and its Game data,
     // scripts and slots) stays up instead of going blank.
@@ -3107,8 +3173,7 @@ void DrawEditorUI()
     }
     // Ctrl+D duplicates the selection, 1m along X, as in Unreal.
     if (sel && ImGui::GetIO().KeyCtrl && !ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_D))
-        if (const PaletteItem* it = FindItem(snap, sel->className))
-            SpawnAt(*it, Add(sel->location, Vec3{ 100, 0, 0 }), sel->rotation.yaw);
+        DuplicateSelected(snap);
 
     DrawMainMenu(snap, sel);
 

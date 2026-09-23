@@ -1,0 +1,22 @@
+# Duplicate carries rotation + scale (SE|SPAWN's optional 4th field), for sandbox objects; then the editor
+# drag stress so [STEP]/[PROF] can be compared (driftball-lag oracle).
+log DUP start
+enter
+wait 3
+raw SE|SPAWN|/Game/A2/Prefabs/Meshes/SkatePark/LE_SM_SP_HalfPipeWall_3x1x4_A_01.LE_SM_SP_HalfPipeWall_3x1x4_A_01_C|-450,2060,-28625|0,0,0|1,1,1
+wait 4
+raw SE|SPAWN|/Game/A2/Prefabs/Meshes/SkatePark/LE_SM_SP_HalfPipeWall_3x1x4_A_01.LE_SM_SP_HalfPipeWall_3x1x4_A_01_C|-450,2660,-28625|20,45,10|2,1.5,0.5
+wait 6
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2660 -28625
+spawnat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000 0
+wait 4
+log STRESS drag-begin
+drag 0 400 0 10
+wait 11
+drag 400 0 0 10
+wait 11
+drag 0 -400 0 10
+wait 11
+log STRESS drag-end
+wait 5
+log DUP done

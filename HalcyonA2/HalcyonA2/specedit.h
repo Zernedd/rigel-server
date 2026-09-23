@@ -316,10 +316,14 @@ static SDK::UObject* SeCallerPC(SDK::UObject* ctx)
     return ctx && ctx->IsA(SDK::APlayerController::StaticClass()) ? ctx : nullptr;
 }
 
-static void SeSpawn(SDK::UObject* pawn, const std::string& path, const std::string& locs, const std::string& rots)
+static void SeSpawn(SDK::UObject* pawn, const std::string& path, const std::string& locs, const std::string& rots,
+                    const std::string& scls = std::string())
 {
-    double loc[3]{}, rot[3]{};
+    double loc[3]{}, rot[3]{}, scl[3] = { 1, 1, 1 };
     if (!SeVec(locs, loc) || !SeVec(rots, rot)) { HxLog("[HalcyonA2][SPECEDIT] bad transform\n"); return; }
+    // Optional scale (a duplicate carries its source's size); older clients send none.
+    if (!scls.empty() && !SeVec(scls, scl)) scl[0] = scl[1] = scl[2] = 1;
+    for (double& v : scl) if (!(v > 0.01 && v < 100.0)) v = 1;
 
     SDK::UClass* cls = SeResolveEditorClass(path);
     if (!cls) return;
@@ -334,7 +338,6 @@ static void SeSpawn(SDK::UObject* pawn, const std::string& path, const std::stri
         const std::string type = SbTypeFor(cls->GetName());
         if (!type.empty())
         {
-            const double scl[3] = { 1, 1, 1 };
             g_sbSpawnCls = cls->GetName();
             g_sbSpawnPath = path;
             const std::string placed = SeSandboxSpawn(type, loc, rot, scl);
@@ -360,7 +363,7 @@ static void SeSpawn(SDK::UObject* pawn, const std::string& path, const std::stri
     SDK::FTransform xf{};
     xf.Rotation    = SDK::FQuat{ 0, 0, 0, 1 };
     xf.Translation = SDK::FVector{ loc[0], loc[1], loc[2] };
-    xf.Scale3D     = SDK::FVector{ 1, 1, 1 };
+    xf.Scale3D     = SDK::FVector{ scl[0], scl[1], scl[2] };
 
     // Deferred spawn so bReplicates is set BEFORE the actor is finished: after FinishSpawningActor it
     // is too late for the initial replication decision, and the actor would never reach clients.
@@ -4509,6 +4512,10 @@ static std::string SeLvResolve(const std::string& value)
 
 // Build a level from the editor's unsaved work plus everything already belonging to `name`, and tag it
 // all as belonging to `name`.
+// A save captures EVERYTHING built on this server -- unsaved work and every loaded level's content -- and
+// the saved objects become that level's. It used to take only unsaved work plus content already tagged
+// with this exact name, so loading a level, editing it and saving (under any other name, or a different
+// capitalisation) wrote only the new pieces and silently dropped everything that had been loaded.
 static std::string SeLvBuild(const std::string& name, int* counts)
 {
     std::string t = "L\t" + SeLvClean(name) + "\t1\n";
@@ -4521,7 +4528,7 @@ static std::string SeLvBuild(const std::string& name, int* counts)
     int n = 0;
     for (auto& o : g_sbOwned)
     {
-        if (runObjs.count(o.idx) || !(o.level.empty() || o.level == name) || o.uniqueId.empty() || o.cls.empty()) continue;
+        if (runObjs.count(o.idx) || o.uniqueId.empty() || o.cls.empty()) continue;
         if (o.lgm && !SeAlive(o.lgm)) continue;
         o.level = name;
         ownedIdx[o.idx] = n;
@@ -4542,7 +4549,7 @@ static std::string SeLvBuild(const std::string& name, int* counts)
     }
     for (auto& p : g_lvPlain)
     {
-        if (!SeLvPlainAlive(p) || !(p.level.empty() || p.level == name)) continue;
+        if (!SeLvPlainAlive(p)) continue;
         p.level = name;
         const SDK::FVector l = p.actor->K2_GetActorLocation(); const SDK::FRotator r = p.actor->K2_GetActorRotation();
         const SDK::FVector sc = p.actor->GetActorScale3D();
@@ -4559,7 +4566,7 @@ static std::string SeLvBuild(const std::string& name, int* counts)
     int nq = 0, nr = 0;
     for (auto& q : g_seAuthored)
     {
-        if (q.deleted || !(q.level.empty() || q.level == name)) continue;
+        if (q.deleted) continue;
         q.level = name;
         std::string steps;
         for (SDK::AActor* a : q.checkpoints)
@@ -4574,7 +4581,6 @@ static std::string SeLvBuild(const std::string& name, int* counts)
     }
     for (auto& r : g_lvRuns)
     {
-        if (!(r.level.empty() || r.level == name)) continue;
         r.level = name;
         char b[64];
         snprintf(b, sizeof(b), "%.0f", r.dur);
@@ -4938,7 +4944,7 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
     const auto p = SeSplit(cmd, '|', 16);
     const std::string op = p.size() > 1 ? p[1] : std::string();
 
-    if      (op == "SPAWN"  && p.size() >= 5) SeSpawn(pawn, p[2], p[3], p[4]);
+    if      (op == "SPAWN"  && p.size() >= 5) SeSpawn(pawn, p[2], p[3], p[4], p.size() >= 6 ? p[5] : std::string());
     else if (op == "XFORM"  && p.size() >= 6) SeTransform(p[2], p[3], p[4], p[5]);
     else if (op == "DELETE" && p.size() >= 3) SeDelete(p[2]);
     else if (op == "PROP"   && p.size() >= 5) SeSetProp(p[2], p[3], p[4]);

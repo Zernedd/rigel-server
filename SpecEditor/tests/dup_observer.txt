@@ -1,0 +1,6 @@
+log DUP-OBS start
+enter
+wait 20
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2660 -28625
+wait 50
+log DUP-OBS done

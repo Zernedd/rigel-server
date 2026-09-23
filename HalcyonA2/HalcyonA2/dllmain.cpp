@@ -13987,6 +13987,26 @@ static bool PatchEntitlementExit(uintptr_t base, const char* when)
     return false;
 }
 
+// BallSpawnerComponent's spawn callback (BallSpawnerComponent.cpp:268) logs "Entity Is null" when the ball it
+// asked for never came -- then writes through the null anyway (+0x53B3C02, faultAddr 0x328). A Luau script
+// that calls Spawner:spawnBallWithParameters({ isPersonalBall = true, targetPlayerIndex = local player })
+// hits that on the SERVER, which has no local player: every level-editor attach of such a script faulted
+// the server mid-rebuild and left a half-built object that later crashed clients. Send the null case past
+// every use of the entity to the request cleanup the good path ends with (+0x53B3C48). Two rel8 jumps.
+static bool PatchBallSpawnerNullEntity(uintptr_t base)
+{
+    uint8_t* p = reinterpret_cast<uint8_t*>(base + 0x53B3BC3);
+    static const uint8_t sig[] = { 0x75, 0x1E, 0x80, 0x3D };            // jne good; cmp byte [log verbosity]
+    if (memcmp(p, sig, sizeof(sig)) != 0) { HxLog("[HalcyonA2] WARNING: ball-spawner null-entity patch signature mismatch - NOT patched\n"); return false; }
+    if (p[0x09] == 0x72 && p[0x0A] == 0x7A && p[0x1E] == 0xEB && p[0x1F] == 0x65) return true;   // already done
+    if (p[0x09] != 0x72 || p[0x0A] != 0x2F || p[0x1E] != 0xEB || p[0x1F] != 0x1A)
+    { HxLog("[HalcyonA2] WARNING: ball-spawner null-entity jumps not as expected - NOT patched\n"); return false; }
+    WriteByte(base + 0x53B3BCD, 0x7A);   // jb  +0x53B3BFD -> +0x53B3C48 (log off)
+    WriteByte(base + 0x53B3BE2, 0x65);   // jmp +0x53B3BFD -> +0x53B3C48 (after the log)
+    HxLog("[HalcyonA2] ball-spawner null-entity guard patched (+0x53B3BCC/+0x53B3BE1 -> +0x53B3C48)\n");
+    return true;
+}
+
 static void Main(HMODULE)
 {
     // FIRST, before waiting on anything. It used to be applied only once a world existed, and the verdict
@@ -13994,6 +14014,7 @@ static void Main(HMODULE)
     // changed and the verdict started landing right after engine init, before the patch: the process then
     // exited during startup, every time. It is a pure code-byte flip with no dependencies, so do it now.
     PatchEntitlementExit(GetBase(), "load");
+    PatchBallSpawnerNullEntity(GetBase());
 
     if (wcsstr(GetCommandLineW(), L"-HalcyonClient"))
     {

@@ -1,0 +1,15 @@
+# Editor camera vs gravity zones: list the zones, then check what up the game gives the camera.
+log GRAV start
+enter
+wait 4
+gravprobe
+camto 26000 0 0
+wait 3
+gravprobe
+camto 0 0 26000
+wait 3
+gravprobe
+camto 0 -3000 -27000
+wait 3
+gravprobe
+log GRAV done

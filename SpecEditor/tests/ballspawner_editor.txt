@@ -1,0 +1,17 @@
+# Luau client-crash repro: a DeathBallSpawner with the 06 ball script attached and its Spawner slot wired
+# to itself (the attach respawns the spawner; the game's BallSpawnerComponent faulted on the live server).
+log BSP start
+enter
+wait 3
+sbadd DeathBallSpawner
+wait 8
+pick BP_DeathBallSpawner
+luaufile VecBalls
+wait 10
+pick BP_DeathBallSpawner
+luauref VecBalls Spawner BallSpawnerComponent self
+wait 30
+pick BP_DeathBallSpawner
+luaufile VecBalls
+wait 30
+log BSP done
