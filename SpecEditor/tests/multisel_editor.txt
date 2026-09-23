@@ -26,6 +26,11 @@ selinfo
 gmove 400 0 0
 wait 6
 selinfo
+gmove 0 0 50
+wait 2
+gmove 0 0 -50
+wait 6
+selinfo
 vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28325
 vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2660 -28325
 vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -49 2060 -28325

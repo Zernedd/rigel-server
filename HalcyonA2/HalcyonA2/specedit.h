@@ -618,6 +618,22 @@ static void SpecEditTick()
 }
 static void SafeSpecEditTick() { __try { SpecEditTick(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
 
+// "Class@x,y,z#<sandbox id>": moves and deletes carry the object's id as well as where the client sees it.
+// Position alone picked the wrong object whenever two of the same class stood within 1 m -- a duplicate
+// sits 1 cm from its original, and a group drag's client-side positions run ahead of the server's -- so a
+// copy's move landed on the original (and the copy's next one found nothing). The id names the object
+// outright; this turns it into the server's own exact ident for it, else falls back to the position.
+static std::string SeResolveIdent(const std::string& name)
+{
+    const size_t h = name.find('#');
+    if (h == std::string::npos) return name;
+    const std::string base = name.substr(0, h), idx = name.substr(h + 1);
+    if (idx.size() < 32) return base;
+    SDK::AActor* a = SbActorForIdx(idx, true);   // index only: never a full walk per drag step
+    if (!a || !a->Class || base.compare(0, base.find('@'), a->Class->GetName()) != 0) return base;
+    const std::string own = SeLvIdent(a);
+    return own.empty() ? base : own;
+}
 static void SeTransform(const std::string& name, const std::string& locs, const std::string& rots,
                         const std::string& scls)
 {
@@ -4306,6 +4322,47 @@ static std::string SbRehost(SbOwned& o, SDK::UObject* lgm)
     for (auto& other : g_sbOwned) for (auto& r : other.refs) if (r[2] == keep.idx) r[2] = idx;
     return idx;
 }
+// SE|SBDUP|<ident#id>|loc|rot|scale -- Duplicate. A copy of a sandbox object made from the object itself:
+// same catalogue entry, Game data, scripts and script slots, at the given transform, hosted where the
+// source is. Duplicate used to re-spawn from the Level Editor palette, so catalogue-only pieces (the
+// yellow boost pad is PrimitiveCubeYellow) had no palette entry and could not be duplicated at all.
+static void SeSandboxDuplicate(SDK::UObject* pawn, const std::string& name, const std::string& locs,
+                               const std::string& rots, const std::string& scls)
+{
+    const size_t h = name.find('#');
+    SbOwned* src = h == std::string::npos ? nullptr : SbOwnedByIdx(name.substr(h + 1));
+    if (!src || src->uniqueId.empty())
+    {
+        HxLog("[HalcyonA2][SPECEDIT] duplicate: %s is not a placed sandbox object\n", name.c_str());
+        if (SDK::UObject* pc = SeCallerPC(pawn)) SeBroadcast("SE|NOTE|That object can't be duplicated.", pc);
+        return;
+    }
+    const SbOwned keep = *src;                           // copies: the spawn below may grow g_sbOwned
+    double loc[3], rot[3], scl[3];
+    memcpy(loc, keep.loc, sizeof(loc)); memcpy(rot, keep.rot, sizeof(rot)); memcpy(scl, keep.scl, sizeof(scl));
+    SeVec(locs, loc); SeVec(rots, rot); SeVec(scls, scl);
+    for (double& v : scl) if (!(v > 0.01 && v < 100.0)) v = 1;
+    std::vector<std::string> names;
+    for (const auto& s2 : keep.scripts) names.push_back(s2.first);
+    g_sbPendingScripts = names;
+    g_sbPendingLeaves = SbRefLeaves(keep.refs);
+    g_sbForceLgm = keep.lgm && SeAlive(keep.lgm) ? keep.lgm : nullptr;   // its scripts' source lives there
+    const std::string prevLoading = g_lvLoading;
+    g_lvLoading.clear();                                 // new editor work, not part of a saved level yet
+    g_sbSpawnCls = keep.cls; g_sbSpawnPath = keep.path;
+    const std::string idx = SeSandboxSpawn(keep.uniqueId, loc, rot, scl);
+    g_sbSpawnCls.clear(); g_sbSpawnPath.clear();
+    g_lvLoading = prevLoading;
+    g_sbPendingScripts.clear();
+    g_sbForceLgm = nullptr;
+    if (SbOwned* n = idx.empty() ? nullptr : SbOwnedByIdx(idx)) { n->data = keep.data; n->scripts = keep.scripts; n->refs = keep.refs; }
+    if (SDK::AActor* na = idx.empty() ? nullptr : SbActorForIdx(idx))
+    {
+        for (const auto& d : keep.data) SeSbSet(nullptr, SeLvIdent(na), d[0], d[1], d[2]);
+        SeMarkProxyDirty(na);
+    }
+    HxLog("[HalcyonA2][SPECEDIT] duplicate %s (%s) -> %s\n", keep.idx.c_str(), keep.uniqueId.c_str(), idx.empty() ? "FAILED" : idx.c_str());
+}
 // Rebuild a scripted object so its script picks up its (new) references.
 static std::string SbRebuildScripted(SbOwned& o)
 {
@@ -4945,8 +5002,8 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
     const std::string op = p.size() > 1 ? p[1] : std::string();
 
     if      (op == "SPAWN"  && p.size() >= 5) SeSpawn(pawn, p[2], p[3], p[4], p.size() >= 6 ? p[5] : std::string());
-    else if (op == "XFORM"  && p.size() >= 6) SeTransform(p[2], p[3], p[4], p[5]);
-    else if (op == "DELETE" && p.size() >= 3) SeDelete(p[2]);
+    else if (op == "XFORM"  && p.size() >= 6) SeTransform(SeResolveIdent(p[2]), p[3], p[4], p[5]);
+    else if (op == "DELETE" && p.size() >= 3) SeDelete(SeResolveIdent(p[2]));
     else if (op == "PROP"   && p.size() >= 5) SeSetProp(p[2], p[3], p[4]);
     else if (op == "AUDIT"  && p.size() >= 3) SeAudit(pawn, p[2]);
     else if (op == "TESTQUEST" && p.size() >= 3) SeTestQuestAtPlayer(pawn, p[2]);
@@ -4961,6 +5018,7 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
     else if (op == "LUAUDEL" && p.size() >= 4) SeLuauRemove(pawn, p[2], p[3]);
     else if (op == "QCOMPLETE" && p.size() >= 3) SeTestCompleteQuest(p[2]);
     else if (op == "LVSAVE" && p.size() >= 3) SeLvSave(pawn, p[2]);
+    else if (op == "SBDUP"  && p.size() >= 6) SeSandboxDuplicate(pawn, p[2], p[3], p[4], p[5]);
     else if (op == "LVLIST") SeLvList(pawn);
     else if (op == "LVLOAD" && p.size() >= 3) SeLvSetLoaded(pawn, p[2], true);
     else if (op == "LVUNLOAD" && p.size() >= 3) SeLvSetLoaded(pawn, p[2], false);

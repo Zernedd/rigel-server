@@ -492,6 +492,18 @@ std::string IdentFor(const std::string& handle)
     return "";
 }
 
+// For moves and deletes: the ident plus the sandbox id, which every machine's copy of a sandbox object
+// carries at the front of its name (<GUID> or <GUID>_<n>). The server resolves the id first.
+std::string IdentForEdit(const std::string& handle)
+{
+    std::string id = IdentFor(handle);
+    if (id.empty() || handle.size() < 36) return id;
+    const std::string g = handle.substr(0, 36);
+    if (g[8] != '-' || g[13] != '-' || g[18] != '-' || g[23] != '-') return id;
+    if (handle.size() > 36 && handle[36] != '_') return id;
+    return id + "#" + g;
+}
+
 void NoteCommanded(const std::string& handle, const Vec3& loc)
 {
     if (Commanded* c = FindCommanded(handle)) { c->loc = loc; c->at = GetTickCount64(); return; }
@@ -640,7 +652,7 @@ void HandleCommands()
         {
             // c.loc/rot/scale are the NEW transform; the identity has to be built from where the actor
             // still is, which is what the server will match on.
-            const std::string id = IdentFor(c.str);
+            const std::string id = IdentForEdit(c.str);
             if (id.empty()) { Log("[game] xform: no identity for handle %s", c.str.c_str()); break; }
             SendToServer("SE|XFORM|" + id + "|" + Fmt3(c.loc) + "|" + Fmt3(c.rot) + "|" + Fmt3(c.scale));
             NoteCommanded(c.str, c.loc);
@@ -650,7 +662,7 @@ void HandleCommands()
 
         case CmdType::DeleteObject:
         {
-            const std::string id = IdentFor(c.str);
+            const std::string id = IdentForEdit(c.str);
             if (id.empty()) { Log("[game] delete: no identity for handle %s", c.str.c_str()); break; }
             SendToServer("SE|DELETE|" + id);
             break;
@@ -668,6 +680,21 @@ void HandleCommands()
         case CmdType::SendRaw:
             SendToServer(c.str);
             break;
+
+        case CmdType::Duplicate:
+        {
+            // A sandbox object is copied by the server from the object itself (catalogue pieces like the
+            // boost pad have no palette entry; Game data and scripts come along). Anything else re-spawns
+            // from the palette.
+            const std::string id = IdentForEdit(c.str);
+            if (id.find('#') != std::string::npos)
+                SendToServer("SE|SBDUP|" + id + "|" + Fmt3(c.loc) + "|" + Fmt3(c.rot) + "|" + Fmt3(c.scale));
+            else if (!c.str2.empty())
+                SendToServer("SE|SPAWN|" + c.str2 + "|" + Fmt3(c.loc) + "|" + Fmt3(c.rot) + "|" + Fmt3(c.scale));
+            else
+                Log("[game] duplicate: %s has no palette entry and no sandbox id", c.str.c_str());
+            break;
+        }
 
         case CmdType::LuauAttach:
         {
@@ -1368,7 +1395,7 @@ void DragTick()
     if (s_active) s_holdUntil = now + 1200;
 
     auto send = [&](const LiveDrag::Member& m) {
-        const std::string id = IdentFor(m.handle);
+        const std::string id = IdentForEdit(m.handle);
         if (id.empty()) return;
         SendToServer("SE|XFORM|" + id + "|" + Fmt3(m.loc) + "|" + Fmt3(m.rot) + "|" + Fmt3(m.scale));
         NoteCommanded(m.handle, m.loc);

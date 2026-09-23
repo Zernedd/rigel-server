@@ -134,6 +134,7 @@ enum class CmdType
     Inspect,          // str = handle, str2 = sub-object path ("" = the actor) -- what Details shows
     SetProperty,      // str = handle, str2 = property path, str3 = value (wire encoding)
     SendRaw,          // str = a complete SE| line (the red-coin run publish)
+    Duplicate,        // str = handle, str2 = palette path (may be empty), loc/rot/scale = the copy's transform
     DataRequest,      // str = handle: ask the server for the object's Game data
     DataSet,          // str = handle, str2 = path, str3 = kind, str4 = value
     LuauAttach,       // str = handle, str2 = script name, str3 = source

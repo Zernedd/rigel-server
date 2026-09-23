@@ -1,0 +1,18 @@
+# Duplicate a catalogue-only piece (yellow boost pad, PrimitiveCubeYellow) -- it has no palette entry.
+log DC start
+enter
+wait 3
+sbadd PrimitiveCubeYellow
+wait 6
+classes
+pick Primitive
+select
+wait 1
+dupsel
+wait 8
+selinfo
+gmove 300 0 0
+wait 6
+selinfo
+classes
+log DC done

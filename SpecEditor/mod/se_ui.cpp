@@ -775,10 +775,10 @@ static double                   g_dupAt = -1.0;
 static bool DuplicateSelection(const Snapshot& snap, const SceneObject& sel)
 {
     const PaletteItem* it = FindItem(snap, sel.className);
-    if (!it) return false;
-    if (!it->blocked.empty()) { Notes().Set(PrettyName(it->name) + ": " + it->blocked); return false; }
-    Command c{ CmdType::SpawnItem };
-    c.str   = it->path;
+    if (it && !it->blocked.empty()) { Notes().Set(PrettyName(it->name) + ": " + it->blocked); return false; }
+    Command c{ CmdType::Duplicate };
+    c.str   = sel.handle;
+    c.str2  = it ? it->path : std::string();
     c.loc   = Add(sel.location, Vec3{ 1, 0, 0 });
     c.rot   = sel.rotation;
     c.scale = sel.scale;
