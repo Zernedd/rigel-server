@@ -6508,15 +6508,18 @@ static void FindTeamVolumes()
     if (g_lastVolFind != 0 && now - g_lastVolFind < wait) return;
     g_lastVolFind = now;
 
-    SDK::UClass* tcCls = SDK::UObject::FindClassFast("TeamChangeComponent");
+    static SDK::UClass* tcCls = nullptr;   // [PERF] cached class lookup
+    if (!tcCls) tcCls = SDK::UObject::FindClassFast("TeamChangeComponent");
     if (!tcCls) return;
 
-    const int32_t num = SDK::UObject::GObjects->Num();
+    // [2026-09-22 PERF] The shared class index, not a GObjects walk: this ran every 10 s even once the volumes
+    // were found, and each walk of ~167k objects was a 27-55 ms single-tick stall ([PROF] SafeDetectTeamChanger
+    // pk55) -- a ball-sim frame drop (MI) every 10 seconds.
     int found = 0, nSeen = 0;
-    for (int32_t i = 0; i < num && found < 8; ++i)
+    for (SDK::UObject* o : ClassObjects(tcCls))
     {
-        auto* o = SDK::UObject::GObjects->GetByIndex(i);
-        if (!o || o->IsDefaultObject() || !o->IsA(tcCls)) continue;
+        if (found >= 8) break;
+        if (!o || o->IsDefaultObject()) continue;
         const uintptr_t c = reinterpret_cast<uintptr_t>(o);
         const int teamIndex = *reinterpret_cast<int*>(c + 0x524);
         if (teamIndex != 0 && teamIndex != 1) continue;

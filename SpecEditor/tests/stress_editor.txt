@@ -1,0 +1,25 @@
+# Editing load A/B: place several objects, then drag one around for 30 s (the gizmo's live-drag path streams
+# ~30 XFORM commands a second, as a real drag does). Compare the server's [STEP]/[PROF]/[SEPROF] lines.
+log STRESS start
+enter
+wait 3
+spawnat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625 0
+wait 3
+spawnat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2460 -28625 0
+wait 3
+spawnat LE_BP_LightSwitch_C -650 2060 -28625 0
+wait 3
+spawnat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000 0
+wait 3
+spawnat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -1900 -27000 0
+wait 5
+log STRESS drag-begin
+drag 0 400 0 10
+wait 11
+drag 400 0 0 10
+wait 11
+drag 0 -400 0 10
+wait 11
+log STRESS drag-end
+wait 5
+log STRESS done

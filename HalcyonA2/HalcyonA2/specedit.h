@@ -189,31 +189,45 @@ static SDK::AActor* SeFindEditorActor(const std::string& ident)
     if (!SeVec(ident.substr(at + 1), want)) return nullptr;
     if (!SeIsEditorClass(wantCls)) return nullptr;              // fence 4: LE_ prefabs only
 
-    auto* actorCls = SDK::UObject::FindClassFast("Actor");
-    if (!actorCls) return nullptr;
+    // [PERF] This runs for every editor command -- ~30/s while someone drags -- inside the RPC handler, where
+    // [PROF] never sees it. It used to walk all ~167k objects and build a class-name string for every actor,
+    // each time: tens of ms of game thread per command, which is what drops ball-sim frames (MI). Now: the
+    // class is resolved once by name, sandbox objects come from the shared PrefabComponent index, and only a
+    // miss (a non-sandbox actor, or one spawned in the last second) falls back to a walk -- a pointer compare.
+    static std::unordered_map<std::string, SDK::UClass*> s_cls;
+    SDK::UClass* wantUCls = nullptr;
+    {
+        auto it = s_cls.find(wantCls);
+        if (it != s_cls.end()) wantUCls = it->second;
+        else if ((wantUCls = SDK::UObject::FindClassFast(wantCls)) != nullptr) s_cls[wantCls] = wantUCls;
+    }
+    if (!wantUCls) return nullptr;
 
     SDK::AActor* best   = nullptr;
     double       bestD2 = 1.0e18;
     int          within = 0;
     const double tol2   = 100.0 * 100.0;                        // 1m, absorbs replication lag
-    const int32_t n = SDK::UObject::GObjects->Num();
-    for (int32_t i = 0; i < n; ++i)
+    auto consider = [&](SDK::UObject* o)
     {
-        auto* o = SDK::UObject::GObjects->GetByIndex(i);
-        if (!o || o->IsDefaultObject() || !o->IsA(actorCls)) continue;
-        auto* c = o->Class;
-        if (!c || c->GetName() != wantCls) continue;
-        if (*(reinterpret_cast<const uint8_t*>(o) + 0x65) & 0x01) continue;   // bActorIsBeingDestroyed
-
+        if (!o || o->Class != wantUCls || o->IsDefaultObject()) return;
+        if (*(reinterpret_cast<const uint8_t*>(o) + 0x65) & 0x01) return;   // bActorIsBeingDestroyed
         // RootComponent@0x1A8 -> ComponentToWorld@0x1D0, translation at +0x20
         void* root = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(o) + 0x1A8);
-        if (!root) continue;
+        if (!root) return;
         const double* t = reinterpret_cast<const double*>(reinterpret_cast<uintptr_t>(root) + 0x1D0 + 0x20);
         const double dx = t[0] - want[0], dy = t[1] - want[1], dz = t[2] - want[2];
         const double d2 = dx * dx + dy * dy + dz * dz;
-        if (d2 > tol2) continue;
+        if (d2 > tol2) return;
         ++within;
         if (d2 < bestD2) { bestD2 = d2; best = static_cast<SDK::AActor*>(o); }
+    };
+    static SDK::UClass* pcCls = nullptr;
+    if (!pcCls) pcCls = SDK::UObject::FindClassFast("PrefabComponent");
+    for (SDK::UObject* pc : ClassObjects(pcCls)) consider(pc->Outer);
+    if (!best)
+    {
+        const int32_t n = SDK::UObject::GObjects->Num();
+        for (int32_t i = 0; i < n; ++i) consider(SDK::UObject::GObjects->GetByIndex(i));
     }
 
     if (within > 1)
@@ -278,6 +292,7 @@ static void SbOwnedForget(const std::string& idx);     // below
 struct SbOwned;
 static std::string SbRespawnKeep(SDK::AActor* a, const SbOwned& keep, const char* why);   // below
 static SDK::AActor* SbActorForIdx(const std::string& idx);                                  // below
+static SDK::AActor* SbActorForIdx(const std::string& idx, bool indexOnly);                  // below
 static double g_sbHostOutsideCm = 0;   // set by SbHostGamemode: how far outside every importance volume (cm; 0 inside)
 static void SbMoveFlush();                                                                  // below (moves settle)
 static void SbEditorSlotTick(ULONGLONG now);                                                // below (editor-made slot)
@@ -532,13 +547,28 @@ static std::vector<std::pair<std::string, ULONGLONG>> g_seProxyWant;
 static void SeWantProxy(const std::string& idx) { if (!idx.empty()) g_seProxyWant.push_back({ idx, GetTickCount64() }); }
 static void SeProxyWantTick(ULONGLONG now)
 {
+    // [PERF] ONE pass over the shared PrefabComponent index resolves every pending id -- never a GObjects walk.
+    // (It used to call SbActorForIdx per pending id, each a full walk: a saved level loading 144 objects meant
+    // 144 walks of ~167k objects in one tick, every 250 ms. The index is ~1 s behind, hence the longer wait.)
     static ULONGLONG s_last = 0;
     if (g_seProxyWant.empty() || now - s_last < 250) return;
     s_last = now;
+    static SDK::UClass* pcCls = nullptr;
+    if (!pcCls) pcCls = SDK::UObject::FindClassFast("PrefabComponent");
+    if (!pcCls) return;
+    std::unordered_map<std::string, SDK::AActor*> live;
+    for (SDK::UObject* o : ClassObjects(pcCls))
+    {
+        if (!o || o->IsDefaultObject() || !o->Outer) continue;
+        auto* act = static_cast<SDK::AActor*>(o->Outer);
+        if (*(reinterpret_cast<const uint8_t*>(act) + 0x65) & 0x01) continue;
+        live[FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(o) + 0x248))] = act;
+    }
     for (auto it = g_seProxyWant.begin(); it != g_seProxyWant.end();)
     {
-        if (SDK::AActor* a = SbActorForIdx(it->first)) { SeMarkProxyDirty(a); it = g_seProxyWant.erase(it); continue; }
-        if (now - it->second > 5000)
+        auto f = live.find(it->first);
+        if (f != live.end()) { SeMarkProxyDirty(f->second); it = g_seProxyWant.erase(it); continue; }
+        if (now - it->second > 15000)
         {
             HxLog("[HalcyonA2][SPECEDIT] collision: the server never built %s, so it has no stand-in\n", it->first.c_str());
             it = g_seProxyWant.erase(it);
@@ -1568,14 +1598,23 @@ static SDK::UObject* SbPrefabOf(SDK::AActor* a)
         s_cache.erase(it);
     }
     SDK::UObject* found = nullptr;
-    auto* pcCls = SDK::UObject::FindClassFast("PrefabComponent");
-    const int32_t n = SDK::UObject::GObjects->Num();
-    for (int32_t i = 0; pcCls && i < n && !found; ++i)
+    static SDK::UClass* pcCls = nullptr;
+    if (!pcCls) pcCls = SDK::UObject::FindClassFast("PrefabComponent");
+    auto take = [&](SDK::UObject* o)
     {
-        SDK::UObject* o = SDK::UObject::GObjects->GetByIndex(i);
-        if (!o || o->Outer != a || !o->IsA(pcCls)) continue;
+        if (found || !o || o->Outer != a) return;
         const uintptr_t pc = reinterpret_cast<uintptr_t>(o);
         if (*reinterpret_cast<void**>(pc + 0x440) && *reinterpret_cast<int32_t*>(pc + 0x248 + 8) > 1) found = o;
+    };
+    for (SDK::UObject* o : ClassObjects(pcCls)) take(o);     // [PERF] shared index first (see SeFindEditorActor)
+    if (!found)                                              // just spawned (index is ~1 s behind) or not ours
+    {
+        const int32_t n = SDK::UObject::GObjects->Num();
+        for (int32_t i = 0; pcCls && i < n && !found; ++i)
+        {
+            SDK::UObject* o = SDK::UObject::GObjects->GetByIndex(i);
+            if (o && o->Outer == a && o->IsA(pcCls)) take(o);
+        }
     }
     if (found && !SbPrefabLive(a, found)) found = nullptr;
     s_cache[a] = { a->Index, found };
@@ -1972,22 +2011,33 @@ static bool SbSetBoundProp(SDK::AActor* a, const std::string& field, const std::
 }
 
 // The server's own actor for a sandbox object idx (its PrefabComponent's NetworkGUID).
-static SDK::AActor* SbActorForIdx(const std::string& idx)
+// [PERF] The shared PrefabComponent index first; a full walk only if that misses and the caller allows it (an
+// object spawned in the last second isn't in the index yet). Tick-driven callers pass indexOnly.
+static SDK::AActor* SbActorForIdx(const std::string& idx, bool indexOnly)
 {
-    auto* pcCls = SDK::UObject::FindClassFast("PrefabComponent");
+    static SDK::UClass* pcCls = nullptr;
+    if (!pcCls) pcCls = SDK::UObject::FindClassFast("PrefabComponent");
+    if (!pcCls) return nullptr;
+    auto match = [&](SDK::UObject* o) -> SDK::AActor*
+    {
+        if (!o || o->IsDefaultObject()) return nullptr;
+        if (FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(o) + 0x248)) != idx) return nullptr;
+        auto* act = static_cast<SDK::AActor*>(o->Outer);
+        if (!act || (*(reinterpret_cast<const uint8_t*>(act) + 0x65) & 0x01)) return nullptr;   // being destroyed
+        if (!SbNodeOf(reinterpret_cast<uint8_t*>(o) + 0x3A0)) return nullptr;                    // its node is gone
+        return act;
+    };
+    for (SDK::UObject* o : ClassObjects(pcCls)) if (SDK::AActor* a = match(o)) return a;
+    if (indexOnly) return nullptr;
     const int32_t n = SDK::UObject::GObjects->Num();
-    for (int32_t i = 0; pcCls && i < n; ++i)
+    for (int32_t i = 0; i < n; ++i)
     {
         SDK::UObject* o = SDK::UObject::GObjects->GetByIndex(i);
-        if (!o || o->IsDefaultObject() || !o->IsA(pcCls)) continue;
-        if (FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(o) + 0x248)) != idx) continue;
-        auto* act = static_cast<SDK::AActor*>(o->Outer);
-        if (!act || (*(reinterpret_cast<const uint8_t*>(act) + 0x65) & 0x01)) continue;   // being destroyed
-        if (!SbNodeOf(reinterpret_cast<uint8_t*>(o) + 0x3A0)) continue;                    // its node is gone
-        return act;
+        if (o && o->IsA(pcCls)) if (SDK::AActor* a = match(o)) return a;
     }
     return nullptr;
 }
+static SDK::AActor* SbActorForIdx(const std::string& idx) { return SbActorForIdx(idx, false); }
 
 // SE|SBDESC|<ident> (local test): print an object's component list from its node Desc -- ids, scripts, prop
 // keys/types/values -- so we can see how a component value (e.g. the text) is named before writing one.
@@ -2206,11 +2256,10 @@ static void SbTreeCheckImpl(std::string* bad, int* nodes)
     static SDK::UClass* cls = nullptr;
     if (!cls) cls = SDK::UObject::FindClassFast("LoadedGameMode");
     std::unordered_set<void*> seen;
-    const int32_t n = SDK::UObject::GObjects->Num();
-    for (int32_t i = 0; cls && i < n && bad->empty(); ++i)
+    for (SDK::UObject* l : ClassObjects(cls))                // [PERF] shared index, not a GObjects walk
     {
-        SDK::UObject* l = SDK::UObject::GObjects->GetByIndex(i);
-        if (!l || l->IsDefaultObject() || !l->IsA(cls)) continue;
+        if (!bad->empty()) break;
+        if (!l || l->IsDefaultObject()) continue;
         uint8_t* root = reinterpret_cast<uint8_t*>(SbNodeOf(reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(l) + 0x218)));
         if (root) SbTreeCheckNode(root, 0, &seen, bad, nodes);
     }
@@ -2219,10 +2268,20 @@ static void SbTreeCheckCore(std::string* bad, int* nodes)
 {
     __try { SbTreeCheckImpl(bad, nodes); } __except (EXCEPTION_EXECUTE_HANDLER) { if (bad->empty()) *bad = "faulted while walking"; }
 }
-// Called after every edit: the first failure is logged once (and repeated at most every 30 s).
+// After an edit that adds or removes nodes; the first failure is logged once (and repeated at most every 30 s).
+// [PERF] Not after moves / property / data edits (a drag sends ~30 moves a second and each check walks ~8000
+// nodes on the game thread), and at most once per 5 s: the crash it was built to catch is found and fixed.
 static void SeTreeCheck(const char* after)
 {
     if (!g_specEdit) return;
+    static const char* kStructural[] = { "SPAWN", "DELETE", "LUAU", "LUAUREF", "LUAUDEL", "COINRUN", "QUEST", "LEVEL",
+                                         "LOADLEVEL", "UNLOADLEVEL", "SBADD", "SBDEL" };
+    bool structural = false;
+    for (const char* k : kStructural) if (strcmp(after, k) == 0) { structural = true; break; }
+    if (!structural) return;
+    static ULONGLONG s_lastRun = 0;
+    if (s_lastRun && GetTickCount64() - s_lastRun < 5000) return;
+    s_lastRun = GetTickCount64();
     std::string bad;
     int nodes = 0;
     const ULONGLONG t0 = GetTickCount64();
@@ -3045,11 +3104,9 @@ static SDK::UObject* SbHostGamemode(const std::string& uniqueId, const double* l
     std::string bestWhy;
     std::vector<SDK::UObject*> cands;
     if (SDK::UObject* ed = SbEditorSlotLgm()) { seen.insert(ed); cands.push_back(ed); }   // empty, so no PrefabComponents
-    const int32_t n = SDK::UObject::GObjects->Num();
-    for (int32_t i = 0; pcCls && i < n; ++i)
+    for (SDK::UObject* o : ClassObjects(pcCls))           // [PERF] shared index: this runs for every placed object
     {
-        SDK::UObject* o = SDK::UObject::GObjects->GetByIndex(i);
-        if (!o || o->IsDefaultObject() || !o->IsA(pcCls)) continue;
+        if (!o || o->IsDefaultObject()) continue;
         SDK::UObject* lgm = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(o) + 0x440);
         if (lgm && seen.insert(lgm).second) cands.push_back(lgm);
     }
@@ -3850,11 +3907,9 @@ static int SeBroadcast(const std::string& msg, SDK::UObject* pc)
     if (pc) { send(pc); return 1; }
     auto* pcCls = SDK::APlayerController::StaticClass();
     int n = 0;
-    const int32_t count = SDK::UObject::GObjects->Num();
-    for (int32_t i = 0; i < count; ++i)
+    for (SDK::UObject* o : ClassObjects(pcCls))          // [PERF] shared index, not a GObjects walk per message
     {
-        SDK::UObject* o = SDK::UObject::GObjects->GetByIndex(i);
-        if (!o || o->IsDefaultObject() || !o->IsA(pcCls)) continue;
+        if (!o || o->IsDefaultObject()) continue;
         if (*(reinterpret_cast<const uint8_t*>(o) + 0x65) & 0x01) continue;
         send(o);
         ++n;
@@ -4979,7 +5034,32 @@ static void ResolveSpecEditIndex()
 // temporaries, which cannot live inside a __try frame (C2712) -- SafeSpecEditDispatch owns the SEH.
 static bool SpecEditDispatch(SDK::UObject* pawn, void* parms)
 {
-    return SpecEditHandle(pawn, FStringToNarrow(parms));
+    // [SEPROF] Editor commands run inside the RPC handler, where [PROF] never looks -- that is how full-object
+    // walks per command (~30/s during a drag) went unseen while they stalled the tick and dropped ball-sim
+    // frames (MI). One line every 5 s while anyone is editing: commands, game-thread ms, slowest command.
+    static LARGE_INTEGER s_freq{};
+    if (!s_freq.QuadPart) QueryPerformanceFrequency(&s_freq);
+    LARGE_INTEGER t0, t1;
+    QueryPerformanceCounter(&t0);
+    const std::string cmd = FStringToNarrow(parms);
+    const bool r = SpecEditHandle(pawn, cmd);
+    QueryPerformanceCounter(&t1);
+    const double ms = 1000.0 * static_cast<double>(t1.QuadPart - t0.QuadPart) / static_cast<double>(s_freq.QuadPart);
+    static ULONGLONG s_window = 0;
+    static int s_n = 0;
+    static double s_ms = 0, s_max = 0;
+    static std::string s_maxOp;
+    ++s_n; s_ms += ms;
+    if (ms > s_max) { s_max = ms; s_maxOp = cmd.substr(0, cmd.find('|', 3)); }
+    const ULONGLONG now = GetTickCount64();
+    if (!s_window) s_window = now;
+    if (now - s_window >= 5000)
+    {
+        const double secs = (now - s_window) / 1000.0;
+        HxLog("[HalcyonA2][SEPROF] cmds/s=%.1f editor=%.1fms/s max=%.1fms (%s)\n", s_n / secs, s_ms / secs, s_max, s_maxOp.c_str());
+        s_window = now; s_n = 0; s_ms = 0; s_max = 0; s_maxOp.clear();
+    }
+    return r;
 }
 
 static bool SafeSpecEditDispatch(SDK::UObject* pawn, void* parms)

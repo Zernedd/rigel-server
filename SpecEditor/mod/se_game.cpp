@@ -1476,7 +1476,13 @@ int CountQuestDefs(const wchar_t* needle, int* total)
 void RunScript(const Snapshot& snap)
 {
     LoadScriptOnce();
-    if (g_scriptPc >= g_script.size() || !g_pc || !snap.worldReady) return;
+    if (g_scriptPc >= g_script.size())
+    {
+        static bool s_done = false;                           // the marker test runners wait for
+        if (!s_done && !g_script.empty()) { s_done = true; Log("[script] SCRIPT COMPLETE"); }
+        return;
+    }
+    if (!g_pc || !snap.worldReady) return;
     const ULONGLONG now = GetTickCount64();
     // With -SpecEditConnect, do not start until we have actually travelled: the entry map has a
     // controller too, and commands sent from it would go nowhere. Then give the station 8s to settle.
