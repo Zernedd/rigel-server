@@ -1,0 +1,9 @@
+# Editor area (observer half): another player must get both walls, visible and solid.
+log EDA-OBS start
+enter
+wait 25
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -1500 -27000
+traceat -300 -2300 -27000
+traceat -300 -1500 -27000
+log EDA-OBS done

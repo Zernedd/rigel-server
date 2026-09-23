@@ -281,6 +281,7 @@ static SDK::AActor* SbActorForIdx(const std::string& idx);                      
 static double g_sbHostOutsideCm = 0;   // set by SbHostGamemode: how far outside every importance volume (cm; 0 inside)
 static void SbMoveFlush();                                                                  // below (moves settle)
 static void SbEditorSlotTick(ULONGLONG now);                                                // below (editor-made slot)
+static void SbEditorSlotClearTick(ULONGLONG now);                                           // below
 static std::string g_sbSpawnCls;   // the editor class of the sandbox spawn in flight (for SbOwned)
 static std::string g_sbSpawnPath;  // ...and the palette path it was asked for (saved levels reload by it)
 static std::vector<std::string> g_sbPendingScripts;   // custom Luau script names for the spawn in flight
@@ -565,6 +566,7 @@ static void SpecEditTick()
     const ULONGLONG now = GetTickCount64();
     SeProxyWantTick(now);
     SbEditorSlotTick(now);
+    SbEditorSlotClearTick(now);
     if (g_seProxies.empty()) return;
     static ULONGLONG s_last = 0;
     if (now - s_last < 100) return;
@@ -2861,6 +2863,7 @@ static void SeSlotBoxProbe()
 static SDK::AActor* g_seEditorSlot = nullptr;
 static int          g_seEditorSlotState = 0;      // 0 none, 1 loading, 2 ready, -1 failed
 static ULONGLONG    g_seEditorSlotAt = 0;
+static ULONGLONG    g_seEditorSlotClearAt = 0;   // when to remove the project's starter objects
 static wchar_t      g_seEditorSlotPath[96] = L"";  // persistent: the slot's FString points at it
 static const double kSlotBoxOffset[3] = { -38.0, 340.0, 434.0 };   // default box centre relative to the slot (measured)
 static SDK::UObject* SbGamemodesManager()
@@ -2889,29 +2892,35 @@ static bool SbCreateEditorSlot(const double* at, const std::string& path)
     SDK::AActor* slot = SDK::UGameplayStatics::BeginDeferredActorSpawnFromClass(world, cls, xf, SDK::ESpawnActorCollisionHandlingMethod::AlwaysSpawn,
                                                                               nullptr, SDK::ESpawnActorScaleMethod::MultiplyWithRoot);
     if (!slot) { HxLog("[HalcyonA2][SPECEDIT] editor slot: spawn failed\n"); return false; }
-    SDK::UGameplayStatics::FinishSpawningActor(slot, xf, SDK::ESpawnActorScaleMethod::MultiplyWithRoot);
+    // The path must be in place BEFORE the spawn finishes: the slot registers itself (GamemodesManager::AddSlot,
+    // native 0x46C9580) during BeginPlay, and AddSlot only loads DefaultGamemodePath if it is set right then.
+    // Set afterwards, the slot was already registered empty and a second AddSlot changed nothing.
+    const std::wstring wp(path.begin(), path.end());
+    wcsncpy_s(g_seEditorSlotPath, wp.c_str(), _TRUNCATE);
+    SetSlotFString(slot, 0x418, g_seEditorSlotPath);                       // DefaultGamemodePath
     const uintptr_t s = reinterpret_cast<uintptr_t>(slot);
+    SDK::UObject* mgrPre = mgr;
+    const int32_t gmBefore = *reinterpret_cast<int32_t*>(reinterpret_cast<uintptr_t>(mgrPre) + 0x368 + 8);
+    SDK::UGameplayStatics::FinishSpawningActor(slot, xf, SDK::ESpawnActorScaleMethod::MultiplyWithRoot);
+    HxLog("[HalcyonA2][SPECEDIT] editor slot: after spawn, loaded game areas %d -> %d, LoadedGameMode=%p\n", gmBefore,
+          *reinterpret_cast<int32_t*>(reinterpret_cast<uintptr_t>(mgrPre) + 0x368 + 8), *reinterpret_cast<void**>(s + 0x440));
     if (auto* fn = slot->Class->GetFunction("Actor", "SetReplicates")) { struct { bool b; } rp{ true }; SafeProcessEvent(slot, fn, &rp); }
     *reinterpret_cast<uint8_t*>(s + 0x60) |= 0x08 | 0x10;                 // bAlwaysRelevant | bReplicateMovement
     *reinterpret_cast<float*>(s + 0x170) = 1.0e12f;                        // NetCullDistanceSquared: never cull the slot itself
     if (auto* fn = slot->Class->GetFunction("Actor", "ForceNetUpdate")) SafeProcessEvent(slot, fn, nullptr);
     if (auto* fn = slot->Class->GetFunction("ModuleSlot", "PushNetVars")) SafeProcessEvent(slot, fn, nullptr);
-    const std::wstring wp(path.begin(), path.end());
-    wcsncpy_s(g_seEditorSlotPath, wp.c_str(), _TRUNCATE);
-    SetSlotFString(slot, 0x418, g_seEditorSlotPath);                       // DefaultGamemodePath
-    auto* addFn = mgr->Class->GetFunction("GamemodesManager", "AddSlot");
-    if (!addFn) { HxLog("[HalcyonA2][SPECEDIT] editor slot: AddSlot not found\n"); slot->K2_DestroyActor(); return false; }
-    void* parms = slot;
-    SafeProcessEvent(mgr, addFn, &parms);
     g_seEditorSlot = slot; g_seEditorSlotState = 1; g_seEditorSlotAt = GetTickCount64();
     HxLog("[HalcyonA2][SPECEDIT] editor slot: spawned at (%.0f,%.0f,%.0f) for a box centred on (%.0f,%.0f,%.0f), loading '%s'\n",
           xf.Translation.X, xf.Translation.Y, xf.Translation.Z, at[0], at[1], at[2], path.c_str());
+    SbEditorSlotTick(GetTickCount64());                    // the load binds during the spawn: usually ready right now
     return true;
 }
 // Tick: once the load binds a LoadedGameMode, push the slot's and gamemode's netvars so clients build it.
 static void SbEditorSlotTick(ULONGLONG now)
 {
-    if (g_seEditorSlotState != 1 || !g_seEditorSlot) return;
+    static bool s_in = false;
+    if (s_in || g_seEditorSlotState != 1 || !g_seEditorSlot) return;
+    struct Guard { bool& b; Guard(bool& x) : b(x) { b = true; } ~Guard() { b = false; } } guard(s_in);
     const uintptr_t s = reinterpret_cast<uintptr_t>(g_seEditorSlot);
     SDK::UObject* lgm = *reinterpret_cast<SDK::UObject**>(s + 0x440);
     if (!lgm)
@@ -2939,9 +2948,92 @@ static void SbEditorSlotTick(ULONGLONG now)
     uint8_t* objs = nullptr;
     const bool hasObjects = root && SbFindChildRaw(root, NvNameBits(NvName("objects")), &objs) >= 0;
     g_seEditorSlotState = hasObjects ? 2 : -1;
+    g_seEditorSlotClearAt = GetTickCount64() + 5000;     // starter objects go once it has settled (see below)
     HxLog("[HalcyonA2][SPECEDIT] editor slot: game area %s loaded (%s), objects container: %s\n", lgm->GetName().c_str(),
           root ? reinterpret_cast<SDK::FName*>(root + 48)->ToString().c_str() : "?", hasObjects ? "yes -- ready" : "NO -- can't hold objects");
 }
+// The project the area is loaded from ships a few objects of its own (Testing/TempProject123: three bridge
+// meshes, no scripts). Remove them -- but not straight after the load: removing nodes while the fresh load
+// was still settling faulted in the node code and sent the path walk into the parent-cycle recursion
+// (stack overflow at +0x4665FAB). A few seconds later they are ordinary nodes. Our own objects are kept.
+static void SbEditorSlotClearTick(ULONGLONG now)
+{
+    if (!g_seEditorSlotClearAt || now < g_seEditorSlotClearAt) return;
+    g_seEditorSlotClearAt = 0;
+    SDK::UObject* lgm = (g_seEditorSlotState == 2 && g_seEditorSlot && SeAlive(g_seEditorSlot))
+                            ? *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(g_seEditorSlot) + 0x440) : nullptr;
+    if (!lgm) return;
+    // Through each object's server actor (its prefab component's own handle), the way a station object is
+    // deleted cleanly -- walking to the node by name from the root faulted in NodeRemove for these.
+    auto* pcCls = SDK::UObject::FindClassFast("PrefabComponent");
+    std::vector<SDK::AActor*> doomed;
+    const int32_t n = SDK::UObject::GObjects->Num();
+    for (int32_t i = 0; pcCls && i < n; ++i)
+    {
+        SDK::UObject* o = SDK::UObject::GObjects->GetByIndex(i);
+        if (!o || o->IsDefaultObject() || !o->IsA(pcCls)) continue;
+        if (*reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(o) + 0x440) != lgm) continue;
+        if (SbOwnedByIdx(FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(o) + 0x248)))) continue;   // ours: keep
+        if (o->Outer && SeActorAlive(static_cast<SDK::AActor*>(o->Outer))) doomed.push_back(static_cast<SDK::AActor*>(o->Outer));
+    }
+    int cleared = 0;
+    for (SDK::AActor* a : doomed) if (SeSandboxDelete(a)) ++cleared;
+    if (auto* fn = g_seEditorSlot->Class->GetFunction("ModuleSlot", "PushNetVars")) SafeProcessEvent(g_seEditorSlot, fn, nullptr);
+    HxLog("[HalcyonA2][SPECEDIT] editor slot: %d starter object(s) removed\n", cleared);
+}
+// SE|PROJPROBE|<path> (local test): load a project into a throwaway slot with its own id, far away, and report
+// what it brings (objects, scripts) -- to pick an empty project for the editor area.
+static void SeProjProbe(const std::string& path)
+{
+    if (!g_seLocalTest) return;
+    static int s_n = 0;
+    static wchar_t s_paths[16][96], s_ids[16][32];
+    if (s_n >= 16) return;
+    auto* cls = SDK::UObject::FindClassFast("BP_ModuleSlotWithImportanceVolume_C");
+    auto* world = SDK::UWorld::GetWorld();
+    if (!cls || !world) return;
+    SDK::FTransform xf{}; xf.Rotation = SDK::FQuat{ 0, 0, 0, 1 };
+    xf.Translation = SDK::FVector{ 200000.0 + 20000.0 * s_n, 200000.0, 0 }; xf.Scale3D = SDK::FVector{ 1, 1, 1 };
+    SDK::AActor* slot = SDK::UGameplayStatics::BeginDeferredActorSpawnFromClass(world, cls, xf, SDK::ESpawnActorCollisionHandlingMethod::AlwaysSpawn,
+                                                                              nullptr, SDK::ESpawnActorScaleMethod::MultiplyWithRoot);
+    if (!slot) return;
+    const std::wstring wp(path.begin(), path.end());
+    wcsncpy_s(s_paths[s_n], wp.c_str(), _TRUNCATE);
+    swprintf_s(s_ids[s_n], L"probe_%d", s_n);
+    SetSlotFString(slot, 0x418, s_paths[s_n]);
+    SetSlotFString(slot, 0x390, s_ids[s_n]);
+    ++s_n;
+    SDK::UGameplayStatics::FinishSpawningActor(slot, xf, SDK::ESpawnActorScaleMethod::MultiplyWithRoot);
+    SDK::UObject* lgm = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(slot) + 0x440);
+    int objects = -1, scripts = -1;
+    std::string types;
+    if (lgm)
+    {
+        uint8_t* root = reinterpret_cast<uint8_t*>(SbNodeOf(reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(lgm) + 0x218)));
+        uint8_t* c = nullptr;
+        if (root && SbFindChildRaw(root, NvNameBits(NvName("objects")), &c) >= 0)
+        {
+            objects = *reinterpret_cast<int32_t*>(c + 144);
+            uint8_t** arr = *reinterpret_cast<uint8_t***>(c + 136);
+            for (int k = 0; arr && k < objects && k < 6; ++k)
+                if (arr[k]) if (void* d = reinterpret_cast<void*(__fastcall*)(uintptr_t)>(GetBase() + SeSb::NodeDesc)(reinterpret_cast<uintptr_t>(arr[k])))
+                    types += reinterpret_cast<SDK::FName*>(d)->ToString() + " ";
+        }
+        if (root && SbFindChildRaw(root, NvNameBits(NvName("Scripts")), &c) >= 0) scripts = *reinterpret_cast<int32_t*>(c + 144);
+    }
+    HxLog("[HalcyonA2][SPECEDIT] PROJPROBE '%s': %s, %d object(s), %d script(s) %s\n", path.c_str(), lgm ? "loaded" : "DID NOT LOAD",
+          objects, scripts, types.c_str());
+}
+
+static SDK::UObject* SbEditorSlotLgm()   // the editor area's gamemode once it is ready, else null
+{
+    if (g_seEditorSlotState != 2 || !g_seEditorSlot || !SeAlive(g_seEditorSlot)) return nullptr;
+    return *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(g_seEditorSlot) + 0x440);
+}
+// The project loaded into the editor area. Probed (SE|PROJPROBE): Testing/TestingProject20 loads with no objects
+// and no scripts. (TempProject123 brings 3 bridge meshes that can't be removed safely; UnitTests/EmptyBase and
+// SelectionBase fault in the loader; the rest bring cubes, bridges, team changers or scripts.)
+static const char kSeEditorProject[] = "Testing/TestingProject20";
 
 static SDK::UObject* SbHostGamemode(const std::string& uniqueId, const double* loc)
 {
@@ -2951,13 +3043,18 @@ static SDK::UObject* SbHostGamemode(const std::string& uniqueId, const double* l
     std::unordered_set<SDK::UObject*> seen;
     SDK::UObject* best = nullptr; int bestTier = 99; double bestScore = 1.0e300;
     std::string bestWhy;
+    std::vector<SDK::UObject*> cands;
+    if (SDK::UObject* ed = SbEditorSlotLgm()) { seen.insert(ed); cands.push_back(ed); }   // empty, so no PrefabComponents
     const int32_t n = SDK::UObject::GObjects->Num();
     for (int32_t i = 0; pcCls && i < n; ++i)
     {
         SDK::UObject* o = SDK::UObject::GObjects->GetByIndex(i);
         if (!o || o->IsDefaultObject() || !o->IsA(pcCls)) continue;
         SDK::UObject* lgm = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(o) + 0x440);
-        if (!lgm || !seen.insert(lgm).second) continue;
+        if (lgm && seen.insert(lgm).second) cands.push_back(lgm);
+    }
+    for (SDK::UObject* lgm : cands)
+    {
         SDK::AActor* slot = *reinterpret_cast<SDK::AActor**>(reinterpret_cast<uintptr_t>(lgm) + 0x320);
         int tier = 3; double score = 1.0e299;
         if (SDK::UBoxComponent* box = slot ? SbImportanceBox(slot) : nullptr)
@@ -2979,6 +3076,14 @@ static SDK::UObject* SbHostGamemode(const std::string& uniqueId, const double* l
             bestWhy = slot ? slot->Class->GetName() : std::string("no slot");
         }
     }
+    // Outside every importance volume: make the editor's own module area here (once per server run -- see
+    // SbCreateEditorSlot) and put the object in it.
+    if (bestTier >= 2 && g_specEdit && g_seEditorSlotState == 0 && SbCreateEditorSlot(loc, kSeEditorProject))
+        if (SDK::UObject* ed = SbEditorSlotLgm())
+        {
+            best = ed; bestTier = 0; bestScore = 0;
+            bestWhy = "editor area, created for this spot";
+        }
     g_sbHostOutsideCm = bestTier == 2 ? bestScore : (bestTier == 3 ? -1.0 : 0.0);
     static const char* kTier[] = { "inside its importance volume", "inside its importance volume (subclass slot)",
                                    "OUTSIDE every importance volume -- nearest one", "no importance volume anywhere -- nearest slot" };
@@ -4807,6 +4912,7 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
     else if (op == "LUAUDUMP") SeLuauDump(p.size() >= 3 ? p[2] : std::string());
     else if (op == "SLOTS") SeSlotsDump(p.size() >= 3 ? p[2] : std::string());
     else if (op == "SLOTBOX") SeSlotBoxProbe();
+    else if (op == "PROJPROBE" && p.size() >= 3) SeProjProbe(p[2]);
     else if (op == "MKSLOT" && g_seLocalTest && p.size() >= 4) { double at[3]; if (SeVec(p[2], at)) SbCreateEditorSlot(at, p[3] == "-" ? std::string() : p[3]); }
     else if (op == "NODEMOVE" && p.size() >= 4) SeTestNodeMove(p[2], p[3]);
     else if (op == "ACTORS" && p.size() >= 3) SeActorClasses(p[2]);

@@ -1,0 +1,22 @@
+log PP start
+enter
+wait 3
+raw SE|PROJPROBE|Testing/TestingProject20
+wait 3
+raw SE|PROJPROBE|Testing/TestingProject44
+wait 3
+raw SE|PROJPROBE|UnitTests/SelectionBase
+wait 3
+raw SE|PROJPROBE|UnitTests/AlternateSelection
+wait 3
+raw SE|PROJPROBE|Racing/Nascar
+wait 3
+raw SE|PROJPROBE|Testing/TempProject123
+wait 3
+raw SE|PROJPROBE|tag/teamchanger
+wait 3
+raw SE|PROJPROBE|justSpleef
+wait 3
+raw SE|PROJPROBE|golftestA
+wait 3
+log PP done

@@ -1,0 +1,21 @@
+# Editor area (editor half; pair with edarea_observer.txt). A spot outside every importance volume makes the
+# server create the editor's own module area there; a second spot inside it joins it.
+log EDA-ED start
+enter
+wait 3
+spawnat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000 0
+wait 8
+spawnat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -1500 -27000 0
+wait 8
+traceat -300 -2300 -27000
+traceat -300 -1500 -27000
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -1500 -27000
+raw SE|SLOTS|-300,-2300,-27000
+wait 6
+log EDA-ED delete second wall
+delete
+wait 8
+traceat -300 -1500 -27000
+wait 10
+log EDA-ED done

@@ -1,0 +1,10 @@
+log MKSLOT start
+enter
+wait 3
+raw SE|MKSLOT|-300,-2300,-27000|Testing/TempProject123
+wait 15
+raw SE|LUAUDUMP|DefaultSlot
+wait 2
+raw SE|LGMDESC|DefaultSlot:all
+wait 3
+log MKSLOT done

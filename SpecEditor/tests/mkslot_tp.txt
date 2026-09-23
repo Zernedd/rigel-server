@@ -1,0 +1,8 @@
+log MKSLOT start
+enter
+wait 3
+raw SE|MKSLOT|-300,-2300,-27000|Testing/TempProject123
+wait 25
+raw SE|SLOTS|-300,-2300,-27000
+wait 3
+log MKSLOT done

@@ -1,0 +1,9 @@
+log BR start
+enter
+wait 3
+spawnat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -300 -2300 -27000 0
+wait 12
+vis LE_SM_JBC_MiddleBridge -300 -2300 -27000
+pickat LE_SM_JBC_MiddleBridge -300 -2300 -27000
+where
+log BR done
