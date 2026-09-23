@@ -2578,7 +2578,8 @@ std::wstring ScriptsDir()
         if (std::filesystem::exists(kit, ec))
         {
             std::filesystem::copy(kit, dir, std::filesystem::copy_options::recursive | std::filesystem::copy_options::skip_existing, ec);
-            for (const wchar_t* ours : { L"types", L"tools", L"Rigel-Luau-Guide.pdf", L"Rigel-Quest-Guide.pdf", L"README.md" })
+            for (const wchar_t* ours : { L"types", L"tools", L"Rigel-Luau-Guide.pdf", L"Rigel-Quest-Guide.pdf", L"README.md",
+                                         L".vscode\\tasks.json" })   // the Rigel checker task (Problems panel)
             {
                 const std::wstring from = kit + L"\\" + ours, to = dir + L"\\" + ours;
                 if (std::filesystem::exists(from, ec))
@@ -3008,6 +3009,16 @@ void DrawProblems()
             }
             ImGui::SameLine();
         }
+        // Copy the whole problem (to paste into a message, a bug report or an AI chat). Ctrl+C does the same.
+        const bool copyKey = ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false);
+        if (ImGui::Button("Copy error") || copyKey)
+        {
+            std::string all = it.title + "\n\n" + it.text;
+            if (!it.file.empty()) all += "\n\nFile: " + it.file + (it.line > 0 ? ":" + std::to_string(it.line) : std::string());
+            ImGui::SetClipboardText(all.c_str());
+            Notes().Set("Copied the error to the clipboard.");
+        }
+        ImGui::SameLine();
         if (ImGui::Button("OK", ImVec2(80, 0)) || ImGui::IsKeyPressed(ImGuiKey_Enter))
         {
             Problems().Pop();

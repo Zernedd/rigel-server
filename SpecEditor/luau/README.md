@@ -52,6 +52,25 @@ because the game calls `BeginPlay`/`EndPlay` and the linter can't see that.
 * Globals: `log`, `warn`, `LuauClock`, `Promise`, `Vector`, `VRPawn.*`, `Quests.*`,
   `Gamemode`, `BallSpawnParameters.new`, `LinearColor.new`, `Enum.TextJustify`, ...
 
+### Rigel checks (the traps IntelliSense can't see)
+
+`tools/rigel-check.ps1` runs in the background as the VS Code task **Rigel: check scripts**
+(`.vscode/tasks.json`, started when the folder opens -- VS Code asks once to *Allow Automatic Tasks*).
+Every save is re-checked and findings appear in the **Problems** panel, underlined in the file:
+
+* **Typed locals that can't be properties.** Every `local Name: Type = ...` becomes a property of the
+  object in the editor. Only `...Component` slots, `number`, `string` and `boolean` can be properties;
+  anything else -- `{ [string]: boolean }`, a function type, a union -- crashed the server and every
+  player. The server removes such types before anyone runs the script (it still works), but write
+  `local Name = ...` instead.
+* **`local Name: number = 5` starts as nil.** A typed `number`/`string`/`boolean` is a property, so its
+  value comes from the editor, not from the `= 5`. Drop the type to keep the value.
+* **`defaultEnabledValue`** is in the definitions but errors at runtime.
+
+Run it by hand: `powershell -File tools/rigel-check.ps1` (add `-Watch` to keep checking).
+In the game, the editor also warns about these when a script is attached, and every problem popup has a
+**Copy error** button (or Ctrl+C) that puts the full message on the clipboard.
+
 ## Quick start
 
 1. Open the Spec Editor (**F12**), select an object, and in **Details > Luau script** click
