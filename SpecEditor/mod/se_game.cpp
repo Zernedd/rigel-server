@@ -212,7 +212,12 @@ void SendToServer(const std::string& payload)
     // Anything that changes what is built marks the open level unsaved (the menu bar shows "*").
     static const char* kEdits[] = { "SE|SPAWN|", "SE|XFORM|", "SE|DELETE|", "SE|SBDUP|", "SE|SBSET|", "SE|LUAU|", "SE|LUAUREF|",
                                     "SE|LUAUDEL|", "SE|PROP|", "SE|QUEST|", "SE|COINRUN|", "SE|SBADD|" };
-    for (const char* e : kEdits) if (payload.rfind(e, 0) == 0) { g_sceneDirty = true; break; }
+    for (const char* e : kEdits)
+        if (payload.rfind(e, 0) == 0)
+        {
+            if (!g_sceneDirty.exchange(true)) Log("[scene] unsaved: %.80s", payload.c_str());
+            break;
+        }
     if (g_pc && CallStringRpc(g_pc, "VRPlayerController", "Server_SetVivoxParticipantID", payload)) return;
     if (g_lePawn && CallStringRpc(g_lePawn, "LevelEditorPawn", "Server_AttemptLockObject", payload)) return;
     Log("[game] no transport (no controller yet) - dropped: %.60s", payload.c_str());
@@ -863,6 +868,7 @@ void HandleCommands()
             const std::string id = IdentForEdit(c.str);
             if (id.empty()) { Log("[game] xform: no identity for handle %s", c.str.c_str()); break; }
             SendToServer("SE|XFORM|" + id + "|" + Fmt3(c.loc) + "|" + Fmt3(c.rot) + "|" + Fmt3(c.scale));
+            Log("[xform] set %s -> %s | %s", c.str.c_str(), Fmt3(c.loc).c_str(), Fmt3(c.rot).c_str());
             NoteCommanded(c.str, c.loc);
             PredictTransform(c.str, c.loc, c.rot, c.scale);   // show it now; the server's copy follows
             break;
@@ -1645,6 +1651,7 @@ void DragTick()
         if (!s_active)                                                   // released: everyone's final place
         {
             for (const auto& m : s_all) send(m);
+            Log("[xform] drag release %s (+%zu) -> %s", s_all[0].handle.c_str(), s_all.size() - 1, Fmt3(s_all[0].loc).c_str());
             s_sentSeq = seq;
             s_lastSend = now;
             s_holdUntil = now + 1200;
@@ -2350,6 +2357,7 @@ void RunScript(const Snapshot& snap)
             g_cam.up[0], g_cam.up[1], g_cam.up[2], u[0], u[1], u[2], g_cam.rp, g_cam.ry, g_cam.rr);
         return;
     }
+    if (!strcmp(op, "favclick")) { RequestUiSelect("!favclick " + rest); return; }               // favclick fav|<category>: click row 1's star
     if (!strcmp(op, "scene")) { RequestUiSelect("!scene " + rest); return; }                     // scene save|saveas|open|new|upload|autosave [name]
     if (!strcmp(op, "expectscene")) { RequestUiSelect("!expectscene " + rest); return; }         // expectscene <name|-> <dirty 0|1>
     if (!strcmp(op, "expectlvfile"))          // expectlvfile <name> 0|1 -- Documents\RigelLevels\<name>.a2level exists

@@ -4571,6 +4571,10 @@ static void SeLuauRef(SDK::UObject* ctx, const std::string& ident, const std::st
 struct SeLvPlain { SDK::AActor* actor = nullptr; int32_t index = -1; std::string path, cls, level; };
 static std::vector<SeLvPlain> g_lvPlain;
 static std::vector<std::string> g_lvLoaded;         // levels loaded on this server
+// Levels an editor put here itself (an opened scene, an imported file, a save): the backend's "desired" list
+// doesn't know them, so the poller must leave them alone -- only Close / Unload removes them.
+static std::vector<std::string> g_lvLocal;
+static void SeLvMarkLocal(const std::string& n) { if (std::find(g_lvLocal.begin(), g_lvLocal.end(), n) == g_lvLocal.end()) g_lvLocal.push_back(n); }
 static std::mutex g_lvMu;                            // guards the queue below (worker thread -> game thread)
 struct SeLvJob { int kind; std::string name, text; SDK::UObject* pc = nullptr; };   // 1 load 2 unload 3 note-to-caller
 static std::vector<SeLvJob> g_lvJobs;
@@ -4890,6 +4894,7 @@ static void SeLvUnload(const std::string& name)
         if (q.level == name && !q.deleted) { SeQuestRemove(q); gone.push_back(&q); ++n; }
     if (!gone.empty()) SeQuestResendAll(gone);
     g_lvLoaded.erase(std::remove(g_lvLoaded.begin(), g_lvLoaded.end(), name), g_lvLoaded.end());
+    g_lvLocal.erase(std::remove(g_lvLocal.begin(), g_lvLocal.end(), name), g_lvLocal.end());
     g_lvStatusDirty = true;
     HxLog("[HalcyonA2][LEVELS] unloaded '%s': %d item(s) removed\n", name.c_str(), n);
 }
@@ -4924,6 +4929,7 @@ static std::vector<std::string> SeLvLines(const std::string& body)
 }
 
 static std::vector<std::string> g_lvLoadedSnapshot;     // for the worker (copied under g_lvMu)
+static std::vector<std::string> g_lvLocalSnapshot;
 static void SeLvPollerBody()
 {
     // Wait until the server has registered with the backend (the deployment id is known).
@@ -4941,11 +4947,12 @@ static void SeLvPollerBody()
             for (int w = 0; w < 30 && !g_lvPollNow.exchange(false); ++w) Sleep(500);   // 15 s, or sooner on request
             DWORD s2 = 0;
             const std::string d = SeLvHttp(L"GET", "/v1/spec/desired", "", &s2);
-            if (s2 != 200) continue;
-            desired = SeLvLines(d);
+            if (s2 == 200) desired = SeLvLines(d);
+            else if (g_seLocalTest) desired.clear();       // local tests: no backend = nothing desired (what live does to an editor's level)
+            else continue;
         }
-        std::vector<std::string> loaded;
-        { std::lock_guard<std::mutex> lk(g_lvMu); loaded = g_lvLoadedSnapshot; }
+        std::vector<std::string> loaded, local;
+        { std::lock_guard<std::mutex> lk(g_lvMu); loaded = g_lvLoadedSnapshot; local = g_lvLocalSnapshot; }
         for (const auto& name : desired)
         {
             if (std::find(loaded.begin(), loaded.end(), name) != loaded.end() || requested.count(name)) continue;
@@ -4954,7 +4961,8 @@ static void SeLvPollerBody()
             if (s3 == 200) { SeLvQueue({ 1, name, text }); requested.insert(name); }
         }
         for (const auto& name : loaded)
-            if (std::find(desired.begin(), desired.end(), name) == desired.end()) { SeLvQueue({ 2, name, "" }); requested.erase(name); }
+            if (std::find(desired.begin(), desired.end(), name) == desired.end() && std::find(local.begin(), local.end(), name) == local.end())
+            { SeLvQueue({ 2, name, "" }); requested.erase(name); }
         for (auto it = requested.begin(); it != requested.end();)   // loaded ones no longer need the guard
             if (std::find(loaded.begin(), loaded.end(), *it) != loaded.end()) it = requested.erase(it); else ++it;
         if (g_lvStatusDirty.exchange(false))
@@ -4995,14 +5003,15 @@ static void SeLvTick()
         std::lock_guard<std::mutex> lk(g_lvMu);
         jobs.swap(g_lvJobs);
         g_lvLoadedSnapshot = g_lvLoaded;
+        g_lvLocalSnapshot = g_lvLocal;
     }
     for (auto& j : jobs)
     {
         if (j.kind == 1) SeLvLoad(j.name, j.text);
-        else if (j.kind == 2) SeLvUnload(j.name);
+        else if (j.kind == 2) { if (std::find(g_lvLocal.begin(), g_lvLocal.end(), j.name) == g_lvLocal.end()) SeLvUnload(j.name); }
         else if (j.kind == 3 && j.pc && SeAlive(j.pc)) SeBroadcast(j.text, j.pc);
     }
-    if (!jobs.empty()) { std::lock_guard<std::mutex> lk(g_lvMu); g_lvLoadedSnapshot = g_lvLoaded; }
+    if (!jobs.empty()) { std::lock_guard<std::mutex> lk(g_lvMu); g_lvLoadedSnapshot = g_lvLoaded; g_lvLocalSnapshot = g_lvLocal; }
 }
 
 // Editor commands: SE|LVSAVE|name, SE|LVLIST, SE|LVLOAD|name, SE|LVUNLOAD|name
@@ -5015,6 +5024,7 @@ static void SeLvSave(SDK::UObject* ctx, const std::string& rawName)
     int counts[3] = {};
     const std::string text = SeLvBuild(name, counts);
     if (std::find(g_lvLoaded.begin(), g_lvLoaded.end(), name) == g_lvLoaded.end()) g_lvLoaded.push_back(name);
+    SeLvMarkLocal(name);
     g_lvStatusDirty = true;
     char summary[160];
     snprintf(summary, sizeof(summary), "%d object(s), %d quest(s), %d coin run(s)", counts[0], counts[1], counts[2]);
@@ -5046,6 +5056,7 @@ static void SeLvExport(SDK::UObject* ctx, const std::string& rawName, bool tag =
     int counts[3] = {};
     const std::string text = SeLvBuild(name, counts, tag);
     if (tag && std::find(g_lvLoaded.begin(), g_lvLoaded.end(), name) == g_lvLoaded.end()) { g_lvLoaded.push_back(name); g_lvStatusDirty = true; }
+    if (tag) SeLvMarkLocal(name);
     static const char* hx = "0123456789ABCDEF";
     std::string hex;
     hex.reserve(text.size() * 2);
@@ -5082,6 +5093,7 @@ static void SeLvImport(SDK::UObject* ctx, const std::string& rawName, const std:
     text = "L\t" + SeLvClean(name) + "\t1" + (eol == std::string::npos ? std::string("\n") : text.substr(eol));
     if (std::find(g_lvLoaded.begin(), g_lvLoaded.end(), name) != g_lvLoaded.end()) SeLvUnload(name);   // replace, don't stack
     SeLvLoad(name, text);
+    SeLvMarkLocal(name);
     if (mode == "save")
     {
         std::thread([name, text, pc]() {
@@ -5113,6 +5125,7 @@ static void SeLvList(SDK::UObject* ctx)
 static void SeLvSetLoaded(SDK::UObject* ctx, const std::string& name, bool load)
 {
     SDK::UObject* pc = SeCallerPC(ctx);
+    if (!load && std::find(g_lvLocal.begin(), g_lvLocal.end(), name) != g_lvLocal.end()) SeLvUnload(name);   // the poller won't
     std::thread([name, load, pc]() {
         DWORD st = 0;
         SeLvHttp(L"POST", "/v1/spec/levels/" + SeLvUrlName(name) + "/loaded?value=" + (load ? "1" : "0"), "", &st);

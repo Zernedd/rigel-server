@@ -1,0 +1,18 @@
+log T-FC start
+enter
+wait 4
+fav HalfPipeWall_3x1x4_A_01
+fav Floor_2x2x025_A_01
+wait 1
+expectfav HalfPipeWall_3x1x4_A_01 1
+expectfav Floor_2x2x025_A_01 1
+favclick fav
+wait 3
+expectfav HalfPipeWall_3x1x4_A_01 0
+expectfav Floor_2x2x025_A_01 1
+favclick fav
+wait 3
+expectfav Floor_2x2x025_A_01 0
+favclick fav
+wait 3
+log T-FC done

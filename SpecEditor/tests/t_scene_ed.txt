@@ -40,4 +40,20 @@ wait 14
 expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625 1
 expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 3260 -28625 1
 expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2660 -28625 0
+wait 35
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625 1
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 3260 -28625 1
+expectscene ScTestA 0
+scene open ScTestA
+wait 3
+expectscene ScTestA 0
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625 1
+scene delete ScTestB
+wait 2
+expectlvfile ScTestB 0
+scene delete ScTestA
+wait 6
+expectlvfile ScTestA 0
+expectscene - 0
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625 0
 log T-SC done

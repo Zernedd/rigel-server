@@ -927,13 +927,17 @@ bool FavStarButton(ImDrawList* dl, ImVec2 c, float r, const std::string& path)
 {
     const bool fav = IsFav(path);
     const ImVec2 m = ImGui::GetIO().MousePos;
-    const bool hov = std::fabs(m.x - c.x) <= r + 2 && std::fabs(m.y - c.y) <= r + 2 && ImGui::IsWindowHovered();
+    // AllowWhenBlockedByActiveItem: the row/tile under the star goes active on the same mouse-down, and a plain
+    // IsWindowHovered() is false while any item is active -- so the star never saw its own click.
+    const bool hov = std::fabs(m.x - c.x) <= r + 2 && std::fabs(m.y - c.y) <= r + 2 &&
+                     ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
     DrawStar(dl, c, r, fav, fav ? IM_COL32(250, 200, 60, 255) : hov ? IM_COL32(230, 230, 230, 230) : IM_COL32(150, 150, 150, 140));
     if (hov) ImGui::SetTooltip(fav ? "Remove from Favorites" : "Add to Favorites");
     if (hov && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) { ToggleFav(path); return true; }
     return false;
 }
 std::string g_dragName;
+int g_favClickArm = 0;                           // tests: click the star of the first Place Actors row drawn
 
 const ImU32 kSelBlue   = IM_COL32(0, 112, 224, 255);   // #0070E0
 const ImU32 kFolderCol = IM_COL32(196, 164, 110, 255);
@@ -1213,6 +1217,7 @@ void SceneOpen(const std::string& rawName)
 {
     const std::string name = SceneClean(rawName);
     if (name.empty()) return;
+    if (name == g_sceneName) { Notes().Set("'" + name + "' is already open."); return; }
     const std::string text = SceneReadFile(name);
     if (text.empty()) { Notes().Set("Couldn't read " + name + ".a2level."); return; }
     SceneClose();
@@ -1223,6 +1228,30 @@ void SceneOpen(const std::string& rawName)
     Log("[scene] open '%s' (%zu bytes)", name.c_str(), text.size());
 }
 void SceneNew() { SceneClose(); Notes().Set("New level: place things, then Ctrl+S to save it."); }
+std::string g_lvDeleteAsk;                   // a level waiting for "Delete?" confirmation
+// Deletes Documents\RigelLevels\<name>.a2level to the Recycle Bin. The open level is closed first, without
+// saving (saving would write the file straight back).
+bool SceneDelete(const std::string& rawName)
+{
+    const std::string name = SceneClean(rawName);
+    if (name.empty()) return false;
+    if (name == g_sceneName)
+    {
+        Command c{ CmdType::SendRaw }; c.str = "SE|LVCLOSE|" + name; State().Push(c);
+        g_sceneName.clear();
+        g_sceneDirty = false;
+    }
+    std::wstring from = LevelsDir() + L"\\" + std::wstring(name.begin(), name.end()) + L".a2level";
+    from.push_back(L'\0');                   // SHFileOperation wants a double-NUL list
+    SHFILEOPSTRUCTW op{};
+    op.wFunc = FO_DELETE;
+    op.pFrom = from.c_str();
+    op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI;
+    const bool ok = SHFileOperationW(&op) == 0 && !op.fAnyOperationsAborted;
+    Log("[scene] delete '%s' -> %s", name.c_str(), ok ? "recycled" : "FAILED");
+    Notes().Set(ok ? "Deleted '" + name + "' (it's in the Recycle Bin)." : "Couldn't delete " + name + ".a2level.");
+    return ok;
+}
 void SceneUpload()
 {
     if (g_sceneName.empty()) { g_saveAsOpen = true; return; }
@@ -1245,6 +1274,18 @@ void SceneTick(const Snapshot& snap)
     if (snap.inEditor && !g_sceneName.empty() && g_sceneDirty && ImGui::GetTime() - dirtyAt > g_autosaveSec)
         SceneSave(g_sceneName, true);
     if (g_saveAsOpen) { ImGui::OpenPopup("Save Level As"); g_saveAsOpen = false; }
+    static std::string s_delName;
+    if (!g_lvDeleteAsk.empty()) { s_delName = g_lvDeleteAsk; g_lvDeleteAsk.clear(); ImGui::OpenPopup("Delete Level"); }
+    if (ImGui::BeginPopupModal("Delete Level", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        ImGui::Text("Delete '%s'?", s_delName.c_str());
+        ImGui::TextDisabled(s_delName == g_sceneName ? "It's open: it will be closed (unsaved changes are lost).\nThe file goes to the Recycle Bin."
+                                                     : "The file goes to the Recycle Bin.");
+        if (ImGui::Button("Delete", ImVec2(120, 0))) { SceneDelete(s_delName); ImGui::CloseCurrentPopup(); }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(120, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
     if (ImGui::BeginPopupModal("Save Level As", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
     {
         ImGui::TextUnformatted("Level name (saved to Documents\\RigelLevels):");
@@ -1450,7 +1491,15 @@ void DrawPlaceActors(const Snapshot& snap, ImVec2 pos, ImVec2 size)
         IconFor(dl, ImVec2(p.x + 2, p.y + 2), 22, it.name);
         const std::string label = PrettyName(it.name) + (!it.blocked.empty() ? "  (unavailable)" : !it.limited.empty() ? "  (display only)" : "");
         dl->AddText(ImVec2(p.x + 30, p.y + 5), it.blocked.empty() ? kFg : kDim, label.c_str());
-        const bool starAte = FavStarButton(dl, ImVec2(p.x + ImGui::GetContentRegionAvail().x - 12, p.y + 13), 7.0f, it.path);
+        const ImVec2 starC(p.x + ImGui::GetContentRegionAvail().x - 12, p.y + 13);
+        if (g_favClickArm > 0 && --g_favClickArm == 0)   // (armed for a couple of frames so the list has settled)
+        {
+            POINT sp{ static_cast<LONG>(starC.x), static_cast<LONG>(starC.y) };
+            ClientToScreen(static_cast<HWND>(ImGui::GetMainViewport()->PlatformHandleRaw), &sp);
+            StartSyntheticDrag(sp.x, sp.y, sp.x, sp.y);
+            Log("[ui] favclick %s (fav=%d) at %ld,%ld", it.name.c_str(), (int)IsFav(it.path), sp.x, sp.y);
+        }
+        const bool starAte = FavStarButton(dl, starC, 7.0f, it.path);
         if (ImGui::BeginPopupContextItem("##favctx"))
         {
             if (ImGui::MenuItem(IsFav(it.path) ? "Remove from Favorites" : "Add to Favorites")) ToggleFav(it.path);
@@ -1467,12 +1516,14 @@ void DrawPlaceActors(const Snapshot& snap, ImVec2 pos, ImVec2 size)
     {
         if (!g_favLoaded) FavLoad();
         if (g_favorites.empty()) ImGui::TextDisabled("No favorites yet.\nClick the star on any item\n(or right-click it) to add it.");
-        for (const auto& path : g_favorites) if (const PaletteItem* it = FindItem(snap, path)) row(*it);
+        const std::vector<std::string> favs = g_favorites;   // a copy: un-starring a row edits g_favorites mid-loop
+        for (const auto& path : favs) if (const PaletteItem* it = FindItem(snap, path)) row(*it);
     }
     else if (g_placeCat.empty())
     {
         if (g_recent.empty()) ImGui::TextDisabled("Nothing placed yet.\nPick a category, or use\nthe Content Browser.");
-        for (const auto& path : g_recent) if (const PaletteItem* it = FindItem(snap, path)) row(*it);
+        const std::vector<std::string> recent = g_recent;
+        for (const auto& path : recent) if (const PaletteItem* it = FindItem(snap, path)) row(*it);
     }
     else
     {
@@ -3518,7 +3569,8 @@ void DrawContentBrowser(const Snapshot& snap, ImVec2 pos, ImVec2 size)
             ImGui::InvisibleButton("##lv", ImVec2(tileW, tileH));
             const bool hov = ImGui::IsItemHovered(), open = f == g_sceneName;
             if (hov && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && snap.inEditor) SceneOpen(f);
-            if (hov) ImGui::SetTooltip("%s.a2level\nDouble-click: open (the current level is saved and closed)\nRight-click: more", f.c_str());
+            if (hov) ImGui::SetTooltip("%s.a2level\nDouble-click: open (the current level is saved and closed)\nRight-click: Upload, Delete, ...", f.c_str());
+            if (hov && ImGui::IsKeyPressed(ImGuiKey_Delete, false)) g_lvDeleteAsk = f;
             if (ImGui::BeginPopupContextItem("##lvctx"))
             {
                 if (ImGui::MenuItem("Open", nullptr, false, snap.inEditor)) SceneOpen(f);
@@ -3527,6 +3579,7 @@ void DrawContentBrowser(const Snapshot& snap, ImVec2 pos, ImVec2 size)
                     if (f == g_sceneName) SceneUpload();
                     else { Command c{ CmdType::LevelImport }; c.str = SceneClean(f); c.str2 = "save"; c.str3 = SceneReadFile(f); State().Push(c); }
                 }
+                if (ImGui::MenuItem("Delete...")) g_lvDeleteAsk = f;
                 if (ImGui::MenuItem("Show in Explorer"))
                     ShellExecuteW(nullptr, L"open", L"explorer.exe", (L"/select,\"" + LevelsDir() + L"\\" + wf + L".a2level\"").c_str(), nullptr, SW_SHOWNORMAL);
                 ImGui::EndPopup();
@@ -3814,8 +3867,18 @@ void DrawEditorUI()
             else if (op == "open") SceneOpen(arg);
             else if (op == "new") SceneNew();
             else if (op == "upload") SceneUpload();
+            else if (op == "delete") SceneDelete(arg);
             else if (op == "autosave") g_autosaveSec = atof(arg.c_str());
             Log("[ui] scene %s %s -> open='%s' dirty=%d", op.c_str(), arg.c_str(), g_sceneName.c_str(), (int)g_sceneDirty.load());
+        }
+        else if (req.rfind("!favclick ", 0) == 0)
+        {
+            const std::string cat = req.substr(10);
+            g_placeCat = cat == "fav" ? std::string("*fav") : cat;
+            g_paletteFilter[0] = 0;
+            g_showPlace = true;
+            g_favClickArm = 3;
+            Log("[ui] favclick armed in '%s'", g_placeCat.c_str());
         }
         else if (req.rfind("!uidrag ", 0) == 0)
         {
