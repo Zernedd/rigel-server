@@ -30,6 +30,7 @@ void Log(const char* fmt, ...);          // %TEMP%\spec_editor.log
 void RequestUiSelect(const std::string& handle);   // se_ui.cpp: the UI selects this next frame (test scripts)
 std::wstring LevelsDir();                          // se_ui.cpp: Documents\RigelLevels (local .a2level projects)
 unsigned long long IconTexture(const std::string& itemName);   // se_render.cpp: the game's own item icon (0 = none)
+void StartSyntheticDrag(int sx, int sy, int ex, int ey);        // se_render.cpp: tests -- a mouse drag fed to ImGui (screen px)
 
 // ── what the render thread is allowed to know about the world ────────────────────────────────
 struct Vec3 { double x = 0, y = 0, z = 0; };
@@ -44,6 +45,19 @@ struct PaletteItem
     std::string category;    // derived from the folder, e.g. "Quests", "Progression"
     std::string blocked;     // non-empty: cannot be placed by the editor, and why
     std::string limited;     // non-empty: places fine, but this part of it will not work, and why
+};
+
+// A trigger / contact area on a placed object (its box, sphere or capsule component) -- what a team changer,
+// a boost pad or a button reacts to. World-space, refreshed every frame with the object.
+struct TriggerShape
+{
+    int   kind = 0;          // 1 box, 2 sphere, 3 capsule, 4 mesh used as a trigger (its bounds box)
+    Vec3  center;
+    Rot   rot;
+    Vec3  ext;               // box: half-size; sphere: r,r,r; capsule: r,r,half-height (all scaled)
+    bool  overlap = false;   // generates overlap events (a real trigger, not just collision)
+    void* comp = nullptr;    // GAME THREAD ONLY
+    Vec3  localOrigin, localExt;   // kind 4: the mesh's own bounds (component space, unscaled)
 };
 
 // A live object in the editor's world view. Handle is the FString index the game's own level editor
@@ -62,6 +76,7 @@ struct SceneObject
     void*       ptr = nullptr;      // the actor -- GAME THREAD ONLY; the render thread must never deref it
     Vec3        boundsOff;          // world bounding box: centre = location + boundsOff, half-size = boundsExt
     Vec3        boundsExt;          // (what clicking in the viewport picks against)
+    std::vector<TriggerShape> triggers;   // its contact / trigger areas (drawn in the viewport)
 };
 
 // Property kinds, mirroring sereflect::PType (se_reflect.h) so the UI need not include the SDK.
@@ -281,7 +296,10 @@ public:
         const size_t n = dst.size() < objs.size() ? dst.size() : objs.size();
         for (size_t i = 0; i < n; ++i)
             if (dst[i].handle == objs[i].handle)
-            { dst[i].location = objs[i].location; dst[i].rotation = objs[i].rotation; dst[i].scale = objs[i].scale; }
+            {
+                dst[i].location = objs[i].location; dst[i].rotation = objs[i].rotation; dst[i].scale = objs[i].scale;
+                if (!objs[i].triggers.empty()) dst[i].triggers = objs[i].triggers;   // they move with the object
+            }
     }
     // Per-frame camera pose: the overlay projects with it, so it must be as fresh as the frame it is
     // drawn over (the 4 Hz publish made the gizmo and outlines trail every camera move).

@@ -394,8 +394,15 @@ void DrawGizmoOverlay(const Snapshot& snap, const SceneObject* sel)
             }
             else if (endOk[i])
             {
-                const ImVec2 from(c.x + (ends[i].x - c.x) * 0.15f, c.y + (ends[i].y - c.y) * 0.15f);
-                d = SegDist(mouse, from, ends[i]);
+                // An axis pointing (nearly) at the camera shrinks to a dot on top of the centre handle; it
+                // must not steal that click (it would drag along the view direction instead). Unreal does
+                // the same: a foreshortened axis is not grabbable.
+                const float sx = ends[i].x - c.x, sy = ends[i].y - c.y;
+                if (sx * sx + sy * sy >= 15.0f * 15.0f)
+                {
+                    const ImVec2 from(c.x + sx * 0.15f, c.y + sy * 0.15f);
+                    d = SegDist(mouse, from, ends[i]);
+                }
             }
             if (d < best) { best = d; hover = i; hoverK = dk; }
         }
@@ -415,9 +422,22 @@ void DrawGizmoOverlay(const Snapshot& snap, const SceneObject* sel)
             quadOk[i] = true;
             for (int k = 0; k < 4; ++k) if (!W2S(v, w[k], quad[i][k])) quadOk[i] = false;
         }
+    // The centre handle wins inside its own circle: the axis segments start a few pixels out from the centre,
+    // so without this a click on the centre grabbed whichever axis passed nearest (Unreal gives the centre
+    // priority the same way).
+    if (g_dragAxis < 0 && !uiWantsMouse && !Cam().looking && g_gizmo != GizmoMode::Rotate &&
+        (mouse.x - c.x) * (mouse.x - c.x) + (mouse.y - c.y) * (mouse.y - c.y) <= 81.0f)
+        hover = 6;
     if (hover < 0 && g_dragAxis < 0 && !uiWantsMouse && !Cam().looking && g_gizmo != GizmoMode::Rotate)
     {
-        for (int i = 0; i < 3 && hover < 0; ++i) if (quadOk[i] && PointInQuad(mouse, quad[i])) hover = 3 + i;
+        for (int i = 0; i < 3 && hover < 0; ++i)
+        {
+            if (!quadOk[i]) continue;
+            // A plane seen edge-on is a sliver: grabbing it would slide along an unstable ray/plane hit.
+            const ImVec2* q = quad[i];
+            const float area = std::fabs((q[2].x - q[0].x) * (q[3].y - q[1].y) - (q[3].x - q[1].x) * (q[2].y - q[0].y)) * 0.5f;
+            if (area >= 60.0f && PointInQuad(mouse, q)) hover = 3 + i;
+        }
         if (hover < 0 && (mouse.x - c.x) * (mouse.x - c.x) + (mouse.y - c.y) * (mouse.y - c.y) <= 81.0f) hover = 6;
     }
     g_gizmoHover = hover >= 0;
@@ -664,6 +684,64 @@ Vec3 PickExtent(const SceneObject& o)
     return { (std::max)(m, o.boundsExt.x), (std::max)(m, o.boundsExt.y), (std::max)(m, o.boundsExt.z) };
 }
 
+// Trigger / contact areas (a team changer's box, a button's sphere...): where a player actually has to be
+// for the blueprint to fire. Cyan = generates overlap events (a real trigger); grey = collision-only shape.
+bool g_showTriggers = true;
+void DrawSeg3(ImDrawList* dl, const View& v, const Vec3& a, const Vec3& b, ImU32 col, float th)
+{
+    ImVec2 pa, pb;
+    if (W2S(v, a, pa) && W2S(v, b, pb)) dl->AddLine(pa, pb, col, th);
+}
+void DrawRing3(ImDrawList* dl, const View& v, const Vec3& c, const Vec3& u, const Vec3& w, double r, ImU32 col, float th)
+{
+    const int kN = 32;
+    Vec3 prev = Add(c, Mul(u, r));
+    for (int k = 1; k <= kN; ++k)
+    {
+        const double t = k * 2.0 * 3.14159265358979 / kN;
+        const Vec3 cur = Add(c, Add(Mul(u, std::cos(t) * r), Mul(w, std::sin(t) * r)));
+        DrawSeg3(dl, v, prev, cur, col, th);
+        prev = cur;
+    }
+}
+void DrawTrigger(ImDrawList* dl, const View& v, const TriggerShape& t, bool hi)
+{
+    const ImU32 col = t.overlap ? IM_COL32(60, 220, 255, hi ? 235 : 120) : IM_COL32(160, 160, 180, hi ? 170 : 60);
+    const float th = hi ? 2.0f : 1.2f;
+    Vec3 x, y, z;
+    RotAxes(t.rot, x, y, z);
+    if (t.kind == 1 || t.kind == 4)
+    {
+        Vec3 p[8];
+        for (int i = 0; i < 8; ++i)
+            p[i] = Add(t.center, Add(Mul(x, (i & 1 ? 1 : -1) * t.ext.x), Add(Mul(y, (i & 2 ? 1 : -1) * t.ext.y), Mul(z, (i & 4 ? 1 : -1) * t.ext.z))));
+        static const int e[12][2] = { {0,1},{2,3},{4,5},{6,7},{0,2},{1,3},{4,6},{5,7},{0,4},{1,5},{2,6},{3,7} };
+        for (const auto& ed : e) DrawSeg3(dl, v, p[ed[0]], p[ed[1]], col, th);
+    }
+    else if (t.kind == 2)
+    {
+        DrawRing3(dl, v, t.center, x, y, t.ext.x, col, th);
+        DrawRing3(dl, v, t.center, x, z, t.ext.x, col, th);
+        DrawRing3(dl, v, t.center, y, z, t.ext.x, col, th);
+    }
+    else
+    {
+        const double r = t.ext.x, h = (std::max)(0.0, t.ext.z - r);
+        const Vec3 top = Add(t.center, Mul(z, h)), bot = Sub(t.center, Mul(z, h));
+        DrawRing3(dl, v, top, x, y, r, col, th);
+        DrawRing3(dl, v, bot, x, y, r, col, th);
+        DrawRing3(dl, v, t.center, x, z, 0.0, col, th);
+        for (const Vec3& d : { x, Mul(x, -1.0), y, Mul(y, -1.0) }) DrawSeg3(dl, v, Add(top, Mul(d, r)), Add(bot, Mul(d, r)), col, th);
+        DrawRing3(dl, v, top, x, z, r, col, th);
+        DrawRing3(dl, v, bot, x, z, r, col, th);
+    }
+    if (hi && t.overlap)
+    {
+        ImVec2 c;
+        if (W2S(v, t.center, c)) dl->AddText(ImVec2(c.x + 6, c.y - 6), col, "trigger area");
+    }
+}
+
 void DrawBox(ImDrawList* dl, const View& v, const Vec3& c, const Vec3& h, ImU32 col, float th)
 {
     Vec3 p[8];
@@ -715,6 +793,15 @@ void DrawViewportMarkers(const Snapshot& snap)
             DrawBox(dl, v, ctr, PickExtent(o),
                     isSel ? IM_COL32(255, 160, 40, 230) : o.lockedByOther ? IM_COL32(220, 120, 60, 150) : IM_COL32(230, 230, 230, 110),
                     isSel ? 2.0f : 1.2f);
+        }
+    if (g_showTriggers && v.valid)
+        for (const auto& o : snap.objects)
+        {
+            if (o.triggers.empty()) continue;
+            const Vec3 d = Sub(o.location, v.eye);
+            if (Dot(d, d) > 6000.0 * 6000.0) continue;          // nearby only: a whole station of wireframes is noise
+            const bool hi = o.handle == g_selected || IsMultiSel(o.handle) || &o == hovered;
+            for (const auto& t : o.triggers) DrawTrigger(dl, v, t, hi);
         }
     if (hovered && hovered->handle != g_selected)
     {
@@ -1107,6 +1194,8 @@ void DrawMainMenu(const Snapshot& snap, const SceneObject* sel)
         ImGui::MenuItem("Outliner", nullptr, &g_showOutliner);
         ImGui::MenuItem("Details", nullptr, &g_showDetails);
         ImGui::MenuItem("Content Browser", nullptr, &g_showContent);
+        ImGui::Separator();
+        ImGui::MenuItem("Trigger Areas", nullptr, &g_showTriggers);   // where a blueprint's contact zone is
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Select"))
@@ -3517,6 +3606,13 @@ void DrawEditorUI()
         { std::lock_guard<std::mutex> lk(g_uiSelectMx); req.swap(g_uiSelectReq); }
         if (req.empty()) {}
         else if (req[0] == '+') { ToggleMultiSel(req.substr(1)); Log("[ui] selection toggle %s -> %zu selected", req.c_str() + 1, g_selected.empty() ? 0 : 1 + g_multiSel.size()); }
+        else if (req.rfind("!uidrag ", 0) == 0)
+        {
+            int a = 0, b = 0, c = 0, d = 0;
+            sscanf_s(req.c_str() + 8, "%d %d %d %d", &a, &b, &c, &d);
+            StartSyntheticDrag(a, b, c, d);
+            Log("[ui] synthetic drag (%d,%d) -> (%d,%d)", a, b, c, d);
+        }
         else if (req == "!dup") { DuplicateSelected(snap); Log("[ui] duplicate: %zu pending", g_dupPending.size()); }
         else if (req.rfind("!fav ", 0) == 0 || req.rfind("!expectfav ", 0) == 0)
         {

@@ -1244,8 +1244,15 @@ static std::string HttpPostLocal(const wchar_t* host, int port, const wchar_t* p
 // which makes headless-server diagnosis painful — the file persists).
 static wchar_t g_hxLogSuffix[32] = {0};   // [CLIENTMODE] L"client" in mock-client mode
 static FILE* g_hxLog = nullptr;
+// [MI 2026-09-23] What logging costs the game thread. Every line used to fflush a file three server processes
+// share (Windows\Temp, where on-access scanning sits), and on prod a 1 Hz function that only logs one line
+// measured ~34 ms per call. Lines now go to the CRT buffer and are flushed once a second (PROF) -- crash lines
+// still flush at once. log=/flush= in the PROF line show what is left.
+static volatile LONG64 g_logTicks = 0, g_logMaxTicks = 0, g_flushTicks = 0;
+static volatile LONG g_logLines = 0;
 static void HxLog(const char* fmt, ...)
 {
+    LARGE_INTEGER _lt0; QueryPerformanceCounter(&_lt0);
     if (!g_hxLog)
     {
         wchar_t tmp[MAX_PATH]{}; GetTempPathW(MAX_PATH, tmp);
@@ -1259,8 +1266,25 @@ static void HxLog(const char* fmt, ...)
     va_list ap; va_start(ap, fmt);
     va_list ap2; va_copy(ap2, ap);
     vfprintf(stdout, fmt, ap); va_end(ap);
-    if (g_hxLog) { vfprintf(g_hxLog, fmt, ap2); fflush(g_hxLog); }
+    if (g_hxLog)
+    {
+        vfprintf(g_hxLog, fmt, ap2);
+        if (strstr(fmt, "[CRASH]") || strstr(fmt, "FATAL")) fflush(g_hxLog);   // a crash report must survive an instant exit
+    }
     va_end(ap2);
+    LARGE_INTEGER _lt1; QueryPerformanceCounter(&_lt1);
+    const LONG64 d = _lt1.QuadPart - _lt0.QuadPart;
+    InterlockedAdd64(&g_logTicks, d);
+    InterlockedIncrement(&g_logLines);
+    if (d > g_logMaxTicks) InterlockedExchange64(&g_logMaxTicks, d);
+}
+static void HxLogFlush()
+{
+    if (!g_hxLog) return;
+    LARGE_INTEGER t0, t1; QueryPerformanceCounter(&t0);
+    fflush(g_hxLog);
+    QueryPerformanceCounter(&t1);
+    InterlockedAdd64(&g_flushTicks, t1.QuadPart - t0.QuadPart);
 }
 
 // [2026-09-03 ★ CUSTOM CRASH REPORTER] The server dies instantly with no UE callstack (headless, crash
@@ -11780,8 +11804,14 @@ static void ProfDump()
     }
     buf[off] = 0;
     const long wk = InterlockedExchange(&g_walks, 0);
-    HxLog("[HalcyonA2][PROF] dll=%.1fms/s (%.1f%% of wall) walks/s=%ld rebuilds/s=%ld epoch=%ld objN=%ld [%s]\n",
-          totMs, (totMs / wallMs) * 100.0, wk, InterlockedExchange(&g_rebuilds, 0), (long)g_cacheEpoch, (long)g_objN, buf);
+    LARGE_INTEGER _qf; QueryPerformanceFrequency(&_qf);
+    const double tpm = static_cast<double>(_qf.QuadPart) / 1000.0;
+    const double logMs = InterlockedExchange64(&g_logTicks, 0) / tpm, logPk = InterlockedExchange64(&g_logMaxTicks, 0) / tpm;
+    const double flMs = InterlockedExchange64(&g_flushTicks, 0) / tpm;
+    const long logN = InterlockedExchange(&g_logLines, 0);
+    HxLog("[HalcyonA2][PROF] dll=%.1fms/s (%.1f%% of wall) walks/s=%ld rebuilds/s=%ld epoch=%ld objN=%ld log=%.1fms/s(pk%.1f,%ld lines) flush=%.1fms [%s]\n",
+          totMs, (totMs / wallMs) * 100.0, wk, InterlockedExchange(&g_rebuilds, 0), (long)g_cacheEpoch, (long)g_objN, logMs, logPk, logN, flMs, buf);
+    HxLogFlush();                                        // the one flush a second (see HxLog)
 }
 // ====================================================================================
 

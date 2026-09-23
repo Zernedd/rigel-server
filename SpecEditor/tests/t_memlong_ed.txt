@@ -1,0 +1,37 @@
+# Long memory trend: 16 samples, 20 s apart, after a 40 s settle (slope fitted offline).
+log T-MEMLONG start
+enter
+wait 40
+mem s1
+wait 20
+mem s2
+wait 20
+mem s3
+wait 20
+mem s4
+wait 20
+mem s5
+wait 20
+mem s6
+wait 20
+mem s7
+wait 20
+mem s8
+wait 20
+mem s9
+wait 20
+mem s10
+wait 20
+mem s11
+wait 20
+mem s12
+wait 20
+mem s13
+wait 20
+mem s14
+wait 20
+mem s15
+wait 20
+mem s16
+wait 20
+log T-MEMLONG done

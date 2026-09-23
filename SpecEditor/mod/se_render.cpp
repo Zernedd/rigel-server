@@ -17,6 +17,7 @@
 #include <d3d12.h>
 #include <dxgi1_4.h>
 #include <vector>
+#include <mutex>
 #include "MinHook.h"
 #include "imgui.h"
 #include "backends/imgui_impl_win32.h"
@@ -412,6 +413,7 @@ size_t PrivateBytes()
 void LoadIcons()
 {
     g_iconsLoaded = true;
+    if (wcsstr(GetCommandLineW(), L"-SENoIcons")) { Log("[icons] off (-SENoIcons)"); return; }   // A/B: memory with/without
     const size_t memBefore = PrivateBytes();
     const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     IWICImagingFactory* wic = nullptr;
@@ -488,6 +490,32 @@ void LoadIcons()
         se::icons::kCount, (static_cast<double>(PrivateBytes()) - static_cast<double>(memBefore)) / (1024.0 * 1024.0));
 }
 
+// ---- synthetic mouse drag (tests) ---------------------------------------------------------------------
+// A scripted drag goes straight into ImGui's input queue, frame by frame: move to the start, press, 30
+// steps to the end, release. It drives exactly the code a real drag does (gizmo hover, grab, drag, release)
+// without the OS cursor or window focus, so it is deterministic on a desktop that is in use.
+struct SynthDrag { bool on = false; int frame = 0; float sx = 0, sy = 0, ex = 0, ey = 0; };
+SynthDrag g_synth;
+std::mutex g_synthMx;
+void SyntheticDragTick()
+{
+    std::lock_guard<std::mutex> lk(g_synthMx);
+    if (!g_synth.on) return;
+    ImGuiIO& io = ImGui::GetIO();
+    const int kSteps = 30, f = g_synth.frame++;
+    if (f <= 2) { io.AddMousePosEvent(g_synth.sx, g_synth.sy); if (f == 2) io.AddMouseButtonEvent(0, true); return; }
+    if (f <= 2 + kSteps)
+    {
+        const float t = static_cast<float>(f - 2) / kSteps;
+        io.AddMousePosEvent(g_synth.sx + (g_synth.ex - g_synth.sx) * t, g_synth.sy + (g_synth.ey - g_synth.sy) * t);
+        io.AddMouseButtonEvent(0, true);
+        return;
+    }
+    io.AddMousePosEvent(g_synth.ex, g_synth.ey);
+    io.AddMouseButtonEvent(0, false);
+    if (f > 2 + kSteps + 3) { g_synth.on = false; Log("[ui] synthetic drag done"); }
+}
+
 HRESULT __stdcall Hook_Present(IDXGISwapChain3* sc, UINT interval, UINT flags)
 {
     if (!g_imguiReady)
@@ -500,6 +528,7 @@ HRESULT __stdcall Hook_Present(IDXGISwapChain3* sc, UINT interval, UINT flags)
 
     ImGui_ImplDX12_NewFrame();
     ImGui_ImplWin32_NewFrame();
+    SyntheticDragTick();                            // tests: a scripted drag, fed after the real input so it wins
     ImGui::NewFrame();
     DrawEditorUI();
     ImGui::Render();
@@ -649,4 +678,12 @@ unsigned long long se::IconTexture(const std::string& itemName)
     else if (auto it3 = g_iconTex.find("aa_se_" + n); it3 != g_iconTex.end()) tex = it3->second;
     if (s_cache.size() < 4096) s_cache[itemName] = tex;
     return tex;
+}
+
+void se::StartSyntheticDrag(int sx, int sy, int ex, int ey)
+{
+    POINT a{ sx, sy }, b{ ex, ey };
+    if (g_hwnd) { ScreenToClient(g_hwnd, &a); ScreenToClient(g_hwnd, &b); }   // ImGui works in client pixels
+    std::lock_guard<std::mutex> lk(g_synthMx);
+    g_synth = { true, 0, static_cast<float>(a.x), static_cast<float>(a.y), static_cast<float>(b.x), static_cast<float>(b.y) };
 }

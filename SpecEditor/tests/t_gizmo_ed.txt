@@ -1,21 +1,24 @@
-# New gizmo handles, driven by the REAL mouse (an external driver reads SCREENPOS and drags):
-# 1) the XY plane square must move the object in X and Y only; 2) the centre handle moves it in the view plane.
+# New gizmo handles, driven through ImGui's own input (a scripted drag, frame by frame):
+# 1) the XY plane square moves the object in X and Y only; 2) the centre handle moves it in the view plane
+# (screen right/up), which with the camera pitched down means Z changes.
 log T-GIZ start
 enter
 wait 4
+camlook -35 90
+wait 1
 spawn HalfPipeWall_3x1x4_A_01
 wait 8
 select
 wait 2
 markpos
 screenpos
-log GIZMO-READY-1
-wait 14
+uidrag plane 90 30
+wait 8
 expectdelta 1 1 0
 markpos
 screenpos
-log GIZMO-READY-2
-wait 14
+uidrag center 60 -45
+wait 8
 expectdelta 2 2 1
 where
 log T-GIZ done

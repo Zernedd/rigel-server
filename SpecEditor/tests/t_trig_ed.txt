@@ -1,0 +1,14 @@
+# Trigger areas: a team changer placed in the editor must expose its contact zone (an overlap trigger shape)
+# so the viewport can draw it.
+log T-TRIG start
+enter
+wait 3
+sbadd teamChange
+wait 8
+pick TeamChange
+expecttriggers 1
+sbadd BasicButton
+wait 8
+pick BasicButton
+expecttriggers 1
+log T-TRIG done

@@ -470,16 +470,108 @@ template <typename P> bool CallNative(SDK::UObject* obj, const char* cls, const 
 Vec3 g_markPos;                                      // markpos / expectdelta
 double g_memFirstMB = -1.0;                          // first `mem` sample (leak checks)
 int g_markersSeen = 0;                               // camera markers found by the last BuildObjects
+// A trigger shape's world pose + scaled size, read straight off the component (ComponentToWorld @0x1D0:
+// quat, translation @+0x20, scale @+0x40; Box BoxExtent / Sphere SphereRadius / Capsule HalfHeight+Radius
+// @0x540; bGenerateOverlapEvents = bit 3 of 0x25A).
+Rot QuatToRot(double X, double Y, double Z, double W);   // above/below
+void UpdateTrigger(TriggerShape& t)
+{
+    const uint8_t* c = static_cast<const uint8_t*>(t.comp);
+    const double* q = reinterpret_cast<const double*>(c + 0x1D0);
+    const double* tr = reinterpret_cast<const double*>(c + 0x1D0 + 0x20);
+    const double* sc = reinterpret_cast<const double*>(c + 0x1D0 + 0x40);
+    t.center = { tr[0], tr[1], tr[2] };
+    t.rot = QuatToRot(q[0], q[1], q[2], q[3]);
+    const double sx = std::fabs(sc[0]), sy = std::fabs(sc[1]), sz = std::fabs(sc[2]);
+    if (t.kind == 1)
+    {
+        const double* e = reinterpret_cast<const double*>(c + 0x540);
+        t.ext = { e[0] * sx, e[1] * sy, e[2] * sz };
+    }
+    else if (t.kind == 2)
+    {
+        const double r = *reinterpret_cast<const float*>(c + 0x540) * (std::max)(sx, (std::max)(sy, sz));
+        t.ext = { r, r, r };
+    }
+    else if (t.kind == 3)
+    {
+        const double hh = *reinterpret_cast<const float*>(c + 0x540) * sz, r = *reinterpret_cast<const float*>(c + 0x544) * (std::max)(sx, sy);
+        t.ext = { r, r, hh };
+    }
+    else                                                   // 4: a trigger mesh -- its bounds box, rotated/scaled
+    {
+        const double lx = t.localOrigin.x * sc[0], ly = t.localOrigin.y * sc[1], lz = t.localOrigin.z * sc[2];
+        const double qx = q[0], qy = q[1], qz = q[2], qw = q[3];      // rotate (lx,ly,lz) by the quaternion
+        const double ix = qw * lx + qy * lz - qz * ly, iy = qw * ly + qz * lx - qx * lz, iz = qw * lz + qx * ly - qy * lx, iw = -qx * lx - qy * ly - qz * lz;
+        t.center = { tr[0] + ix * qw + iw * -qx + iy * -qz - iz * -qy, tr[1] + iy * qw + iw * -qy + iz * -qx - ix * -qz,
+                     tr[2] + iz * qw + iw * -qz + ix * -qy - iy * -qx };
+        t.ext = { t.localExt.x * sx, t.localExt.y * sy, t.localExt.z * sz };
+    }
+    t.overlap = (c[0x25A] >> 3) & 1;
+}
 void BuildObjects(Snapshot& snap)
 {
     g_markersSeen = 0;
+    // Trigger shapes ride the same walk (one extra IsA per object): collected here, attached to their
+    // owning placed object after the loop.
+    static SDK::UClass* s_shapeCls = SDK::UObject::FindClassFast("ShapeComponent");
+    static SDK::UClass* s_boxCls = SDK::UObject::FindClassFast("BoxComponent");
+    static SDK::UClass* s_sphCls = SDK::UObject::FindClassFast("SphereComponent");
+    static SDK::UClass* s_capCls = SDK::UObject::FindClassFast("CapsuleComponent");
+    static SDK::UClass* s_smcCls = SDK::UObject::FindClassFast("StaticMeshComponent");
+    std::vector<std::pair<SDK::UObject*, TriggerShape>> shapes;
+    // Only components of PLACED objects: the station itself owns thousands of colliders. The owner's class
+    // is checked once per class (cached), never by building a name string per component.
+    static std::unordered_map<SDK::UClass*, bool> s_editorCls;
+    auto ownerIsPlaced = [](SDK::UObject* outer) -> bool {
+        SDK::UClass* oc = outer ? outer->Class : nullptr;
+        if (!oc) return false;
+        auto it = s_editorCls.find(oc);
+        if (it != s_editorCls.end()) return it->second;
+        const std::string cn = oc->GetName();
+        const bool yes = cn.rfind("LE_", 0) == 0 || IsSandboxClass(cn) || cn == "BP_BoostPad_Omnidirectional_C" || cn == "BP_BoostTank_World_C";
+        if (s_editorCls.size() < 8192 && (yes || !SandboxPrefabs().empty())) s_editorCls[oc] = yes;   // a "no" only once the registry is in
+        return yes;
+    };
     auto* actorCls = SDK::UObject::FindClassFast("Actor");
     if (!actorCls) return;
     const int32_t n = SDK::UObject::GObjects->Num();
     for (int32_t i = 0; i < n && snap.objects.size() < 4096; ++i)
     {
         auto* o = SDK::UObject::GObjects->GetByIndex(i);
-        if (!o || o->IsDefaultObject() || !o->IsA(actorCls)) continue;
+        if (!o || o->IsDefaultObject()) continue;
+        if (g_editorMode && s_shapeCls && o->Outer && o->IsA(s_shapeCls))
+        {
+            if (!ownerIsPlaced(o->Outer)) continue;
+            TriggerShape t;
+            t.kind = (s_boxCls && o->IsA(s_boxCls)) ? 1 : (s_sphCls && o->IsA(s_sphCls)) ? 2 : (s_capCls && o->IsA(s_capCls)) ? 3 : 0;
+            t.comp = o;
+            if (t.kind && shapes.size() < 2048) shapes.push_back({ o->Outer, t });
+            continue;
+        }
+        // A mesh that IS the trigger (a team changer's pad): overlap events on, collision query-only
+        // (BodyInstance @0x348, CollisionEnabled @+0x20 == QueryOnly). Solid meshes are not drawn.
+        if (g_editorMode && s_smcCls && o->Outer && o->IsA(s_smcCls))
+        {
+            if (!ownerIsPlaced(o->Outer)) continue;
+            const uint8_t* pc = reinterpret_cast<const uint8_t*>(o);
+            if (((pc[0x25A] >> 3) & 1) && pc[0x348 + 0x20] == 1 && shapes.size() < 2048)
+                if (SDK::UObject* mesh = *reinterpret_cast<SDK::UObject* const*>(pc + 0x560))
+                {
+                    SDK::Params::StaticMesh_GetBounds gb{};
+                    if (CallNative(mesh, "StaticMesh", "GetBounds", gb) && gb.ReturnValue.BoxExtent.X + gb.ReturnValue.BoxExtent.Y + gb.ReturnValue.BoxExtent.Z > 1.0)
+                    {
+                        TriggerShape t;
+                        t.kind = 4;
+                        t.comp = o;
+                        t.localOrigin = { gb.ReturnValue.Origin.X, gb.ReturnValue.Origin.Y, gb.ReturnValue.Origin.Z };
+                        t.localExt = { gb.ReturnValue.BoxExtent.X, gb.ReturnValue.BoxExtent.Y, gb.ReturnValue.BoxExtent.Z };
+                        shapes.push_back({ o->Outer, t });
+                    }
+                }
+            continue;
+        }
+        if (!o->IsA(actorCls)) continue;
         auto* c = o->Class;
         if (!c) continue;
         // A destroyed actor stays in GObjects until the next garbage collection -- up to a minute -- so
@@ -538,6 +630,19 @@ void BuildObjects(Snapshot& snap)
             }
         }
         snap.objects.push_back(std::move(so));
+    }
+    // Attach the trigger shapes to their placed objects.
+    if (!shapes.empty())
+    {
+        std::unordered_map<void*, size_t> byActor;
+        for (size_t k = 0; k < snap.objects.size(); ++k) byActor[snap.objects[k].ptr] = k;
+        for (auto& sh : shapes)
+        {
+            auto it = byActor.find(sh.first);
+            if (it == byActor.end()) continue;
+            UpdateTrigger(sh.second);
+            if (snap.objects[it->second].triggers.size() < 16) snap.objects[it->second].triggers.push_back(sh.second);
+        }
     }
 }
 
@@ -1477,6 +1582,7 @@ void RefreshTransforms()
         o.location = { t[0], t[1], t[2] };
         o.scale    = { s[0], s[1], s[2] };
         o.rotation = QuatToRot(q[0], q[1], q[2], q[3]);
+        for (auto& tr : o.triggers) if (Alive(static_cast<SDK::UObject*>(tr.comp))) UpdateTrigger(tr);
     }
     State().ApplyTransforms(g_lastObjects);
 }
@@ -1737,6 +1843,7 @@ HWND GameWindow()
 
 // The same projection the overlay uses (se_ui.cpp MakeView/W2S), in SCREEN pixels, so an external
 // input driver can click exactly where the object and its handles are drawn.
+double g_spCenter[2] = { -1, -1 }, g_spPlane[2] = { -1, -1 };   // last SCREENPOS: gizmo centre / XY plane (screen px)
 void LogScreenPos(const Snapshot& snap, const SceneObject& o)
 {
     HWND h = GameWindow();
@@ -1780,6 +1887,7 @@ void LogScreenPos(const Snapshot& snap, const SceneObject& o)
     double pxx = -1, pxy = -1;
     const Vec3 planeXY{ o.location.x + 0.32 * L * wpp, o.location.y + 0.32 * L * wpp, o.location.z };
     proj(planeXY, pxx, pxy, nullptr);
+    g_spCenter[0] = cx; g_spCenter[1] = cyy; g_spPlane[0] = pxx; g_spPlane[1] = pxy;
     Log("[script] SCREENPOS center=%.0f,%.0f handleX=%.0f,%.0f handleY=%.0f,%.0f handleZ=%.0f,%.0f ringZ=%.0f,%.0f planeXY=%.0f,%.0f worldPerPx=%.4f",
         cx, cyy, hx[0], hy[0], hx[1], hy[1], hx[2], hy[2], rzx, rzy, pxx, pxy, wpp);
 }
@@ -2066,6 +2174,28 @@ void RunScript(const Snapshot& snap)
             g_cam.up[0], g_cam.up[1], g_cam.up[2], g_cam.rp, g_cam.ry, g_cam.rr, found, g_gravZones.size());
         return;
     }
+    if (!strcmp(op, "uidrag"))                // uidrag plane|center dx dy -- drag that gizmo handle (after screenpos)
+    {
+        char which[16] = {}; int dx = 0, dy = 0;
+        sscanf_s(rest.c_str(), "%15s %d %d", which, (unsigned)sizeof(which), &dx, &dy);
+        const double* at = !strcmp(which, "plane") ? g_spPlane : g_spCenter;
+        if (at[0] < 0) { Log("[script] FAIL uidrag: run screenpos first"); return; }
+        char req[96];
+        snprintf(req, sizeof(req), "!uidrag %d %d %d %d", (int)at[0], (int)at[1], (int)at[0] + dx, (int)at[1] + dy);
+        RequestUiSelect(req);
+        Log("[script] uidrag %s from (%.0f,%.0f) by (%d,%d)", which, at[0], at[1], dx, dy);
+        return;
+    }
+    if (!strcmp(op, "camlook"))               // camlook <pitch> <yaw> -- aim the editor camera
+    {
+        double p = 0, y = 0;
+        sscanf_s(rest.c_str(), "%lf %lf", &p, &y);
+        g_cam.pitch = p; g_cam.yaw = y;
+        CameraFrame();
+        CameraApply();
+        Log("[script] camlook pitch=%.1f yaw=%.1f", p, y);
+        return;
+    }
     if (!strcmp(op, "camto"))                 // camto x y z -- put the editor camera there
     {
         double x = 0, y = 0, z = 0;
@@ -2127,7 +2257,7 @@ void RunScript(const Snapshot& snap)
         PROCESS_MEMORY_COUNTERS_EX pm{};
         GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pm), sizeof(pm));
         Log("[script] MEM %s private=%.1f MB working=%.1f MB", rest.c_str(), pm.PrivateUsage / 1048576.0, pm.WorkingSetSize / 1048576.0);
-        if (g_memFirstMB < 0) g_memFirstMB = pm.PrivateUsage / 1048576.0;
+        if (g_memFirstMB < 0 || rest == "base") g_memFirstMB = pm.PrivateUsage / 1048576.0;   // "base": measure growth from here
         return;
     }
     if (!strcmp(op, "expectmemgrowth"))       // expectmemgrowth <max MB> -- private memory since the first `mem`
@@ -2460,6 +2590,18 @@ void RunScript(const Snapshot& snap)
     {
         Command c{ CmdType::OwnLock }; c.str = o->handle; c.str2 = rest == "0" ? "0" : "1"; State().Push(c);
         Log("[script] ownlock %s %s", c.str2.c_str(), o->handle.c_str());
+        return;
+    }
+    if (!strcmp(op, "expecttriggers"))        // expecttriggers <min> -- trigger areas found on the last object
+    {
+        const int want = atoi(rest.c_str());
+        int ov = 0;
+        for (const auto& t : o->triggers) if (t.overlap) ++ov;
+        Log("[script] %s expecttriggers %s: %zu shape(s), %d overlap trigger(s) (wanted >= %d)", (int)o->triggers.size() >= want ? "PASS" : "FAIL",
+            o->className.c_str(), o->triggers.size(), ov, want);
+        for (const auto& t : o->triggers)
+            Log("[script]   %s at (%.0f,%.0f,%.0f) ext (%.0f,%.0f,%.0f)%s", t.kind == 1 ? "box" : t.kind == 2 ? "sphere" : t.kind == 3 ? "capsule" : "trigger mesh",
+                t.center.x, t.center.y, t.center.z, t.ext.x, t.ext.y, t.ext.z, t.overlap ? " overlap" : "");
         return;
     }
     if (!strcmp(op, "markpos"))               // markpos -- remember where the last object is now (for expectdelta)

@@ -2,7 +2,7 @@
 # memory must not keep climbing. The first ~40 s after entering is the game settling, so the baseline is
 # taken after that; a leak would show as steady growth across the next 60 s.
 log T-MEM start
-enter
+# (plain player: never enters the editor)
 wait 40
 mem base
 wait 30
