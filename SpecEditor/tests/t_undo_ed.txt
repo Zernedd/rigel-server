@@ -1,0 +1,42 @@
+log T-UNDO start
+enter
+wait 3
+spawnat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625 0
+wait 6
+pickat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625
+select
+wait 1
+gmove 300 0 0
+wait 5
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -150 2060 -28625 1
+undo
+wait 5
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625 1
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -150 2060 -28625 0
+redo
+wait 5
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -150 2060 -28625 1
+pickat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -150 2060 -28625
+select
+wait 1
+delsel
+wait 5
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -150 2060 -28625 0
+undo
+wait 8
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -150 2060 -28625 1
+redo
+wait 6
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -150 2060 -28625 0
+undo
+wait 8
+pickat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -150 2060 -28625
+select
+wait 1
+dupsel
+wait 8
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -150 2060 -28625 2
+undo
+wait 6
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -150 2060 -28625 1
+log T-UNDO done

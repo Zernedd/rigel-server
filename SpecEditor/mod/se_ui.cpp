@@ -23,6 +23,22 @@
 namespace se {
 namespace {
 bool CanPlace();   // below (the open level): placing needs one
+// ---- undo / redo (Ctrl+Z / Ctrl+Y): the model is defined further down, next to the shortcuts ----
+struct UndoXf { std::string handle, cls, path; Vec3 loc; Rot rot; Vec3 scl{ 1, 1, 1 }; };
+void UndoRecordMove(const std::vector<UndoXf>& before, const std::vector<UndoXf>& after, bool coalesce);
+void UndoRecordDelete(const std::vector<std::string>& handles);
+void UndoExpectNew(size_t count, const char* label);
+UndoXf UndoXfOf(const std::string& handle);
+struct UndoOp
+{
+    int kind = 0;                        // 1 move, 2 placed (place / duplicate), 3 deleted
+    std::string label;
+    std::vector<UndoXf> before, after;   // move: both; placed: after; deleted: before
+    double at = 0.0;
+    bool coalesce = false;
+};
+std::vector<UndoOp> g_undo, g_redo;
+bool UndoApply(bool forward);
 
 enum class GizmoMode { Select, Translate, Rotate, Scale };
 GizmoMode g_gizmo = GizmoMode::Translate;
@@ -78,6 +94,11 @@ void ClearSelection()
 }
 void DeleteSelected()
 {
+    {
+        std::vector<std::string> all = g_multiSel;
+        if (!g_selected.empty()) all.push_back(g_selected);
+        UndoRecordDelete(all);
+    }
     for (const std::string& h : g_multiSel) { Command c{ CmdType::DeleteObject }; c.str = h; State().Push(c); }
     g_multiSel.clear();
     if (g_selected.empty()) return;
@@ -309,12 +330,30 @@ void WriteDrag(bool active)
     ++d.seq;
 }
 
+// A finished gizmo drag becomes one undo step: every object it moved, from where it started to where it is.
+void UndoGizmoRelease()
+{
+    std::vector<UndoXf> before, after;
+    UndoXf b = UndoXfOf(g_dragHandle), a = b;
+    b.loc = g_dragStartLoc; b.rot = g_dragStartRot; b.scl = g_dragStartScale;
+    a.loc = g_pendLoc; a.rot = g_pendRot; a.scl = g_pendScale;
+    before.push_back(b); after.push_back(a);
+    for (size_t i = 0; i < g_dragGroupStart.size() && i < g_dragGroup.size(); ++i)
+    {
+        UndoXf gb = UndoXfOf(g_dragGroupStart[i].handle), ga = gb;
+        gb.loc = g_dragGroupStart[i].loc; gb.rot = g_dragGroupStart[i].rot; gb.scl = g_dragGroupStart[i].scale;
+        ga.loc = g_dragGroup[i].loc; ga.rot = g_dragGroup[i].rot; ga.scl = g_dragGroup[i].scale;
+        before.push_back(gb); after.push_back(ga);
+    }
+    UndoRecordMove(before, after, false);
+}
+
 void DrawGizmoOverlay(const Snapshot& snap, const SceneObject* sel)
 {
     g_gizmoHover = false;
     if (!sel || g_gizmo == GizmoMode::Select)
     {
-        if (g_dragAxis >= 0) { WriteDrag(false); g_dragAxis = -1; }
+        if (g_dragAxis >= 0) { UndoGizmoRelease(); WriteDrag(false); g_dragAxis = -1; }
         return;
     }
     const View v = MakeView(snap);
@@ -492,6 +531,7 @@ void DrawGizmoOverlay(const Snapshot& snap, const SceneObject* sel)
 
     if (g_dragAxis >= 0 && !ImGui::IsMouseDown(ImGuiMouseButton_Left))
     {
+        UndoGizmoRelease();
         WriteDrag(false);               // release: the game thread sends the final transform
         g_dragAxis = -1;
     }
@@ -671,6 +711,11 @@ void UiGroupMove(const Snapshot& snap, const Vec3& dv)
     g_dragGroup.clear();
     for (const auto& o : snap.objects)
         if (o.handle != sel->handle && IsMultiSel(o.handle)) g_dragGroup.push_back({ o.handle, Add(o.location, dv), o.scale, o.rotation });
+    g_dragStartLoc = sel->location; g_dragStartRot = sel->rotation; g_dragStartScale = sel->scale;
+    g_dragGroupStart.clear();
+    for (const auto& o : snap.objects)
+        if (o.handle != sel->handle && IsMultiSel(o.handle)) g_dragGroupStart.push_back({ o.handle, o.location, o.scale, o.rotation });
+    UndoGizmoRelease();
     WriteDrag(false);
     Log("[ui] group move: %zu object(s) by (%.0f,%.0f,%.0f)", 1 + g_dragGroup.size(), dv.x, dv.y, dv.z);
 }
@@ -1039,6 +1084,7 @@ void SpawnAt(const PaletteItem& it, const Vec3& loc, double yaw)
                   Snap(static_cast<float>(loc.z), g_gridSnap, true) };
     c.rot = { 0.0, yaw, 0.0 };
     State().Push(c);
+    UndoExpectNew(1, "Place");
     g_recent.erase(std::remove(g_recent.begin(), g_recent.end(), it.path), g_recent.end());
     g_recent.insert(g_recent.begin(), it.path);
     if (g_recent.size() > 10) g_recent.resize(10);
@@ -1074,6 +1120,7 @@ static void DuplicateSelected(const Snapshot& snap)
         if ((o.handle == g_selected || IsMultiSel(o.handle)) && DuplicateSelection(snap, o))
             g_dupPending.push_back({ o.className, Add(o.location, Vec3{ 1, 0, 0 }), o.handle == g_selected, "" });
     g_dupAt = ImGui::GetTime();
+    UndoExpectNew(g_dupPending.size(), "Duplicate");
 }
 // Once the copies show up, select them (the one made from the gizmo's object gets the gizmo).
 static void DupSelectTick(const Snapshot& snap)
@@ -1127,6 +1174,7 @@ void SpawnTraced(const PaletteItem& it, const Vec3& from, const Vec3& dir, doubl
     c.rot = { 0.0, yaw, 0.0 };
     c.snap = g_snapEnabled ? g_gridSnap : 0.0f;
     State().Push(c);
+    UndoExpectNew(1, "Place");
     g_recent.erase(std::remove(g_recent.begin(), g_recent.end(), it.path), g_recent.end());
     g_recent.insert(g_recent.begin(), it.path);
     if (g_recent.size() > 10) g_recent.resize(10);
@@ -1382,6 +1430,11 @@ void DrawMainMenu(const Snapshot& snap, const SceneObject* sel)
     }
     if (ImGui::BeginMenu("Edit"))
     {
+        const std::string u = g_undo.empty() ? std::string("Undo") : "Undo " + g_undo.back().label;
+        const std::string r = g_redo.empty() ? std::string("Redo") : "Redo " + g_redo.back().label;
+        if (ImGui::MenuItem(u.c_str(), "Ctrl+Z", false, !g_undo.empty())) UndoApply(false);
+        if (ImGui::MenuItem(r.c_str(), "Ctrl+Y", false, !g_redo.empty())) UndoApply(true);
+        ImGui::Separator();
         if (ImGui::MenuItem("Duplicate", "Ctrl+D", false, sel != nullptr) && sel)
             DuplicateSelected(snap);
         if (ImGui::MenuItem("Delete", "Delete", false, sel != nullptr))
@@ -3447,6 +3500,9 @@ void DrawDetailsPanel(const Snapshot& snap, const SceneObject* sel, ImVec2 pos, 
                                   Snap(rot[0], g_rotSnap, g_snapEnabled) };
                         c.scale = { scl[0], scl[1], scl[2] };
                         State().Push(c);
+                        UndoXf b = UndoXfOf(sel->handle), a = b;
+                        a.loc = c.loc; a.rot = c.rot; a.scl = c.scale;
+                        UndoRecordMove({ b }, { a }, true);     // one step per field edit, not per frame
                     }
                 }
                 if (ContainsCi("Snapping Grid", g_detailsFilter) && ImGui::CollapsingHeader("Snapping"))
@@ -3868,6 +3924,170 @@ void HandleAssetDrag(const Snapshot& snap)
     g_dragName.clear();
 }
 
+// ---- undo / redo ------------------------------------------------------------------------------
+// Client-side history of this editor's own edits. Every step is applied again as ordinary editor commands
+// (move / delete / place), so it goes through the server like any edit -- owner locks included -- and
+// other players see it. Objects are found again by handle, else by class near where they should be
+// (a re-placed object comes back with a new handle).
+const Snapshot* g_undoSnap = nullptr;    // this frame's snapshot (set by DrawEditorUI)
+struct UndoExpect { size_t count = 0; std::string label; double until = 0.0; std::unordered_set<std::string> known; std::vector<UndoXf> found; };
+std::vector<UndoExpect> g_undoExpect;
+
+const SceneObject* UndoObj(const std::string& handle)
+{
+    if (!g_undoSnap) return nullptr;
+    for (const auto& o : g_undoSnap->objects) if (o.handle == handle) return &o;
+    return nullptr;
+}
+UndoXf UndoXfOf(const std::string& handle)
+{
+    UndoXf x; x.handle = handle;
+    if (const SceneObject* o = UndoObj(handle))
+    {
+        x.cls = o->className; x.loc = o->location; x.rot = o->rotation; x.scl = o->scale;
+        if (g_undoSnap) if (const PaletteItem* it = FindItem(*g_undoSnap, o->className)) x.path = it->path;
+    }
+    return x;
+}
+void UndoPush(UndoOp op)
+{
+    op.at = ImGui::GetTime();
+    g_undo.push_back(std::move(op));
+    if (g_undo.size() > 100) g_undo.erase(g_undo.begin());
+    g_redo.clear();
+}
+void UndoRecordMove(const std::vector<UndoXf>& before, const std::vector<UndoXf>& after, bool coalesce)
+{
+    if (before.empty() || before[0].cls.empty()) return;
+    bool moved = false;
+    for (size_t i = 0; i < before.size() && i < after.size(); ++i)
+    {
+        const Vec3 d = Sub(before[i].loc, after[i].loc);
+        if (Dot(d, d) > 0.01 || std::fabs(before[i].rot.yaw - after[i].rot.yaw) > 0.01 || std::fabs(before[i].rot.pitch - after[i].rot.pitch) > 0.01 ||
+            std::fabs(before[i].rot.roll - after[i].rot.roll) > 0.01 || std::fabs(before[i].scl.x - after[i].scl.x) > 1e-4 ||
+            std::fabs(before[i].scl.y - after[i].scl.y) > 1e-4 || std::fabs(before[i].scl.z - after[i].scl.z) > 1e-4) moved = true;
+    }
+    if (!moved) return;
+    // Details fields report every frame of a drag-edit: fold them into the step they started.
+    if (coalesce && !g_undo.empty() && g_undo.back().coalesce && g_undo.back().kind == 1 && g_undo.back().after.size() == 1 &&
+        g_undo.back().after[0].handle == after[0].handle && ImGui::GetTime() - g_undo.back().at < 1.0)
+    {
+        g_undo.back().after = after;
+        g_undo.back().at = ImGui::GetTime();
+        g_redo.clear();
+        return;
+    }
+    UndoOp op; op.kind = 1; op.before = before; op.after = after; op.coalesce = coalesce;
+    op.label = before.size() > 1 ? "Move " + std::to_string(before.size()) + " objects" : "Move";
+    UndoPush(std::move(op));
+}
+void UndoRecordDelete(const std::vector<std::string>& handles)
+{
+    UndoOp op; op.kind = 3;
+    for (const auto& h : handles) { UndoXf x = UndoXfOf(h); if (!x.cls.empty()) op.before.push_back(x); }
+    if (op.before.empty()) return;
+    op.label = op.before.size() > 1 ? "Delete " + std::to_string(op.before.size()) + " objects" : "Delete";
+    UndoPush(std::move(op));
+}
+// Placing / duplicating: the new objects' handles are only known once they appear, so remember what
+// existed and record the next `count` newcomers (within 8 s) as one step.
+void UndoExpectNew(size_t count, const char* label)
+{
+    if (!g_undoSnap || !count) return;
+    UndoExpect e; e.count = count; e.label = label; e.until = ImGui::GetTime() + 8.0;
+    for (const auto& o : g_undoSnap->objects) e.known.insert(o.handle);
+    g_undoExpect.push_back(std::move(e));
+}
+void UndoTick(const Snapshot& snap)
+{
+    for (size_t i = 0; i < g_undoExpect.size();)
+    {
+        UndoExpect& e = g_undoExpect[i];
+        for (const auto& o : snap.objects)
+        {
+            if (e.found.size() >= e.count) break;
+            if (e.known.count(o.handle)) continue;
+            e.known.insert(o.handle);
+            UndoXf x = UndoXfOf(o.handle);
+            if (!x.cls.empty()) e.found.push_back(x);
+        }
+        if (e.found.size() >= e.count || ImGui::GetTime() > e.until)
+        {
+            if (!e.found.empty())
+            {
+                UndoOp op; op.kind = 2; op.after = e.found;
+                op.label = e.found.size() > 1 ? e.label + " " + std::to_string(e.found.size()) + " objects" : e.label;
+                UndoPush(std::move(op));
+            }
+            g_undoExpect.erase(g_undoExpect.begin() + i);
+        }
+        else ++i;
+    }
+}
+// Find a recorded object again: same handle, same sandbox id (a rebuild adds "_n"), else the same class
+// nearest to where it should be.
+const SceneObject* UndoFind(const UndoXf& x, const Vec3& nearPt)
+{
+    if (!g_undoSnap) return nullptr;
+    if (const SceneObject* o = UndoObj(x.handle)) return o;
+    const std::string id = x.handle.substr(0, x.handle.find('_'));
+    const SceneObject* best = nullptr;
+    double bestD = 60.0 * 60.0;
+    for (const auto& o : g_undoSnap->objects)
+    {
+        if (id.size() >= 32 && o.handle.rfind(id, 0) == 0) return &o;
+        if (o.className != x.cls) continue;
+        const Vec3 d = Sub(o.location, nearPt);
+        const double dd = Dot(d, d);
+        if (dd < bestD) { bestD = dd; best = &o; }
+    }
+    return best;
+}
+void UndoSetXf(const SceneObject& o, const UndoXf& to)
+{
+    Command c{ CmdType::SetTransform }; c.str = o.handle; c.loc = to.loc; c.rot = to.rot; c.scale = to.scl; State().Push(c);
+}
+void UndoDelete(const SceneObject& o) { Command c{ CmdType::DeleteObject }; c.str = o.handle; State().Push(c); }
+bool UndoPlace(const UndoXf& x)
+{
+    if (x.path.empty()) return false;
+    Command c{ CmdType::SpawnItem }; c.str = x.path; c.loc = x.loc; c.rot = x.rot; c.scale = x.scl; State().Push(c);
+    return true;
+}
+// forward = redo. Returns false when there is nothing to do.
+bool UndoApply(bool forward)
+{
+    std::vector<UndoOp>& from = forward ? g_redo : g_undo;
+    std::vector<UndoOp>& to   = forward ? g_undo : g_redo;
+    if (from.empty() || !g_undoSnap) return false;
+    UndoOp op = from.back();
+    from.pop_back();
+    int missing = 0, cant = 0;
+    if (op.kind == 1)
+    {
+        const auto& dst = forward ? op.after : op.before;
+        const auto& src = forward ? op.before : op.after;
+        for (size_t i = 0; i < dst.size() && i < src.size(); ++i)
+            if (const SceneObject* o = UndoFind(src[i], src[i].loc)) UndoSetXf(*o, dst[i]); else ++missing;
+    }
+    else if ((op.kind == 2) != forward)       // undo a placement / redo a delete: remove them
+    {
+        const auto& list = op.kind == 2 ? op.after : op.before;
+        for (const auto& x : list) if (const SceneObject* o = UndoFind(x, x.loc)) UndoDelete(*o); else ++missing;
+    }
+    else                                      // undo a delete / redo a placement: put them back
+    {
+        const auto& list = op.kind == 2 ? op.after : op.before;
+        for (const auto& x : list) if (!UndoPlace(x)) ++cant;
+    }
+    Log("[undo] %s '%s' (%zu undo / %zu redo after this)%s", forward ? "redo" : "undo", op.label.c_str(),
+        g_undo.size() + (forward ? 1 : 0), g_redo.size() + (forward ? 0 : 1), missing ? " -- some objects are gone" : "");
+    if (cant) Notes().Set(std::to_string(cant) + " object(s) can't be put back: catalogue-only pieces have no palette entry to re-place.");
+    else if (missing) Notes().Set(std::string(forward ? "Redo" : "Undo") + " '" + op.label + "': some objects no longer exist.");
+    to.push_back(std::move(op));
+    return true;
+}
+
 void HandleShortcuts()
 {
     // While flying, W/E/Q/A/S/D steer the camera; they must not also switch the gizmo.
@@ -3877,6 +4097,12 @@ void HandleShortcuts()
     if (ImGui::IsKeyPressed(ImGuiKey_E)) g_gizmo = GizmoMode::Rotate;
     if (ImGui::IsKeyPressed(ImGuiKey_R)) g_gizmo = GizmoMode::Scale;
     if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false)) SceneSaveOrAsk();   // Ctrl+S: save the open level
+    if (ImGui::GetIO().KeyCtrl && g_dragAxis < 0)
+    {
+        const bool shift = ImGui::GetIO().KeyShift;
+        if (ImGui::IsKeyPressed(ImGuiKey_Z) && !shift) UndoApply(false);                                   // Ctrl+Z
+        if (ImGui::IsKeyPressed(ImGuiKey_Y) || (shift && ImGui::IsKeyPressed(ImGuiKey_Z))) UndoApply(true); // Ctrl+Y / Ctrl+Shift+Z
+    }
     if (g_slotPick.on && ImGui::IsKeyPressed(ImGuiKey_Escape)) { g_slotPick.on = false; return; }   // cancel "click an object"
     if (g_coinPlaceQuest >= 0 && ImGui::IsKeyPressed(ImGuiKey_Escape)) { g_coinPlaceQuest = -1; return; }   // leave construction mode
     if (ImGui::IsKeyPressed(ImGuiKey_Escape) && !g_selected.empty())
@@ -3903,6 +4129,8 @@ std::wstring LevelsDir()
 void DrawEditorUI()
 {
     const Snapshot snap = State().ReadSnapshot();
+    g_undoSnap = &snap;
+    UndoTick(snap);
     {
         std::string req;
         { std::lock_guard<std::mutex> lk(g_uiSelectMx); req.swap(g_uiSelectReq); }
@@ -3917,6 +4145,12 @@ void DrawEditorUI()
             Log("[script] %s expectscene want='%s' dirty=%d have='%s' dirty=%d", ok ? "PASS" : "FAIL", want.c_str(), dirty,
                 g_sceneName.c_str(), (int)g_sceneDirty.load());
         }
+        else if (req == "!undo" || req == "!redo")
+        {
+            const bool ok = UndoApply(req == "!redo");
+            Log("[ui] %s -> %s", req.c_str() + 1, ok ? "applied" : "nothing to do");
+        }
+        else if (req == "!del") DeleteSelected();
         else if (req.rfind("!scene ", 0) == 0)
         {
             const std::string rest = req.substr(7);

@@ -130,6 +130,8 @@ std::vector<Snapshot::DataEntry> g_data;
 int g_dataSerial = 0;
 std::vector<std::string> g_glyphs;        // quest icon ids seen in any bundle (for the Quest Editor's picker)
 SDK::UFunction* g_clientMsgFn = nullptr;   // APlayerController::ClientMessage (see ApplyRemoteProp)
+SDK::UFunction* g_receiveTickFn = nullptr; // AActor::ReceiveTick: the editor camera's once-a-frame clock
+SDK::UFunction* g_timeSecondsFn = nullptr; // UGameplayStatics::GetTimeSeconds
 
 struct PendingStep { std::string handle; int kind; };
 std::vector<PendingStep> g_questSteps;
@@ -1180,6 +1182,7 @@ struct EditorCamera
     // camera actor really gets.
     double up[3] = { 0, 0, 1 }, tan[3] = { 1, 0, 0 }, fwd[3] = { 1, 0, 0 };
     double rp = 0, ry = 0, rr = 0;
+    double vel[3] = { 0, 0, 0 };     // eased toward the keys' target velocity (no instant start/stop steps)
 };
 EditorCamera g_cam;
 
@@ -1472,8 +1475,9 @@ void CameraApply()
     CallNative(g_cam.actor, "Actor", "K2_SetActorLocationAndRotation", p);
 }
 
-// Once per frame, from the ProcessEvent hook (game thread).
-void CameraTick()
+// Once per game frame, from the ProcessEvent hook (game thread) -- see the frame clock there. frameDt is
+// the world's own delta for this frame (what the game advances everything else by); < 0 = measure it.
+void CameraTick(double frameDt = -1.0)
 {
     CameraInput& in = Cam();
     if (!in.active || !ObjectAlive(g_cam.actor)) return;
@@ -1484,6 +1488,7 @@ void CameraTick()
     double dt = g_cam.primed ? double(now.QuadPart - g_cam.last.QuadPart) / double(freq.QuadPart) : 0.0;
     g_cam.last = now;
     g_cam.primed = true;
+    if (frameDt >= 0.0) dt = frameDt;
     if (dt > 0.1) dt = 0.1;                                      // a hitch must not fling the camera
 
     const float dx = in.dx.exchange(0.0f), dy = in.dy.exchange(0.0f);
@@ -1499,6 +1504,7 @@ void CameraTick()
     CameraTurnToGravity(dt);
     double r[3];
     CameraFrame(r);
+    double target[3] = { 0, 0, 0 };
     if (in.looking)
     {
         auto down = [](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
@@ -1507,9 +1513,14 @@ void CameraTick()
         const double rgt = (down('D') ? 1 : 0) - (down('A') ? 1 : 0);
         const double up  = (down('E') ? 1 : 0) - (down('Q') ? 1 : 0);   // Q/E: along the local up
         for (int i = 0; i < 3; ++i) mv[i] = g_cam.fwd[i] * fwd + r[i] * rgt + g_cam.up[i] * up;
-        const double step = g_cam.speed * (down(VK_SHIFT) ? 3.0 : 1.0) * dt;
-        g_cam.x += mv[0] * step; g_cam.y += mv[1] * step; g_cam.z += mv[2] * step;
+        const double len = std::sqrt(mv[0] * mv[0] + mv[1] * mv[1] + mv[2] * mv[2]);
+        const double spd = g_cam.speed * (down(VK_SHIFT) ? 3.0 : 1.0) / (len > 1.0 ? len : 1.0);   // diagonals no faster
+        for (int i = 0; i < 3; ++i) target[i] = mv[i] * spd;
     }
+    // Ease the velocity toward the target (~90% in 0.15 s): starts and stops glide instead of stepping.
+    const double k = 1.0 - std::exp(-dt * 15.0);
+    for (int i = 0; i < 3; ++i) g_cam.vel[i] += (target[i] - g_cam.vel[i]) * k;
+    g_cam.x += g_cam.vel[0] * dt; g_cam.y += g_cam.vel[1] * dt; g_cam.z += g_cam.vel[2] * dt;
     CameraApply();
 }
 
@@ -2358,6 +2369,8 @@ void RunScript(const Snapshot& snap)
         return;
     }
     if (!strcmp(op, "favclick")) { RequestUiSelect("!favclick " + rest); return; }               // favclick fav|<category>: click row 1's star
+    if (!strcmp(op, "undo") || !strcmp(op, "redo")) { RequestUiSelect(std::string("!") + op); return; }   // Ctrl+Z / Ctrl+Y
+    if (!strcmp(op, "delsel")) { RequestUiSelect("!del"); return; }                              // Delete key
     if (!strcmp(op, "placeui")) { RequestUiSelect("!placeui " + rest); return; }                 // placeui <palette name>
     if (!strcmp(op, "scene")) { RequestUiSelect("!scene " + rest); return; }                     // scene save|saveas|open|new|upload|autosave [name]
     if (!strcmp(op, "expectscene")) { RequestUiSelect("!expectscene " + rest); return; }         // expectscene <name|-> <dirty 0|1>
@@ -3399,6 +3412,14 @@ void PumpImpl()
     if (!g_clientMsgFn && snap.worldReady)
         if (auto* pcCls = SDK::UObject::FindClassFast("PlayerController"))
             g_clientMsgFn = pcCls->GetFunction("PlayerController", "ClientMessage");
+    if (!g_receiveTickFn && snap.worldReady)
+        if (auto* ac = SDK::UObject::FindClassFast("Actor")) g_receiveTickFn = ac->GetFunction("Actor", "ReceiveTick");
+    if (!g_timeSecondsFn && snap.worldReady)
+        if (auto* gs = SDK::UObject::FindClassFast("GameplayStatics")) g_timeSecondsFn = gs->GetFunction("GameplayStatics", "GetTimeSeconds");
+    {
+        static bool s_said = false;
+        if (!s_said && snap.worldReady) { s_said = true; Log("[cam] frame clock fns: ReceiveTick=%p GetTimeSeconds=%p", (void*)g_receiveTickFn, (void*)g_timeSecondsFn); }
+    }
     if (!g_setQuestsFn && snap.worldReady)
         if (auto* qc = SDK::UObject::FindClassFast("A2PlayerQuestComponent"))
         {
@@ -3733,16 +3754,42 @@ void __fastcall PE_Hook(void* ctx, void* fn, void* parms)
     GlyphFix_PeTick();   // the Rift build's parkour glyph fix shares this hook (see glyphfix.cpp)
 #endif
 
-    // The editor camera moves every frame (well, at most 240 times a second), not at the pump's 4 Hz.
+    // The editor camera moves exactly ONCE PER GAME FRAME, before the game computes the view: on the first
+    // actor tick (ReceiveTick -- tick groups run before the camera manager updates) whose world time is new,
+    // by that frame's world delta. It used to run on whatever ProcessEvent came along after a 4 ms timer:
+    // some frames it moved after the view was already taken (drawn a frame late), some frames twice, and dt
+    // came from those random call times -- the jitter. The timer stays as a fallback (paused world, no ticks).
     if (Cam().active)
     {
-        static LARGE_INTEGER s_last{}, s_freq{};
+        static LARGE_INTEGER s_last{}, s_freq{}, s_frameTick{}, s_check{};
+        static double s_worldT = -1.0;
         LARGE_INTEGER t;
         QueryPerformanceCounter(&t);
         if (!s_freq.QuadPart) QueryPerformanceFrequency(&s_freq);
-        if (t.QuadPart - s_last.QuadPart >= s_freq.QuadPart / 240)
+        static int s_rtSeen = 0;
+        if (fn && g_receiveTickFn && static_cast<SDK::UObject*>(fn)->Name.ComparisonIndex == g_receiveTickFn->Name.ComparisonIndex && ++s_rtSeen == 1) Log("[cam] first ReceiveTick seen (timeFn=%p pc=%p)", (void*)g_timeSecondsFn, (void*)g_pc);
+        if (fn && g_receiveTickFn && static_cast<SDK::UObject*>(fn)->Name.ComparisonIndex == g_receiveTickFn->Name.ComparisonIndex && g_timeSecondsFn && g_pc && t.QuadPart - s_check.QuadPart >= s_freq.QuadPart / 2000)
         {
-            s_last = t;
+            s_check = t;                                   // at most one world-time read per 0.5 ms
+            SDK::Params::GameplayStatics_GetTimeSeconds ts{};
+            ts.WorldContextObject = g_pc;
+            const auto saved = g_timeSecondsFn->FunctionFlags;
+            g_timeSecondsFn->FunctionFlags |= 0x400;
+            const bool ok = SafePE(static_cast<SDK::UClass*>(g_timeSecondsFn->Outer)->ClassDefaultObject, g_timeSecondsFn, &ts);
+            g_timeSecondsFn->FunctionFlags = saved;
+            if (ok && ts.ReturnValue != s_worldT)
+            {
+                const double dt = s_worldT < 0.0 || ts.ReturnValue < s_worldT ? 0.0 : ts.ReturnValue - s_worldT;
+                s_worldT = ts.ReturnValue;
+                s_frameTick = s_last = t;
+                static bool s_said = false;
+                if (!s_said) { s_said = true; Log("[cam] frame clock: moving once per game frame (world dt %.4f)", dt); }
+                __try { CameraTick(dt); } __except (EXCEPTION_EXECUTE_HANDLER) { Cam().active = false; Log("[cam] tick faulted - camera released"); }
+            }
+        }
+        if (t.QuadPart - s_frameTick.QuadPart > s_freq.QuadPart / 10 && t.QuadPart - s_last.QuadPart >= s_freq.QuadPart / 240)
+        {
+            s_last = t;                                    // no frame clock for 100 ms: the old timed path
             __try { CameraTick(); } __except (EXCEPTION_EXECUTE_HANDLER) { Cam().active = false; Log("[cam] tick faulted - camera released"); }
         }
     }

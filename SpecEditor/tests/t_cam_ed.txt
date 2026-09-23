@@ -1,0 +1,4 @@
+log T-CAM start
+enter
+wait 8
+log T-CAM done

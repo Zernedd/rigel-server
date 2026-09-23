@@ -533,6 +533,40 @@ HRESULT __stdcall Hook_Present(IDXGISwapChain3* sc, UINT interval, UINT flags)
     DrawEditorUI();
     ImGui::Render();
 
+    // ImGui lays out in the window's client pixels, but the game draws into its back buffer, which Windows
+    // then stretches onto the window. In fullscreen those differ whenever the game's resolution isn't the
+    // window's (or the process is DPI-scaled): the overlay landed in the wrong place -- outlines shifted
+    // toward the top-left, by more the further from the corner. Scale what ImGui drew into back-buffer
+    // pixels so it is stretched along with the game's image.
+    {
+        DXGI_SWAP_CHAIN_DESC scd{};
+        ImDrawData* dd = ImGui::GetDrawData();
+        if (dd && dd->DisplaySize.x > 0 && dd->DisplaySize.y > 0 && SUCCEEDED(sc->GetDesc(&scd)))
+        {
+            const float bw = static_cast<float>(scd.BufferDesc.Width), bh = static_cast<float>(scd.BufferDesc.Height);
+            const float sx = bw / dd->DisplaySize.x, sy = bh / dd->DisplaySize.y;
+            static float s_loggedX = 1.0f, s_loggedY = 1.0f;
+            if (std::fabs(sx - s_loggedX) > 0.001f || std::fabs(sy - s_loggedY) > 0.001f)
+            {
+                Log("[render] overlay %.0fx%.0f vs back buffer %.0fx%.0f: scaling the overlay by %.3f x %.3f",
+                    dd->DisplaySize.x, dd->DisplaySize.y, bw, bh, sx, sy);
+                s_loggedX = sx; s_loggedY = sy;
+            }
+            if (std::fabs(sx - 1.0f) > 0.001f || std::fabs(sy - 1.0f) > 0.001f)
+            {
+                for (int n = 0; n < dd->CmdListsCount; ++n)
+                {
+                    ImDrawList* cl = dd->CmdLists[n];
+                    for (ImDrawVert& v : cl->VtxBuffer) { v.pos.x *= sx; v.pos.y *= sy; }
+                    for (ImDrawCmd& c : cl->CmdBuffer)
+                        c.ClipRect = ImVec4(c.ClipRect.x * sx, c.ClipRect.y * sy, c.ClipRect.z * sx, c.ClipRect.w * sy);
+                }
+                dd->DisplayPos = ImVec2(dd->DisplayPos.x * sx, dd->DisplayPos.y * sy);
+                dd->DisplaySize = ImVec2(bw, bh);
+            }
+        }
+    }
+
     const UINT idx = sc->GetCurrentBackBufferIndex();
     if (idx < g_frames.size() && g_frames[idx].allocator && g_frames[idx].backbuffer)
     {
