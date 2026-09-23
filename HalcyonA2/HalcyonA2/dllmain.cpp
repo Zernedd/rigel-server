@@ -6074,7 +6074,12 @@ static void PumpBallOverlaps()
                 const double ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)qpf.QuadPart;
                 if (ms > 8.0 && benchable && benched->size() < 256)
                 {
-                    (*benched)[obj] = now + 30000;
+                    // Repeat offenders sit out longer: 30 s, 2 min, then 10 min (prod showed the same heavy
+                    // colliders coming back every 30 s with a fresh 40-50 ms stall each time).
+                    static std::unordered_map<SDK::UObject*, int> s_strikes;
+                    int& k = s_strikes[obj];
+                    if (k < 3) ++k;
+                    (*benched)[obj] = now + (k == 1 ? 30000ull : k == 2 ? 120000ull : 600000ull);
                     static int s_logged = 0;
                     if (s_logged < 40) { ++s_logged; HxLog("[HalcyonA2][OVERLAPS] %.1f ms for one item -- benched 30 s\n", ms); }
                 }
