@@ -1340,11 +1340,14 @@ void RefreshTransforms()
 //  * the server gets at most 30 updates a second, plus the final one on release.
 void DragTick()
 {
+    // A drag is the gizmo's object plus, for a Ctrl+click selection, the rest of the group. Every member is
+    // moved here each frame; the server hears about them at a capped rate. It takes at most 60 editor
+    // commands a second and each move costs it ~1.5 ms of game thread, so a group's updates share one
+    // ~25/s budget (round-robin), and the release always sends every member's final place.
     static uint32_t    s_sentSeq = 0;
     static ULONGLONG   s_lastSend = 0, s_holdUntil = 0;
-    static std::string s_handle;
-    static Vec3        s_loc, s_scale{ 1, 1, 1 };
-    static Rot         s_rot;
+    static std::vector<LiveDrag::Member> s_all;       // [0] = the gizmo's object
+    static size_t      s_next = 0;                    // round-robin position while dragging
     static bool        s_active = false;
 
     uint32_t seq;
@@ -1354,27 +1357,41 @@ void DragTick()
         seq = d.seq;
         if (seq != s_sentSeq || d.active)
         {
-            s_handle = d.handle; s_loc = d.loc; s_rot = d.rot; s_scale = d.scale; s_active = d.active;
+            s_all.clear();
+            s_all.push_back({ d.handle, d.loc, d.scale, d.rot });
+            for (const auto& m : d.group) s_all.push_back(m);
+            s_active = d.active;
         }
     }
     const ULONGLONG now = GetTickCount64();
-    if (s_handle.empty()) return;
+    if (s_all.empty() || s_all[0].handle.empty()) return;
     if (s_active) s_holdUntil = now + 1200;
 
-    if (seq != s_sentSeq && (!s_active || now - s_lastSend >= 33))
+    auto send = [&](const LiveDrag::Member& m) {
+        const std::string id = IdentFor(m.handle);
+        if (id.empty()) return;
+        SendToServer("SE|XFORM|" + id + "|" + Fmt3(m.loc) + "|" + Fmt3(m.rot) + "|" + Fmt3(m.scale));
+        NoteCommanded(m.handle, m.loc);
+    };
+    if (seq != s_sentSeq)
     {
-        const std::string id = IdentFor(s_handle);
-        if (!id.empty())
+        if (!s_active)                                                   // released: everyone's final place
         {
-            SendToServer("SE|XFORM|" + id + "|" + Fmt3(s_loc) + "|" + Fmt3(s_rot) + "|" + Fmt3(s_scale));
-            NoteCommanded(s_handle, s_loc);
+            for (const auto& m : s_all) send(m);
+            s_sentSeq = seq;
+            s_lastSend = now;
+            s_holdUntil = now + 1200;
         }
-        s_sentSeq = seq;
-        s_lastSend = now;
-        if (!s_active) s_holdUntil = now + 1200;
+        else if (now - s_lastSend >= (s_all.size() > 1 ? 40u : 33u))
+        {
+            if (s_next >= s_all.size()) s_next = 0;
+            send(s_all[s_next++]);
+            if (s_all.size() == 1 || s_next >= s_all.size()) s_sentSeq = seq;   // a full round went out
+            s_lastSend = now;
+        }
     }
-    if (now < s_holdUntil) PredictTransform(s_handle, s_loc, s_rot, s_scale);
-    else if (!s_active) s_handle.clear();
+    if (now < s_holdUntil) { for (const auto& m : s_all) PredictTransform(m.handle, m.loc, m.rot, m.scale); }
+    else if (!s_active) { s_all.clear(); s_next = 0; }
 }
 
 void* CurrentWorld()
@@ -1906,6 +1923,14 @@ void RunScript(const Snapshot& snap)
         Log("[script] camto (%.0f,%.0f,%.0f)", x, y, z);
         return;
     }
+    if (!strcmp(op, "dupsel")) { RequestUiSelect("!dup"); Log("[script] dupsel"); return; }       // Ctrl+D
+    if (!strcmp(op, "selinfo")) { RequestUiSelect("!sel"); return; }                            // log the selection
+    if (!strcmp(op, "gmove"))                 // gmove dx dy dz -- move the whole selection with the gizmo's release
+    {
+        RequestUiSelect("!gmove " + rest);
+        Log("[script] gmove %s", rest.c_str());
+        return;
+    }
     if (!strcmp(op, "sbadd"))                 // sbadd <UniqueID> -- LOCAL TEST: sandbox-system placement in front of us
     {
         const double d2r = 3.14159265358979 / 180.0;
@@ -2333,6 +2358,12 @@ void RunScript(const Snapshot& snap)
         std::string nm = rest;
         if (nm.find(".luau") == std::string::npos) nm += ".luau";
         Command c{ CmdType::LuauRemove }; c.str = o->handle; c.str2 = nm; State().Push(c);
+        return;
+    }
+    if (!strcmp(op, "selectadd"))             // selectadd -- Ctrl+click the last object (toggle it in the selection)
+    {
+        RequestUiSelect("+" + o->handle);
+        Log("[script] selectadd %s", o->handle.c_str());
         return;
     }
     if (!strcmp(op, "select"))                // select -- the UI selects the last object, as a click would

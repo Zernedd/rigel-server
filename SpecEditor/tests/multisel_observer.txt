@@ -1,0 +1,8 @@
+log MS-OBS start
+enter
+wait 70
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28325
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2660 -28325
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -49 2060 -28325
+vis LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -49 2660 -28325
+log MS-OBS done

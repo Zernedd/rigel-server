@@ -192,6 +192,9 @@ struct LiveDrag
     Vec3        loc, scale{ 1, 1, 1 };
     Rot         rot;
     uint32_t    seq = 0;            // bumped on every change, and once more on release
+    // The rest of a Ctrl+click selection, carried along with `handle` (their targets, not deltas).
+    struct Member { std::string handle; Vec3 loc, scale{ 1, 1, 1 }; Rot rot; };
+    std::vector<Member> group;
 };
 LiveDrag& Drag();
 

@@ -34,6 +34,8 @@ char g_paletteFilter[96] = {};
 char g_outlinerFilter[96] = {};
 std::string g_selected;          // handle
 std::vector<std::string> g_multiSel;   // Ctrl+click extras, besides g_selected (which keeps the gizmo and Details)
+struct MultiKnown { std::string cls; Vec3 at; double lostAt = -1.0; };
+std::unordered_map<std::string, MultiKnown> g_multiKnown;   // extras' class + last place (to re-find a rebuilt one)
 int  g_activeTab = 0;            // 0 details, 1 quests
 
 bool IsMultiSel(const std::string& h)
@@ -219,6 +221,10 @@ ImVec2 g_rotTan;                // Rotate: screen direction of a positive turn a
 Vec3   g_pendLoc, g_pendScale;
 Rot    g_pendRot;
 std::string g_dragHandle;
+// A Ctrl+click selection moves as one, like Unity in Pivot mode: the gizmo's object is the pivot, and the
+// others keep their offset from it -- shifted by a move, orbited and turned by a rotate, spread by a scale.
+std::vector<LiveDrag::Member> g_dragGroupStart, g_dragGroup;
+double g_groupT = 0.0, g_groupF = 1.0;   // this drag's rotate angle (radians) / scale factor so far
 std::string g_dragPath;         // Content Browser tile being dragged into the viewport
 
 Vec3 Cross(const Vec3& a, const Vec3& b) { return { a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x }; }
@@ -273,6 +279,8 @@ void WriteDrag(bool active)
     d.active = active;
     d.handle = g_dragHandle;
     d.loc = g_pendLoc; d.rot = g_pendRot; d.scale = g_pendScale;
+    d.group = g_dragGroup;
+    for (const auto& m : g_dragGroup) { auto k = g_multiKnown.find(m.handle); if (k != g_multiKnown.end()) k->second.at = m.loc; }
     ++d.seq;
 }
 
@@ -380,6 +388,12 @@ void DrawGizmoOverlay(const Snapshot& snap, const SceneObject* sel)
         g_dragAxisWorld  = ax[hover];
         g_dragHandle     = sel->handle;
         g_pendLoc = sel->location; g_pendRot = sel->rotation; g_pendScale = sel->scale;
+        g_dragGroupStart.clear();
+        for (const auto& o : snap.objects)
+            if (o.handle != sel->handle && !o.lockedByOther && IsMultiSel(o.handle))
+                g_dragGroupStart.push_back({ o.handle, o.location, o.scale, o.rotation });
+        g_dragGroup = g_dragGroupStart;
+        g_groupT = 0.0; g_groupF = 1.0;
         g_dragAngPrev = std::atan2(mouse.y - c.y, mouse.x - c.x);
         g_dragAngSum  = 0.0;
         g_rotTangent  = false;
@@ -447,6 +461,7 @@ void DrawGizmoOverlay(const Snapshot& snap, const SceneObject* sel)
             Vec3 x0, y0, z0;
             RotAxes(g_dragStartRot, x0, y0, z0);
             const double t = deg * 3.14159265358979 / 180.0;
+            g_groupT = t;
             rot = RotFromAxes(RotateAbout(x0, g_dragAxisWorld, t), RotateAbout(y0, g_dragAxisWorld, t),
                               RotateAbout(z0, g_dragAxisWorld, t));
             char a[32];
@@ -460,6 +475,7 @@ void DrawGizmoOverlay(const Snapshot& snap, const SceneObject* sel)
             const double along = len > 1.0f
                 ? ((mouse.x - g_dragStartMouse.x) * dir.x + (mouse.y - g_dragStartMouse.y) * dir.y) / len : 0.0;
             const double f = (std::max)(0.05, 1.0 + along / L);
+            g_groupF = f;
             if (g_dragAxis == 0) scale.x = (std::max)(0.01, g_dragStartScale.x * f);
             if (g_dragAxis == 1) scale.y = (std::max)(0.01, g_dragStartScale.y * f);
             if (g_dragAxis == 2) scale.z = (std::max)(0.01, g_dragStartScale.z * f);
@@ -468,6 +484,29 @@ void DrawGizmoOverlay(const Snapshot& snap, const SceneObject* sel)
                              rot.pitch != g_pendRot.pitch || rot.yaw != g_pendRot.yaw || rot.roll != g_pendRot.roll ||
                              scale.x != g_pendScale.x || scale.y != g_pendScale.y || scale.z != g_pendScale.z;
         g_pendLoc = loc; g_pendRot = rot; g_pendScale = scale;
+        const Vec3 pivot = g_dragStartLoc, a = g_dragAxisWorld;
+        for (size_t i = 0; i < g_dragGroupStart.size() && i < g_dragGroup.size(); ++i)
+        {
+            const LiveDrag::Member& m0 = g_dragGroupStart[i];
+            LiveDrag::Member& m = g_dragGroup[i];
+            const Vec3 d = Sub(m0.loc, pivot);
+            if (g_gizmo == GizmoMode::Translate) m.loc = Add(m0.loc, Sub(loc, g_dragStartLoc));
+            else if (g_gizmo == GizmoMode::Rotate)
+            {
+                m.loc = Add(pivot, RotateAbout(d, a, g_groupT));
+                Vec3 x0, y0, z0;
+                RotAxes(m0.rot, x0, y0, z0);
+                m.rot = RotFromAxes(RotateAbout(x0, a, g_groupT), RotateAbout(y0, a, g_groupT), RotateAbout(z0, a, g_groupT));
+            }
+            else
+            {
+                m.loc = Add(Add(pivot, d), Mul(a, (g_groupF - 1.0) * Dot(d, a)));
+                m.scale = m0.scale;
+                if (g_dragAxis == 0) m.scale.x = (std::max)(0.01, m0.scale.x * g_groupF);
+                if (g_dragAxis == 1) m.scale.y = (std::max)(0.01, m0.scale.y * g_groupF);
+                if (g_dragAxis == 2) m.scale.z = (std::max)(0.01, m0.scale.z * g_groupF);
+            }
+        }
         if (changed) WriteDrag(true);
     }
 
@@ -490,6 +529,21 @@ void DrawGizmoOverlay(const Snapshot& snap, const SceneObject* sel)
             dl->AddCircleFilled(ends[i], 7.0f, col);
     }
     dl->AddCircleFilled(c, 4.0f, IM_COL32(230, 230, 230, 255));
+}
+
+// Test hook (script `gmove`): move the whole selection by dv through the gizmo's own release path.
+void UiGroupMove(const Snapshot& snap, const Vec3& dv)
+{
+    const SceneObject* sel = nullptr;
+    for (const auto& o : snap.objects) if (o.handle == g_selected) sel = &o;
+    if (!sel) { Log("[ui] FAIL gmove: nothing selected"); return; }
+    g_dragHandle = sel->handle;
+    g_pendLoc = Add(sel->location, dv); g_pendRot = sel->rotation; g_pendScale = sel->scale;
+    g_dragGroup.clear();
+    for (const auto& o : snap.objects)
+        if (o.handle != sel->handle && IsMultiSel(o.handle)) g_dragGroup.push_back({ o.handle, Add(o.location, dv), o.scale, o.rotation });
+    WriteDrag(false);
+    Log("[ui] group move: %zu object(s) by (%.0f,%.0f,%.0f)", 1 + g_dragGroup.size(), dv.x, dv.y, dv.z);
 }
 
 // ── clicking objects in the viewport ─────────────────────────────────────────────────────────
@@ -548,6 +602,8 @@ void DrawViewportMarkers(const Snapshot& snap)
             if (!isSel && &o != hovered) continue;
             Vec3 ctr = Add(o.location, o.boundsOff);
             if (isSel && g_dragAxis >= 0 && g_dragHandle == o.handle) ctr = Add(g_pendLoc, o.boundsOff);
+            if (isSel && g_dragAxis >= 0 && g_dragHandle != o.handle)
+                for (const auto& m : g_dragGroup) if (m.handle == o.handle) ctr = Add(m.loc, o.boundsOff);
             DrawBox(dl, v, ctr, PickExtent(o),
                     isSel ? IM_COL32(255, 160, 40, 230) : o.lockedByOther ? IM_COL32(220, 120, 60, 150) : IM_COL32(230, 230, 230, 110),
                     isSel ? 2.0f : 1.2f);
@@ -582,7 +638,7 @@ void DrawViewportMarkers(const Snapshot& snap)
     }
     if (!canPick || !ImGui::IsMouseClicked(ImGuiMouseButton_Left)) return;
     if (hovered && SlotPickTake(hovered->handle)) return;
-    const bool ctrl = ImGui::GetIO().KeyCtrl;
+    const bool ctrl = ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeyShift;   // Unity: Ctrl or Shift toggles
     if (hovered)
     {
         if (hovered->lockedByOther) return;
@@ -709,25 +765,74 @@ void SpawnAt(const PaletteItem& it, const Vec3& loc, double yaw)
     g_recent.insert(g_recent.begin(), it.path);
     if (g_recent.size() > 10) g_recent.resize(10);
 }
-// A duplicate is the same object 1 m along X: its whole rotation and its size come with it (the spawn
-// used to carry only the yaw, so a tilted or resized piece duplicated flat and at 1x).
-static void DuplicateSelection(const Snapshot& snap, const SceneObject& sel)
+// Duplicate works as in Unity: the copy lands where the original is -- same rotation, same size -- and the
+// copies become the selection, so the gizmo drags them straight off the originals. (1 cm along X, not
+// exactly on top: the server tells objects apart by class + position, and a perfect overlap is a coin toss.)
+struct PendingDup { std::string cls; Vec3 at; bool primary = false; std::string found; };
+static std::vector<PendingDup>  g_dupPending;
+static std::vector<std::string> g_dupBefore;     // handles that existed when Duplicate was pressed
+static double                   g_dupAt = -1.0;
+static bool DuplicateSelection(const Snapshot& snap, const SceneObject& sel)
 {
     const PaletteItem* it = FindItem(snap, sel.className);
-    if (!it) return;
-    if (!it->blocked.empty()) { Notes().Set(PrettyName(it->name) + ": " + it->blocked); return; }
+    if (!it) return false;
+    if (!it->blocked.empty()) { Notes().Set(PrettyName(it->name) + ": " + it->blocked); return false; }
     Command c{ CmdType::SpawnItem };
     c.str   = it->path;
-    c.loc   = Add(sel.location, Vec3{ 100, 0, 0 });
+    c.loc   = Add(sel.location, Vec3{ 1, 0, 0 });
     c.rot   = sel.rotation;
     c.scale = sel.scale;
     State().Push(c);
+    return true;
 }
 // Ctrl+D / Edit > Duplicate: every selected object (Ctrl+click several to duplicate them together).
 static void DuplicateSelected(const Snapshot& snap)
 {
+    g_dupPending.clear();
+    g_dupBefore.clear();
+    for (const auto& o : snap.objects) g_dupBefore.push_back(o.handle);
     for (const auto& o : snap.objects)
-        if (o.handle == g_selected || IsMultiSel(o.handle)) DuplicateSelection(snap, o);
+        if ((o.handle == g_selected || IsMultiSel(o.handle)) && DuplicateSelection(snap, o))
+            g_dupPending.push_back({ o.className, Add(o.location, Vec3{ 1, 0, 0 }), o.handle == g_selected, "" });
+    g_dupAt = ImGui::GetTime();
+}
+// Once the copies show up, select them (the one made from the gizmo's object gets the gizmo).
+static void DupSelectTick(const Snapshot& snap)
+{
+    if (g_dupPending.empty()) return;
+    bool all = true;
+    for (auto& pd : g_dupPending)
+    {
+        if (!pd.found.empty()) continue;
+        for (const auto& o : snap.objects)
+        {
+            if (o.className != pd.cls) continue;
+            const Vec3 d = Sub(o.location, pd.at);
+            if (Dot(d, d) > 5.0 * 5.0) continue;
+            if (std::find(g_dupBefore.begin(), g_dupBefore.end(), o.handle) != g_dupBefore.end()) continue;
+            bool taken = false;
+            for (const auto& q : g_dupPending) if (q.found == o.handle) taken = true;
+            if (taken) continue;
+            pd.found = o.handle;
+            break;
+        }
+        if (pd.found.empty()) all = false;
+    }
+    if (!all && ImGui::GetTime() - g_dupAt < 8.0) return;
+    std::string primary;
+    std::vector<std::string> rest;
+    for (const auto& pd : g_dupPending)
+    {
+        if (pd.found.empty()) continue;
+        if (pd.primary && primary.empty()) primary = pd.found; else rest.push_back(pd.found);
+    }
+    if (primary.empty() && !rest.empty()) { primary = rest.front(); rest.erase(rest.begin()); }
+    g_dupPending.clear();
+    if (primary.empty()) return;
+    ClearSelection();
+    g_selected = primary;
+    Command sc{ CmdType::SelectObject }; sc.str = primary; State().Push(sc);
+    g_multiSel = rest;
 }
 // Place along a ray, ON the first surface it hits (the game thread line-traces the level), falling back to
 // `fallback` units down the ray over empty space. Grid snap applies in X/Y so it stays on the surface.
@@ -838,7 +943,7 @@ void DrawMainMenu(const Snapshot& snap, const SceneObject* sel)
         ImGui::BulletText("Q W E R: select / move / rotate / scale");
         ImGui::BulletText("Click a marker to select, drag a gizmo handle");
         ImGui::BulletText("Drag an asset into the viewport: it lands on the surface");
-        ImGui::BulletText("Ctrl+click adds to the selection; Ctrl+D duplicates it, Delete removes it, Esc deselects");
+        ImGui::BulletText("Ctrl+click adds to the selection (the gizmo moves it all); Ctrl+D duplicates in place and selects the copies");
         ImGui::BulletText("F12 hides the editor and returns your view");
         ImGui::EndMenu();
     }
@@ -1071,7 +1176,7 @@ void DrawOutlinerPanel(const Snapshot& snap, ImVec2 pos, ImVec2 size)
                                   ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick, ImVec2(0, 18)) &&
                 !o.lockedByOther)
             {
-                if (ImGui::GetIO().KeyCtrl && !g_slotPick.on) ToggleMultiSel(o.handle);
+                if ((ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeyShift) && !g_slotPick.on) ToggleMultiSel(o.handle);
                 else SelectHandle(o.handle);
                 s_lastSel = o.handle;            // picked here: don't yank the scroll
                 if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
@@ -3113,18 +3218,66 @@ void DrawEditorUI()
     {
         std::string req;
         { std::lock_guard<std::mutex> lk(g_uiSelectMx); req.swap(g_uiSelectReq); }
-        if (!req.empty()) { SelectHandle(req); Log("[ui] selected %s (test script)", req.c_str()); }
+        if (req.empty()) {}
+        else if (req[0] == '+') { ToggleMultiSel(req.substr(1)); Log("[ui] selection toggle %s -> %zu selected", req.c_str() + 1, g_selected.empty() ? 0 : 1 + g_multiSel.size()); }
+        else if (req == "!dup") { DuplicateSelected(snap); Log("[ui] duplicate: %zu pending", g_dupPending.size()); }
+        else if (req.rfind("!gmove ", 0) == 0)
+        {
+            Vec3 dv{};
+            sscanf_s(req.c_str() + 7, "%lf %lf %lf", &dv.x, &dv.y, &dv.z);
+            UiGroupMove(snap, dv);
+        }
+        else if (req == "!sel")
+        {
+            Log("[ui] SELECTION primary=%s extras=%zu", g_selected.c_str(), g_multiSel.size());
+            for (const auto& o : snap.objects)
+                if (o.handle == g_selected || IsMultiSel(o.handle))
+                    Log("[ui]   %s %s at (%.0f,%.0f,%.0f) rot(%.0f,%.0f,%.0f) scale(%.2f,%.2f,%.2f)", o.handle == g_selected ? "*" : "+",
+                        o.className.c_str(), o.location.x, o.location.y, o.location.z, o.rotation.pitch, o.rotation.yaw, o.rotation.roll,
+                        o.scale.x, o.scale.y, o.scale.z);
+        }
+        else { SelectHandle(req); Log("[ui] selected %s (test script)", req.c_str()); }
     }
 
     const SceneObject* sel = nullptr;
     for (const auto& o : snap.objects)
         if (o.handle == g_selected) { sel = &o; break; }
-    if (!snap.objects.empty())                             // extras that were deleted / rebuilt drop out
-        g_multiSel.erase(std::remove_if(g_multiSel.begin(), g_multiSel.end(), [&](const std::string& h) {
-                             if (h == g_selected) return true;
-                             for (const auto& o : snap.objects) if (o.handle == h) return false;
-                             return true;
-                         }), g_multiSel.end());
+    // Extras. A moved sandbox object is rebuilt by the server as a new actor (new handle) under the same id,
+    // exactly like the gizmo's own object below: find it again -- same class, near where it was or was just
+    // sent -- instead of dropping it from the selection. Only give up on one gone for 10 s (deleted).
+    if (!snap.objects.empty())
+    {
+        const double t = ImGui::GetTime();
+        for (auto it = g_multiSel.begin(); it != g_multiSel.end();)
+        {
+            const std::string& h = *it;
+            if (h == g_selected) { it = g_multiSel.erase(it); continue; }
+            const SceneObject* here = nullptr;
+            for (const auto& o : snap.objects) if (o.handle == h) { here = &o; break; }
+            MultiKnown& k = g_multiKnown[h];
+            if (here) { k.cls = here->className; if (g_dragAxis < 0) k.at = here->location; k.lostAt = -1.0; ++it; continue; }
+            if (k.lostAt < 0.0) k.lostAt = t;
+            const SceneObject* best = nullptr;
+            double bestD = 150.0 * 150.0;
+            for (const auto& o : snap.objects)
+            {
+                if (o.className != k.cls || o.handle == g_selected || IsMultiSel(o.handle)) continue;
+                const Vec3 d = Sub(o.location, k.at);
+                if (Dot(d, d) < bestD) { bestD = Dot(d, d); best = &o; }
+            }
+            if (best)
+            {
+                MultiKnown moved = k;
+                moved.lostAt = -1.0;
+                g_multiKnown.erase(h);
+                *it = best->handle;
+                g_multiKnown[best->handle] = moved;
+                ++it;
+            }
+            else if (t - k.lostAt > 10.0) { g_multiKnown.erase(h); it = g_multiSel.erase(it); }
+            else ++it;
+        }
+    }
     // A rebuilt object (script attached / removed, slot wired) comes back as a new actor under the same id: keep
     // it selected -- find the same kind of object where the selection was -- so Details (and its Game data,
     // scripts and slots) stays up instead of going blank.
@@ -3142,7 +3295,7 @@ void DrawEditorUI()
                 double bestD = 100.0 * 100.0;
                 for (const auto& o : snap.objects)
                 {
-                    if (o.className != s_cls) continue;
+                    if (o.className != s_cls || IsMultiSel(o.handle)) continue;   // not one of the extras
                     const Vec3 d = Sub(o.location, s_at);
                     if (Dot(d, d) < bestD) { bestD = Dot(d, d); best = &o; }
                 }
@@ -3158,6 +3311,7 @@ void DrawEditorUI()
     }
 
     HandleShortcuts();
+    DupSelectTick(snap);
 
     // Details follows the selection: tell the game thread what to read properties from.
     static std::string s_inspected;
@@ -3171,7 +3325,7 @@ void DrawEditorUI()
     {
         Command c{ CmdType::FocusCamera }; c.loc = sel->location; State().Push(c);
     }
-    // Ctrl+D duplicates the selection, 1m along X, as in Unreal.
+    // Ctrl+D duplicates the selection in place and selects the copies, as in Unity.
     if (sel && ImGui::GetIO().KeyCtrl && !ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_D))
         DuplicateSelected(snap);
 
