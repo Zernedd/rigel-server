@@ -1,6 +1,19 @@
 {
+  "enableAllProjectMcpServers": true,
   "enabledMcpjsonServers": [
     "ida-pro-mcp"
   ],
-  "enableAllProjectMcpServers": true
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(dotnet:*)",
+      "Bash(pwsh:*)",
+      "Bash(powershell:*)",
+      "Bash(msbuild:*)",
+      "Bash(cd:*)"
+    ]
+  }
 }
