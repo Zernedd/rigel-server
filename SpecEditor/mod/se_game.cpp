@@ -255,6 +255,13 @@ void ClassifyPrefab(PaletteItem& it)
     for (const char* l : limited)
         if (it.name == l) it.limited = "Places and displays fine, but its behaviour (scores, panels, quest logic) comes from the "
                                        "game's sandbox scripts, which don't run for editor-placed objects.";
+    // Team changers only work inside a game mode's arena: placed free they have no arena (-1), carry blocking
+    // colliders, and their team-change logic runs on every player's machine -- it crashed players' clients.
+    std::string lo = it.name;
+    for (char& ch : lo) ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
+    if (lo.find("teamchange") != std::string::npos || lo.find("teamswitch") != std::string::npos)
+        it.blocked = "Team changers only work inside a game mode's arena. Placed with the editor they have no arena, "
+                     "block players, and crashed players' games when walked into - so the server refuses them.";
 }
 
 const std::vector<PaletteItem>& Catalogue()
@@ -2012,6 +2019,34 @@ void RunScript(const Snapshot& snap)
         for (const auto& c : counts) Log("[script]   %4d  %s", c.second, c.first.c_str());
         return;
     }
+    if (!strcmp(op, "sbaddatplayer"))         // sbaddatplayer <UniqueID> <dx> <dy> <dz> -- LOCAL TEST: a catalogue item on another player
+    {
+        char id[128] = {};
+        double dx = 0, dy = 0, dz = 0;
+        sscanf_s(rest.c_str(), "%127s %lf %lf %lf", id, (unsigned)sizeof(id), &dx, &dy, &dz);
+        auto* pawnCls = SDK::UObject::FindClassFast("VRPawn");
+        void* mine = g_pc ? *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(g_pc) + 0x340) : nullptr;
+        SDK::UObject* other = nullptr;
+        const int32_t n = SDK::UObject::GObjects->Num();
+        for (int32_t i = 0; pawnCls && i < n && !other; ++i)
+        {
+            SDK::UObject* ob = SDK::UObject::GObjects->GetByIndex(i);
+            if (!ob || ob == mine || ob->IsDefaultObject() || !ob->IsA(pawnCls) || (*(reinterpret_cast<const uint8_t*>(ob) + 0x65) & 1)) continue;
+            void* r = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(ob) + 0x1A8);
+            if (!r) continue;
+            if (reinterpret_cast<const double*>(reinterpret_cast<uintptr_t>(r) + 0x1D0 + 0x20)[2] < -50000.0) continue;
+            other = ob;
+        }
+        if (!other) { Log("[script] FAIL sbaddatplayer: no other player pawn"); return; }
+        void* root = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(other) + 0x1A8);
+        const double* t = reinterpret_cast<const double*>(reinterpret_cast<uintptr_t>(root) + 0x1D0 + 0x20);
+        char loc[96];
+        snprintf(loc, sizeof(loc), "%.1f,%.1f,%.1f", t[0] + dx, t[1] + dy, t[2] + dz);
+        g_lastSpawnLoc = { t[0] + dx, t[1] + dy, t[2] + dz };
+        SendToServer(std::string("SE|SBADD|") + id + "|" + loc);
+        Log("[script] sbaddatplayer %s at %s (on %s)", id, loc, other->GetName().c_str());
+        return;
+    }
     if (!strcmp(op, "spawnatplayer"))         // spawnatplayer <Class> <dx> <dy> <dz> -- next to another player
     {
         char cls[128] = {};
@@ -2602,6 +2637,27 @@ void RunScript(const Snapshot& snap)
         for (const auto& t : o->triggers)
             Log("[script]   %s at (%.0f,%.0f,%.0f) ext (%.0f,%.0f,%.0f)%s", t.kind == 1 ? "box" : t.kind == 2 ? "sphere" : t.kind == 3 ? "capsule" : "trigger mesh",
                 t.center.x, t.center.y, t.center.z, t.ext.x, t.ext.y, t.ext.z, t.overlap ? " overlap" : "");
+        return;
+    }
+    if (!strcmp(op, "expectaxes"))            // expectaxes -- the gizmo's local axes (from the listed rotation) match the actor's own
+    {
+        const double d2r = 3.14159265358979 / 180.0;
+        const Rot& r = o->rotation;
+        const double sp = std::sin(r.pitch * d2r), cp = std::cos(r.pitch * d2r), sy = std::sin(r.yaw * d2r), cy = std::cos(r.yaw * d2r);
+        const double sr = std::sin(r.roll * d2r), cr = std::cos(r.roll * d2r);
+        const double gx[3] = { cp * cy, cp * sy, sp }, gy[3] = { sr * sp * cy - cr * sy, sr * sp * sy + cr * cy, -sr * cp },
+                     gz[3] = { -(cr * sp * cy + sr * sy), cy * sr - cr * sp * sy, cr * cp };
+        GravVec f{}, rt{}, u{};
+        auto* a = static_cast<SDK::UObject*>(o->ptr);
+        CallNative(a, "Actor", "GetActorForwardVector", f);
+        CallNative(a, "Actor", "GetActorRightVector", rt);
+        CallNative(a, "Actor", "GetActorUpVector", u);
+        const double dx = gx[0] * f.ReturnValue.X + gx[1] * f.ReturnValue.Y + gx[2] * f.ReturnValue.Z;
+        const double dy = gy[0] * rt.ReturnValue.X + gy[1] * rt.ReturnValue.Y + gy[2] * rt.ReturnValue.Z;
+        const double dz = gz[0] * u.ReturnValue.X + gz[1] * u.ReturnValue.Y + gz[2] * u.ReturnValue.Z;
+        const bool ok = dx > 0.999 && dy > 0.999 && dz > 0.999;
+        Log("[script] %s expectaxes %s rot(%.1f,%.1f,%.1f): gizmo vs actor axes dot x=%.4f y=%.4f z=%.4f", ok ? "PASS" : "FAIL",
+            o->className.c_str(), r.pitch, r.yaw, r.roll, dx, dy, dz);
         return;
     }
     if (!strcmp(op, "markpos"))               // markpos -- remember where the last object is now (for expectdelta)

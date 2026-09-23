@@ -1,0 +1,26 @@
+# Rotation vs gizmo: for spawned pieces at plain and awkward rotations, the gizmo's local axes (built from
+# the listed rotation) must be the actor's own axes; and a palette spawn must land on the 90-degree grid.
+log T-ROT start
+enter
+wait 3
+raw SE|SPAWN|/Game/A2/Prefabs/Meshes/SkatePark/LE_SM_SP_HalfPipeWall_3x1x4_A_01.LE_SM_SP_HalfPipeWall_3x1x4_A_01_C|-450,2060,-28625|0,137,0|1,1,1
+wait 5
+pickat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625
+expectaxes
+raw SE|SPAWN|/Game/A2/Prefabs/Meshes/SkatePark/LE_SM_SP_HalfPipeWall_3x1x4_A_01.LE_SM_SP_HalfPipeWall_3x1x4_A_01_C|-450,2660,-28625|20,45,10|1,1,1
+wait 5
+pickat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2660 -28625
+expectaxes
+raw SE|SPAWN|/Game/A2/Prefabs/Meshes/SkatePark/LE_SM_SP_HalfPipeWall_3x1x4_A_01.LE_SM_SP_HalfPipeWall_3x1x4_A_01_C|-450,3260,-28625|80,30,-60|1,1,1
+wait 5
+pickat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 3260 -28625
+expectaxes
+raw SE|SPAWN|/Game/A2/Prefabs/Meshes/SkatePark/LE_SM_SP_HalfPipeWall_3x1x4_A_01.LE_SM_SP_HalfPipeWall_3x1x4_A_01_C|-450,3860,-28625|-45,-120,170|1,1,1
+wait 5
+pickat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 3860 -28625
+expectaxes
+spawn HalfPipeWall_3x1x4_A_01
+wait 6
+where
+expectaxes
+log T-ROT done

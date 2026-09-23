@@ -4732,7 +4732,8 @@ static void DriveSeater()
     HxLog("[HalcyonA2][SEATDRIVE] outline@0x358=%d pawns=%d wanted=%ld seated=%ld (reconcile gated -> physics runs)\n",
           outline, g_vrPawnCount, (long)g_reconcileWanted, (long)g_seatedPlayers);
     SafeDumpSimSeats();
-    if (!g_diag) { const LONG seatedNow = SafeCountSeatedFast(); if (seatedNow >= 0) InterlockedExchange(&g_seatedPlayers, seatedNow); }
+    // [2026-09-23] Reverted: reading the seated count off the manager changed SEATFIX's cadence on prod and
+    // driftball felt worse. Seat logic is back exactly as before; only the diagnostic census walks stay off.
     // [MI 2026-09-23] DiscCensus is a full 167k-object walk (+ a log line per player disc): 30-46 ms every
     // 5 s on prod ([PROF] SafeDriveSeater pk46). Diagnostic only -- behind -HalcyonDiag like DumpSimSeats.
     if (g_diag)
@@ -4762,10 +4763,8 @@ static void DriveSeater()
         // ever succeeds (seated>0, checked at the top-level guard), s_fails resets and normal cadence
         // returns, so a real client that CAN seat is unaffected.
         static uint64_t s_lastArm = 0;
-        const uint64_t interval = (uint64_t)3000 << (s_seatFails < 6 ? s_seatFails : 6);   // 3s,6,12,24,48,96,192->cap
-        // [MI 2026-09-23] cap 30 s -> 120 s: a burst that has failed six times in a row is not going to start
-        // working on the seventh, and every one is a hitch. A join (pawn count change) still re-arms at once.
-        const uint64_t capped   = interval > 120000 ? 120000 : interval;
+        const uint64_t interval = (uint64_t)3000 << (s_seatFails < 4 ? s_seatFails : 4);   // 3s,6,12,24,48->cap
+        const uint64_t capped   = interval > 30000 ? 30000 : interval;
         if (now - s_lastArm > capped)
         {
             s_lastArm = now;
@@ -6057,12 +6056,9 @@ static void PumpBallOverlaps()
         // geometry, editor-placed walls). Time every item; one that costs >8 ms sits out for 30 s, so it can
         // still be re-checked but can no longer stall back-to-back frames. Discs are never benched.
         SDK::UObject* const itemObj = idx < nDisc ? discs[idx] : idx < nDisc + nPhys ? phys[idx - nDisc] : goals[idx - nDisc - nPhys];
+        // [2026-09-23] Benching reverted: a benched collider (a ball's, a goal's) missed its re-check, and
+        // driftball felt worse. Every item is re-checked as before; slow items are only reported.
         static std::unordered_map<SDK::UObject*, ULONGLONG> s_benched;
-        if (idx >= nDisc && !s_benched.empty())
-        {
-            auto b = s_benched.find(itemObj);
-            if (b != s_benched.end()) { if (now < b->second) continue; s_benched.erase(b); }
-        }
         LARGE_INTEGER _itT0; QueryPerformanceCounter(&_itT0);
         struct ItemTimer
         {
@@ -6072,7 +6068,7 @@ static void PumpBallOverlaps()
             {
                 LARGE_INTEGER t1; QueryPerformanceCounter(&t1);
                 const double ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)qpf.QuadPart;
-                if (ms > 8.0 && benchable && benched->size() < 256)
+                if (ms > 8.0 && benchable && benched->size() < 256 && false)
                 {
                     // Repeat offenders sit out longer: 30 s, 2 min, then 10 min (prod showed the same heavy
                     // colliders coming back every 30 s with a fresh 40-50 ms stall each time).

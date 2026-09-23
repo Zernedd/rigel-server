@@ -1,0 +1,15 @@
+# Team changer vs players: place one ON another (non-editor) player so its trigger boxes overlap them, then
+# sweep it through them. The player's client must survive (the suite counts processes + server faults).
+log T-TC start
+enter
+wait 25
+raw SE|SBADDATPLAYER|teamChange|-400,0,0
+wait 8
+pick TeamChange
+move 400 0 0
+wait 6
+move 400 0 0
+wait 6
+move -800 0 0
+wait 10
+log T-TC done

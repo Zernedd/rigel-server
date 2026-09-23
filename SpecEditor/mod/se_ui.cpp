@@ -25,7 +25,7 @@ namespace {
 
 enum class GizmoMode { Select, Translate, Rotate, Scale };
 GizmoMode g_gizmo = GizmoMode::Translate;
-bool      g_worldSpace = true;
+bool      g_worldSpace = false;   // Local by default (Unity): the handles follow the object's own axes
 float     g_gridSnap = 10.0f;
 bool      g_snapEnabled = true;
 float     g_rotSnap = 15.0f;
@@ -1127,7 +1127,9 @@ void SpawnInFront(const Snapshot& snap, const PaletteItem& it)
 {
     Vec3 fwd, rgt, up;
     RotAxes(snap.cameraRot, fwd, rgt, up);
-    SpawnTraced(it, snap.cameraPos, fwd, 400.0, snap.cameraRot.yaw + 180.0);   // facing you
+    // Facing you, but on the world grid (nearest 90 deg): an arbitrary camera yaw left new pieces at odd angles
+    // that no gizmo axis lined up with.
+    SpawnTraced(it, snap.cameraPos, fwd, 400.0, std::round((std::round((snap.cameraRot.yaw + 180.0) / 90.0) * 90.0) / 90.0) * 90.0);
 }
 // Drag-drop: onto the surface under the cursor, like dropping an asset into Unreal's viewport.
 void SpawnUnderMouse(const Snapshot& snap, const PaletteItem& it, ImVec2 mouse)
@@ -1137,7 +1139,7 @@ void SpawnUnderMouse(const Snapshot& snap, const PaletteItem& it, ImVec2 mouse)
     Vec3 dir = Add(v.fwd, Add(Mul(v.right, (mouse.x - v.centre.x) / v.focal), Mul(v.up, -(mouse.y - v.centre.y) / v.focal)));
     const double len = std::sqrt(Dot(dir, dir));
     dir = Mul(dir, 1.0 / len);
-    SpawnTraced(it, snap.cameraPos, dir, 600.0, snap.cameraRot.yaw + 180.0);
+    SpawnTraced(it, snap.cameraPos, dir, 600.0, std::round((snap.cameraRot.yaw + 180.0) / 90.0) * 90.0);
 }
 const PaletteItem* FindItem(const Snapshot& snap, const std::string& byPathOrName)
 {

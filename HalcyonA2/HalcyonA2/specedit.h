@@ -298,6 +298,7 @@ static void SbMoveFlush();                                                      
 static void SbEditorSlotTick(ULONGLONG now);                                                // below (editor-made slot)
 static void SbEditorSlotClearTick(ULONGLONG now);                                           // below
 static std::string g_sbSpawnCls;   // the editor class of the sandbox spawn in flight (for SbOwned)
+static bool SeRefusedPrefab(const std::string& name);   // below (team changers)
 static std::string g_sbSpawnPath;  // ...and the palette path it was asked for (saved levels reload by it)
 static std::vector<std::string> g_sbPendingScripts;   // custom Luau script names for the spawn in flight
 static std::string   g_sbForceIdx;                  // respawn under this idx (a rebuilt scripted object keeps its id)
@@ -334,6 +335,13 @@ static void SeSpawn(SDK::UObject* pawn, const std::string& path, const std::stri
 
     SDK::UClass* cls = SeResolveEditorClass(path);
     if (!cls) return;
+    if (SeRefusedPrefab(cls->GetName()))
+    {
+        HxLog("[HalcyonA2][SPECEDIT] refused %s: team changers crash players outside a game mode arena\n", cls->GetName().c_str());
+        if (SDK::UObject* pc = SeCallerPC(pawn))
+            SeBroadcast("SE|NOTE|Team changers only work inside a game mode's arena - placed with the editor they crashed players, so they're refused.", pc);
+        return;
+    }
 
     // -SpecEditSandbox: a prefab the sandbox knows is placed as a real sandbox object instead, so every
     // client (vanilla Quest included) builds it with its Luau bound -- text, switches, Physical collision.
@@ -3181,8 +3189,22 @@ static SDK::UObject* SbHostGamemode(const std::string& uniqueId, const double* l
 
 // Place `uniqueId` as a real sandbox object at a world transform. Every machine -- vanilla Quest included --
 // then spawns its own copy with the prefab's Luau bound. Returns the object's idx (its NetworkGUID) or "".
+// Team changers are refused on EVERY placement path (palette, duplicate, catalogue, level loads): placed
+// outside a game mode's arena they have no arena (-1), block players, and their team-change logic -- which
+// runs on every client, Quest included -- crashed players who walked into one.
+static bool SeRefusedPrefab(const std::string& name)
+{
+    std::string lo = name;
+    for (char& ch : lo) ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
+    return lo.find("teamchange") != std::string::npos || lo.find("teamswitch") != std::string::npos;
+}
 static std::string SeSandboxSpawn(const std::string& uniqueId, const double* loc, const double* rot, const double* scl)
 {
+    if (SeRefusedPrefab(uniqueId) || SeRefusedPrefab(g_sbSpawnCls))
+    {
+        HxLog("[HalcyonA2][SPECEDIT] refused %s: team changers crash players outside a game mode arena\n", uniqueId.c_str());
+        return std::string();
+    }
     SDK::UObject* sb = SbEngine();
     SDK::UObject* lgm = (g_sbForceLgm && SeAlive(g_sbForceLgm)) ? g_sbForceLgm : SbHostGamemode(uniqueId, loc);
     if (!sb || !lgm) { HxLog("[HalcyonA2][SPECEDIT] sandbox spawn: sandbox=%p gamemode=%p\n", sb, lgm); return std::string(); }
@@ -3864,6 +3886,37 @@ static void SeSandboxAdd(const std::string& uniqueId, const std::string& locs)
 // SE|TESTQUEST|<questId>. Only with -SpecEditLocalTest. The editor client cannot see a distant player's
 // pawn (net relevancy culls it), so the server, which sees everyone, places two red coins at the first
 // real player's position and publishes a checkpoint quest over them -- exercising SeQuestTick end to end.
+// SE|SBADDATPLAYER|<UniqueID>|dx,dy,dz -- LOCAL TEST: a catalogue item on another (non-caller) player, placed
+// by the server (the editor client cannot see a distant pawn). Used to walk a player into a team changer.
+static void SeSandboxAddAtPlayer(SDK::UObject* ctx, const std::string& uniqueId, const std::string& offs)
+{
+    if (!g_seLocalTest) return;
+    SDK::UObject* callerPc = SeCallerPC(ctx);
+    double off[3] = { 0, 0, 0 };
+    SeVec(offs, off);
+    for (SDK::UObject* pc : ClassObjects(SDK::APlayerController::StaticClass()))
+    {
+        if (!pc || pc == callerPc || pc->IsDefaultObject() || (*(reinterpret_cast<const uint8_t*>(pc) + 0x65) & 0x01)) continue;
+        // Its pawn if it has one (a VR player), else where its camera is (a desktop client may be a spectator).
+        double p3[3];
+        auto* pawn = *reinterpret_cast<SDK::AActor**>(reinterpret_cast<uintptr_t>(pc) + 0x2D8);
+        if (pawn && !pawn->IsDefaultObject()) { const SDK::FVector al = pawn->K2_GetActorLocation(); p3[0] = al.X; p3[1] = al.Y; p3[2] = al.Z; }
+        else
+        {
+            void* pcm = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(pc) + 0x350);
+            if (!pcm) continue;
+            const double* l = reinterpret_cast<const double*>(reinterpret_cast<uintptr_t>(pcm) + 0x13A0 + 0x10);
+            p3[0] = l[0]; p3[1] = l[1]; p3[2] = l[2];
+        }
+        if (p3[2] < -50000.0 || (p3[0] == 0.0 && p3[1] == 0.0 && p3[2] == 0.0)) continue;
+        const double loc[3] = { p3[0] + off[0], p3[1] + off[1], p3[2] + off[2] }, rot[3] = { 0, 0, 0 }, scl[3] = { 1, 1, 1 };
+        HxLog("[HalcyonA2][SPECEDIT] SBADDATPLAYER %s on %s (%s) at (%.0f,%.0f,%.0f)\n", uniqueId.c_str(), pc->GetName().c_str(),
+              pawn ? pawn->GetName().c_str() : "no pawn", loc[0], loc[1], loc[2]);
+        SeSandboxSpawn(uniqueId, loc, rot, scl);
+        return;
+    }
+    HxLog("[HalcyonA2][SPECEDIT] SBADDATPLAYER: no other player\n");
+}
 static void SeTestQuestAtPlayer(SDK::UObject* ctx, const std::string& questId)
 {
     if (!g_seLocalTest) return;
@@ -5280,6 +5333,7 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
     else if (op == "TESTQUEST" && p.size() >= 3) SeTestQuestAtPlayer(pawn, p[2]);
     else if (op == "SANDBOX") SeSandboxProbe();
     else if (op == "SBADD"  && p.size() >= 4) SeSandboxAdd(p[2], p[3]);
+    else if (op == "SBADDATPLAYER" && p.size() >= 4) SeSandboxAddAtPlayer(pawn, p[2], p[3]);
     else if (op == "SBDESC" && p.size() >= 3) SeSandboxDescDump(p[2]);
     else if (op == "SBTEXTS" && p.size() >= 3) SeSandboxTextsAtPlayer(p[2]);
     else if (op == "SBPROBE" && p.size() >= 3) SeSandboxProbePaths(p[2]);
