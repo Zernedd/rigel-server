@@ -22,6 +22,7 @@
 
 namespace se {
 namespace {
+bool CanPlace();   // below (the open level): placing needs one
 
 enum class GizmoMode { Select, Translate, Rotate, Scale };
 GizmoMode g_gizmo = GizmoMode::Translate;
@@ -826,7 +827,7 @@ void DrawViewportMarkers(const Snapshot& snap)
             const PaletteItem* coin = FindItem(snap, "LE_BP_RedCoin_C");
             if (coin)
             {
-                Command c{ CmdType::PlaceTraced }; c.str = coin->path; c.loc = v.eye; c.dir = ScreenRay(v, mouse); State().Push(c);
+                if (CanPlace()) { Command c{ CmdType::PlaceTraced }; c.str = coin->path; c.loc = v.eye; c.dir = ScreenRay(v, mouse); State().Push(c); }
             }
         }
         return;
@@ -1025,8 +1026,10 @@ bool ContainsCi(const std::string& hay, const char* needle)
 }
 
 // ---- spawning --------------------------------------------------------------------------------
+
 void SpawnAt(const PaletteItem& it, const Vec3& loc, double yaw)
 {
+    if (!CanPlace()) return;
     if (!it.blocked.empty()) { Notes().Set(PrettyName(it.name) + ": " + it.blocked); return; }
     Command c{ CmdType::SpawnItem };
     c.str = it.path;
@@ -1063,6 +1066,7 @@ static bool DuplicateSelection(const Snapshot& snap, const SceneObject& sel)
 // Ctrl+D / Edit > Duplicate: every selected object (Ctrl+click several to duplicate them together).
 static void DuplicateSelected(const Snapshot& snap)
 {
+    if (!CanPlace()) return;
     g_dupPending.clear();
     g_dupBefore.clear();
     for (const auto& o : snap.objects) g_dupBefore.push_back(o.handle);
@@ -1113,6 +1117,7 @@ static void DupSelectTick(const Snapshot& snap)
 // `fallback` units down the ray over empty space. Grid snap applies in X/Y so it stays on the surface.
 void SpawnTraced(const PaletteItem& it, const Vec3& from, const Vec3& dir, double fallback, double yaw)
 {
+    if (!CanPlace()) return;
     if (!it.blocked.empty()) { Notes().Set(PrettyName(it.name) + ": " + it.blocked); return; }
     Command c{ CmdType::SpawnTraced };
     c.str = it.path;
@@ -1133,7 +1138,7 @@ void SpawnInFront(const Snapshot& snap, const PaletteItem& it)
     RotAxes(snap.cameraRot, fwd, rgt, up);
     // Facing you, but on the world grid (nearest 90 deg): an arbitrary camera yaw left new pieces at odd angles
     // that no gizmo axis lined up with.
-    SpawnTraced(it, snap.cameraPos, fwd, 400.0, std::round((std::round((snap.cameraRot.yaw + 180.0) / 90.0) * 90.0) / 90.0) * 90.0);
+    SpawnTraced(it, snap.cameraPos, fwd, 400.0, std::round((snap.cameraRot.yaw + 180.0) / 90.0) * 90.0);
 }
 // Drag-drop: onto the surface under the cursor, like dropping an asset into Unreal's viewport.
 void SpawnUnderMouse(const Snapshot& snap, const PaletteItem& it, ImVec2 mouse)
@@ -1227,7 +1232,26 @@ void SceneOpen(const std::string& rawName)
     g_sceneSavedAt = ImGui::GetTime();
     Log("[scene] open '%s' (%zu bytes)", name.c_str(), text.size());
 }
-void SceneNew() { SceneClose(); Notes().Set("New level: place things, then Ctrl+S to save it."); }
+bool g_saveAsIsNew = false;                  // the name prompt is for New Level (title/wording)
+bool g_needLevelAsk = false;                 // "open a level first" prompt pending
+bool g_placeBypass = false;                  // test scripts place without a level
+// Editors build INSIDE a level (a project): nothing can be placed until one is open, so every piece
+// belongs to a file that can be saved, closed and uploaded -- no stray editor work left on the station.
+bool CanPlace()
+{
+    if (!g_sceneName.empty() || g_placeBypass) return true;
+    g_needLevelAsk = true;
+    return false;
+}
+// New Level: close the open one (saved first if it has changes), then name the new one -- it exists
+// (as an empty .a2level) from the moment it is named, so placing works straight away.
+void SceneNew()
+{
+    SceneClose();
+    g_saveAsIsNew = true;
+    g_saveAsOpen = true;
+    g_saveAsBuf[0] = 0;
+}
 std::string g_lvDeleteAsk;                   // a level waiting for "Delete?" confirmation
 // Deletes Documents\RigelLevels\<name>.a2level to the Recycle Bin. The open level is closed first, without
 // saving (saving would write the file straight back).
@@ -1267,6 +1291,16 @@ void SceneSaveOrAsk()
 // Every frame: autosave, and the Save As prompt.
 void SceneTick(const Snapshot& snap)
 {
+    // Tell the server which level is open (on change, and every 30 s in case it restarted): what this
+    // editor places is that level's from the start.
+    static std::string s_sentScene = "\x01";
+    static double s_sentAt = -100.0;
+    if (snap.inEditor && (s_sentScene != g_sceneName || ImGui::GetTime() - s_sentAt > 30.0))
+    {
+        Command c{ CmdType::SendRaw }; c.str = "SE|LVSCENE|" + g_sceneName; State().Push(c);
+        s_sentScene = g_sceneName;
+        s_sentAt = ImGui::GetTime();
+    }
     static double dirtyAt = 0.0;               // autosave N seconds after the first unsaved edit, not after the last save
     static bool wasDirty = false;
     if (g_sceneDirty && !wasDirty) dirtyAt = ImGui::GetTime();
@@ -1274,6 +1308,18 @@ void SceneTick(const Snapshot& snap)
     if (snap.inEditor && !g_sceneName.empty() && g_sceneDirty && ImGui::GetTime() - dirtyAt > g_autosaveSec)
         SceneSave(g_sceneName, true);
     if (g_saveAsOpen) { ImGui::OpenPopup("Save Level As"); g_saveAsOpen = false; }
+    if (g_needLevelAsk) { ImGui::OpenPopup("No Level Open"); g_needLevelAsk = false; }
+    if (ImGui::BeginPopupModal("No Level Open", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        ImGui::TextUnformatted("Open or create a level before placing objects.");
+        ImGui::TextDisabled("Everything you place belongs to the open level: Ctrl+S saves it,\nFile > Close Level removes it, Upload puts it on the server.");
+        if (ImGui::Button("New Level...", ImVec2(130, 0))) { ImGui::CloseCurrentPopup(); SceneNew(); }
+        ImGui::SameLine();
+        if (ImGui::Button("Open Level...", ImVec2(130, 0))) { ImGui::CloseCurrentPopup(); g_showContent = true; g_cbFolder = "*levels"; }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(90, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
     static std::string s_delName;
     if (!g_lvDeleteAsk.empty()) { s_delName = g_lvDeleteAsk; g_lvDeleteAsk.clear(); ImGui::OpenPopup("Delete Level"); }
     if (ImGui::BeginPopupModal("Delete Level", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
@@ -1288,16 +1334,21 @@ void SceneTick(const Snapshot& snap)
     }
     if (ImGui::BeginPopupModal("Save Level As", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
     {
-        ImGui::TextUnformatted("Level name (saved to Documents\\RigelLevels):");
+        ImGui::TextUnformatted(g_saveAsIsNew ? "New level name (saved to Documents\\RigelLevels):" : "Level name (saved to Documents\\RigelLevels):");
         ImGui::SetNextItemWidth(320);
         const bool enter = ImGui::InputText("##saveas", g_saveAsBuf, sizeof(g_saveAsBuf), ImGuiInputTextFlags_EnterReturnsTrue);
         if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere(-1);
         const bool ok = !SceneClean(g_saveAsBuf).empty();
         ImGui::BeginDisabled(!ok);
-        if (ImGui::Button("Save", ImVec2(120, 0)) || (enter && ok)) { SceneSave(g_saveAsBuf); ImGui::CloseCurrentPopup(); }
+        if (ImGui::Button(g_saveAsIsNew ? "Create" : "Save", ImVec2(120, 0)) || (enter && ok))
+        {
+            if (g_saveAsIsNew && !SceneReadFile(SceneClean(g_saveAsBuf)).empty())
+                Notes().Set("A level called '" + SceneClean(g_saveAsBuf) + "' already exists - open it from Levels, or pick another name.");
+            else { SceneSave(g_saveAsBuf); g_saveAsIsNew = false; ImGui::CloseCurrentPopup(); }
+        }
         ImGui::EndDisabled();
         ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+        if (ImGui::Button("Cancel", ImVec2(120, 0))) { g_saveAsIsNew = false; ImGui::CloseCurrentPopup(); }
         ImGui::EndPopup();
     }
 }
@@ -1376,8 +1427,15 @@ void DrawMainMenu(const Snapshot& snap, const SceneObject* sel)
                                             : "Level: " + g_sceneName + (g_sceneDirty ? " *" : "");
     if (snap.inEditor && g_sceneName.empty() && g_sceneDirty) lvlS += " *";
     const char* lvl = lvlS.c_str();
-    ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::CalcTextSize(lvl).x - 16);
+    const float closeW = g_sceneName.empty() ? 0.0f : ImGui::CalcTextSize("Close").x + ImGui::GetStyle().FramePadding.x * 2 + 8;
+    ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::CalcTextSize(lvl).x - 16 - closeW);
     ImGui::TextDisabled("%s", lvl);
+    if (!g_sceneName.empty())
+    {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Close##level")) SceneClose();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Close this level: it's saved if it has changes, and its objects leave the server.");
+    }
     ImGui::EndMainMenuBar();
 }
 
@@ -2116,6 +2174,7 @@ void DrawCoinRun(const Snapshot& snap, QuestDraft& q, float lw)
     ImGui::SeparatorText("2. Coins (collect all of them)");
     const PaletteItem* coinItem = FindItem(snap, "LE_BP_RedCoin_C");
     auto placeCoin = [&](const Vec3& at) {
+        if (!CanPlace()) return;
         if (!coinItem) { Notes().Set("The red coin prefab isn't in the palette, so coins can't be previewed."); return; }
         Command c{ CmdType::SpawnItem }; c.str = coinItem->path; c.loc = at; c.rot = { 0.0, 0.0, 0.0 }; State().Push(c);
         q.pendingCoins.push_back({ at, ImGui::GetTime() });
@@ -3573,7 +3632,8 @@ void DrawContentBrowser(const Snapshot& snap, ImVec2 pos, ImVec2 size)
             if (hov && ImGui::IsKeyPressed(ImGuiKey_Delete, false)) g_lvDeleteAsk = f;
             if (ImGui::BeginPopupContextItem("##lvctx"))
             {
-                if (ImGui::MenuItem("Open", nullptr, false, snap.inEditor)) SceneOpen(f);
+                if (open) { if (ImGui::MenuItem("Close", nullptr, false, snap.inEditor)) SceneClose(); }
+                else if (ImGui::MenuItem("Open", nullptr, false, snap.inEditor)) SceneOpen(f);
                 if (ImGui::MenuItem("Upload to Server", nullptr, false, snap.inEditor))
                 {
                     if (f == g_sceneName) SceneUpload();
@@ -3866,6 +3926,7 @@ void DrawEditorUI()
             else if (op == "save") SceneSaveOrAsk();
             else if (op == "open") SceneOpen(arg);
             else if (op == "new") SceneNew();
+            else if (op == "close") SceneClose();
             else if (op == "upload") SceneUpload();
             else if (op == "delete") SceneDelete(arg);
             else if (op == "autosave") g_autosaveSec = atof(arg.c_str());
@@ -3887,7 +3948,14 @@ void DrawEditorUI()
             StartSyntheticDrag(a, b, c, d);
             Log("[ui] synthetic drag (%d,%d) -> (%d,%d)", a, b, c, d);
         }
-        else if (req == "!dup") { DuplicateSelected(snap); Log("[ui] duplicate: %zu pending", g_dupPending.size()); }
+        else if (req == "!dup") { g_placeBypass = true; DuplicateSelected(snap); g_placeBypass = false; Log("[ui] duplicate: %zu pending", g_dupPending.size()); }
+        else if (req.rfind("!placeui ", 0) == 0)       // placeui <palette name>: place through the UI path (gated)
+        {
+            const PaletteItem* it = FindItem(snap, req.substr(9));
+            if (it) SpawnInFront(snap, *it);
+            Log("[ui] placeui %s -> %s (level '%s')", req.substr(9).c_str(), it ? (g_sceneName.empty() ? "REFUSED" : "placed") : "no such item",
+                g_sceneName.c_str());
+        }
         else if (req.rfind("!fav ", 0) == 0 || req.rfind("!expectfav ", 0) == 0)
         {
             const bool check = req[1] == 'e';

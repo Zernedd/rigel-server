@@ -1,0 +1,23 @@
+log T-OMNI start
+enter
+wait 3
+spawnat BP_BoostPad_Omnidirectional_C -450 2060 -28625 0
+wait 6
+expectnear BP_BoostPad_Omnidirectional_C -450 2060 -28625 1
+pickat BP_BoostPad_Omnidirectional_C -450 2060 -28625
+select
+wait 1
+move 300 0 0
+wait 5
+expectnear BP_BoostPad_Omnidirectional_C -150 2060 -28625 1
+expectnear BP_BoostPad_Omnidirectional_C -450 2060 -28625 0
+drag 0 300 0 1
+wait 5
+expectnear BP_BoostPad_Omnidirectional_C -150 2360 -28625 1
+pickat BP_BoostPad_Omnidirectional_C 1755 16790 -29000
+select
+wait 1
+move 300 0 0
+wait 5
+expectnear BP_BoostPad_Omnidirectional_C 2055 16790 -29000 1
+log T-OMNI done

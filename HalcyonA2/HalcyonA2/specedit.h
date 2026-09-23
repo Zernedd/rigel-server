@@ -310,6 +310,10 @@ static std::string g_lvLoading;    // the saved level whose content is being cre
 struct SeOwnLock { std::string owner, ownerName; bool locked = false; };
 static std::unordered_map<std::string, SeOwnLock> g_ownLocks;
 static std::string g_seCaller, g_seCallerName;
+// Each editor's open level (SE|LVSCENE): what they place belongs to it from the start, so another editor
+// saving THEIR level never sweeps these objects into the wrong file.
+static std::unordered_map<std::string, std::string> g_seCallerScene;
+static std::string SeCallerScene() { auto it = g_seCallerScene.find(g_seCaller); return it == g_seCallerScene.end() ? std::string() : it->second; }
 static void SeOwnLocksPush(SDK::UObject* onlyPc);   // below
 static void SeLvRecordPlain(SDK::AActor* a, const std::string& path);   // below (saved levels)
 static std::string SeLvIdent(SDK::AActor* a);                            // below (saved levels)
@@ -433,7 +437,15 @@ static void SeReplicateTransform(SDK::AActor* a)
     if (!a) return;
     a->SetReplicates(true);
     a->SetReplicateMovement(true);
-    if (a->RootComponent) a->RootComponent->SetIsReplicated(true);
+    if (a->RootComponent)
+    {
+        a->RootComponent->SetIsReplicated(true);
+        // Station props (the yellow omni boost pads, boost tanks) have a STATIC root: SetActorLocation silently
+        // refuses to move it, on the server and on every client applying the replicated move. Mobility is a
+        // replicated property of the (now replicated) root, so Movable here reaches every client too.
+        if (a->RootComponent->Mobility != SDK::EComponentMobility::Movable)
+            a->RootComponent->SetMobility(SDK::EComponentMobility::Movable);
+    }
 }
 
 // SE|AUDIT|<class path>: spawn the class privately (never replicated -- LE prefabs default to
@@ -4417,7 +4429,7 @@ static void SeSandboxDuplicate(SDK::UObject* pawn, const std::string& name, cons
     g_sbPendingLeaves = SbRefLeaves(keep.refs);
     g_sbForceLgm = keep.lgm && SeAlive(keep.lgm) ? keep.lgm : nullptr;   // its scripts' source lives there
     const std::string prevLoading = g_lvLoading;
-    g_lvLoading.clear();                                 // new editor work, not part of a saved level yet
+    g_lvLoading = SeCallerScene();                       // the copy belongs to the duplicating editor's open level
     g_sbSpawnCls = keep.cls; g_sbSpawnPath = keep.path;
     const std::string idx = SeSandboxSpawn(keep.uniqueId, loc, rot, scl);
     g_sbSpawnCls.clear(); g_sbSpawnPath.clear();
@@ -4660,6 +4672,7 @@ static std::string SeLvBuild(const std::string& name, int* counts, bool tag = tr
     {
         if (runObjs.count(o.idx) || o.uniqueId.empty() || o.cls.empty()) continue;
         if (o.lgm && !SeAlive(o.lgm)) continue;
+        if (tag && !o.level.empty() && o.level != name) continue;   // another level's (another editor's scene)
         if (tag) o.level = name;
         ownedIdx[o.idx] = n;
         if (SDK::AActor* a = SbActorForIdx(o.idx)) actorIdx[a] = n;
@@ -4680,6 +4693,7 @@ static std::string SeLvBuild(const std::string& name, int* counts, bool tag = tr
     for (auto& p : g_lvPlain)
     {
         if (!SeLvPlainAlive(p)) continue;
+        if (tag && !p.level.empty() && p.level != name) continue;
         if (tag) p.level = name;
         const SDK::FVector l = p.actor->K2_GetActorLocation(); const SDK::FRotator r = p.actor->K2_GetActorRotation();
         const SDK::FVector sc = p.actor->GetActorScale3D();
@@ -4697,6 +4711,7 @@ static std::string SeLvBuild(const std::string& name, int* counts, bool tag = tr
     for (auto& q : g_seAuthored)
     {
         if (q.deleted) continue;
+        if (tag && !q.level.empty() && q.level != name) continue;
         if (tag) q.level = name;
         std::string steps;
         for (SDK::AActor* a : q.checkpoints)
@@ -4711,6 +4726,7 @@ static std::string SeLvBuild(const std::string& name, int* counts, bool tag = tr
     }
     for (auto& r : g_lvRuns)
     {
+        if (tag && !r.level.empty() && r.level != name) continue;
         if (tag) r.level = name;
         char b[64];
         snprintf(b, sizeof(b), "%.0f", r.dur);
@@ -5341,14 +5357,34 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
     if (!g_camMarkers.empty()) SeCamMarkersExpire();
     if      (op == "OWNLOCK" && p.size() >= 4) SeOwnLockSet(pawn, p[2], p[3] == "1");
     else if (op == "CAMPOS" && p.size() >= 4) SeCamMarkerMove(pawn, p[2], p[3]);
-    else if (op == "SPAWN"  && p.size() >= 5) SeSpawn(pawn, p[2], p[3], p[4], p.size() >= 6 ? p[5] : std::string());
+    else if (op == "SPAWN"  && p.size() >= 5)
+    {
+        const std::string prev = g_lvLoading;
+        g_lvLoading = SeCallerScene();                   // placed into the editor's open level
+        SeSpawn(pawn, p[2], p[3], p[4], p.size() >= 6 ? p[5] : std::string());
+        g_lvLoading = prev;
+    }
+    else if (op == "LVSCENE" && p.size() >= 2)          // SE|LVSCENE|<name> ("" = no level open)
+    {
+        std::string n;
+        if (p.size() >= 3) for (char c : p[2]) if (isalnum(static_cast<unsigned char>(c)) || c == ' ' || c == '_' || c == '-') n += c;
+        std::string& cur = g_seCallerScene[g_seCaller];
+        if (cur != n) HxLog("[HalcyonA2][LEVELS] %s's open level: '%s'\n", g_seCallerName.c_str(), n.c_str());
+        cur = n;
+    }
     else if (op == "XFORM"  && p.size() >= 6) SeTransform(SeResolveIdent(p[2]), p[3], p[4], p[5]);
     else if (op == "DELETE" && p.size() >= 3) SeDelete(SeResolveIdent(p[2]));
     else if (op == "PROP"   && p.size() >= 5) SeSetProp(p[2], p[3], p[4]);
     else if (op == "AUDIT"  && p.size() >= 3) SeAudit(pawn, p[2]);
     else if (op == "TESTQUEST" && p.size() >= 3) SeTestQuestAtPlayer(pawn, p[2]);
     else if (op == "SANDBOX") SeSandboxProbe();
-    else if (op == "SBADD"  && p.size() >= 4) SeSandboxAdd(p[2], p[3]);
+    else if (op == "SBADD"  && p.size() >= 4)
+    {
+        const std::string prev = g_lvLoading;
+        g_lvLoading = SeCallerScene();
+        SeSandboxAdd(p[2], p[3]);
+        g_lvLoading = prev;
+    }
     else if (op == "SBADDATPLAYER" && p.size() >= 4) SeSandboxAddAtPlayer(pawn, p[2], p[3]);
     else if (op == "SBDESC" && p.size() >= 3) SeSandboxDescDump(p[2]);
     else if (op == "SBTEXTS" && p.size() >= 3) SeSandboxTextsAtPlayer(p[2]);

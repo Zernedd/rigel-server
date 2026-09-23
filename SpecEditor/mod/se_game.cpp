@@ -2358,6 +2358,7 @@ void RunScript(const Snapshot& snap)
         return;
     }
     if (!strcmp(op, "favclick")) { RequestUiSelect("!favclick " + rest); return; }               // favclick fav|<category>: click row 1's star
+    if (!strcmp(op, "placeui")) { RequestUiSelect("!placeui " + rest); return; }                 // placeui <palette name>
     if (!strcmp(op, "scene")) { RequestUiSelect("!scene " + rest); return; }                     // scene save|saveas|open|new|upload|autosave [name]
     if (!strcmp(op, "expectscene")) { RequestUiSelect("!expectscene " + rest); return; }         // expectscene <name|-> <dirty 0|1>
     if (!strcmp(op, "expectlvfile"))          // expectlvfile <name> 0|1 -- Documents\RigelLevels\<name>.a2level exists

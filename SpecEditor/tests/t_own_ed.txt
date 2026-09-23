@@ -1,0 +1,26 @@
+log T-OWN start
+enter
+wait 3
+expectscene - 0
+placeui LE_SM_SP_HalfPipeWall_3x1x4_A_01_C
+wait 4
+expectscene - 0
+scene saveas OwnA
+wait 4
+placeui LE_SM_SP_HalfPipeWall_3x1x4_A_01_C
+wait 4
+expectscene OwnA 1
+spawnat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625 0
+wait 20
+scene save
+wait 5
+scene close
+wait 8
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625 0
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2660 -28625 1
+scene open OwnA
+wait 12
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625 1
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2660 -28625 1
+scene delete OwnA
+log T-OWN done

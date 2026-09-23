@@ -1,0 +1,17 @@
+log T-YEL start
+enter
+wait 3
+sbadd PrimitiveCubeYellow
+wait 6
+pick CubePrimitive_Yellow
+select
+wait 1
+selinfo
+move 300 0 0
+wait 5
+expectnear CubePrimitive_Yellow 300 -2600 -27000 1
+expectnear CubePrimitive_Yellow 0 -2600 -27000 0
+drag 0 300 0 1
+wait 5
+expectnear CubePrimitive_Yellow 300 -2300 -27000 1
+log T-YEL done
