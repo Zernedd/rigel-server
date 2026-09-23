@@ -1,0 +1,4 @@
+log T-BLUC-OBS start
+enter
+wait 70
+log T-BLUC-OBS done

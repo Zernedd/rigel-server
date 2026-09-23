@@ -1,0 +1,24 @@
+log T-BLUCX start
+enter
+wait 3
+sbadd PrimitiveCubeYellow
+wait 6
+pick CubePrimitive_Yellow
+luaufile ZTestIdx
+wait 15
+log T-BLUCX idx done
+spawnat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625 0
+wait 6
+pickat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625
+luaufile ZTestHide
+wait 10
+pickat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625
+luauref ZTestHide Cube PhysicalComponent self
+wait 15
+log T-BLUCX hide done
+spawnat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2660 -28625 0
+wait 6
+pickat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2660 -28625
+luaufile ZTestName
+wait 15
+log T-BLUCX done

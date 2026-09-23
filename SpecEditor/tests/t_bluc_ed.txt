@@ -1,0 +1,12 @@
+log T-BLUC start
+enter
+wait 3
+sbadd PrimitiveCubeYellow
+wait 6
+pick CubePrimitive_Yellow
+luaufile BlockedUsernamesCube
+wait 10
+pick CubePrimitive_Yellow
+luauref BlockedUsernamesCube Cube PhysicalComponent self
+wait 30
+log T-BLUC done

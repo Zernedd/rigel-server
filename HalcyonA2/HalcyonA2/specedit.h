@@ -4139,10 +4139,143 @@ if type(EndPlay) == "function" then EndPlay = __rigelWrap("EndPlay", EndPlay) en
 if type(Tick) == "function" then Tick = __rigelWrap("Tick", Tick) end
 )LUAU";
 
+// Typed `local` declarations become the object's editor properties (the game's "External Dependencies"):
+// the component is built with one property per typed local, and the local then takes that property's value
+// (its initialiser is ignored). A type the property system can't represent -- a table type like
+// `{ [string]: boolean }`, a function type, a union -- made that build read garbage and crash, natively, on
+// the server AND on every client that built the object (joiners included). pcall can't catch that.
+// So every script is cleaned first: only the annotations that ARE properties survive (`…Component` slots,
+// number, string, boolean); any other annotation on a local is removed. Removing a type annotation never
+// changes what Luau code does, and such a local now keeps its initialiser (what the author meant anyway).
+// Strings and comments are left alone; line numbers are kept (a removed multi-line type leaves its newlines).
+static SDK::UObject* g_seLuauCtx = nullptr;   // the editor whose script is being stored (for SeLuauPutSource's note)
+static bool SeLuauTypeIsProperty(std::string t)
+{
+    while (!t.empty() && isspace(static_cast<unsigned char>(t.back()))) t.pop_back();
+    size_t a = 0; while (a < t.size() && isspace(static_cast<unsigned char>(t[a]))) ++a;
+    t = t.substr(a);
+    if (!t.empty() && t.back() == '?') t.pop_back();
+    if (t == "number" || t == "string" || t == "boolean") return true;
+    if (t.size() > 9 && t.compare(t.size() - 9, 9, "Component") == 0)
+    {
+        for (char c : t) if (!(isalnum(static_cast<unsigned char>(c)) || c == '_')) return false;
+        return true;
+    }
+    return false;
+}
+static std::string SeLuauSanitize(const std::string& src, int* stripped, std::string* where = nullptr)
+{
+    std::string out = src;
+    int n = 0;
+    auto isId = [](char c) { return isalnum(static_cast<unsigned char>(c)) || c == '_'; };
+    // [[ ... ]] / [==[ ... ]==]: returns the index just past the close, or npos when `i` doesn't open one.
+    auto longBracket = [&](size_t i) -> size_t {
+        if (i >= out.size() || out[i] != '[') return std::string::npos;
+        size_t j = i + 1, eq = 0;
+        while (j < out.size() && out[j] == '=') { ++eq; ++j; }
+        if (j >= out.size() || out[j] != '[') return std::string::npos;
+        const std::string close = "]" + std::string(eq, '=') + "]";
+        const size_t e = out.find(close, j + 1);
+        return e == std::string::npos ? out.size() : e + close.size();
+    };
+    size_t i = 0;
+    while (i < out.size())
+    {
+        const char c = out[i];
+        if (c == '-' && i + 1 < out.size() && out[i + 1] == '-')            // comment
+        {
+            const size_t lb = longBracket(i + 2);
+            if (lb != std::string::npos) { i = lb; continue; }
+            const size_t e = out.find('\n', i);
+            i = e == std::string::npos ? out.size() : e;
+            continue;
+        }
+        if (c == '"' || c == '\'' || c == '`')                              // string
+        {
+            size_t j = i + 1;
+            while (j < out.size() && out[j] != c && out[j] != '\n') { if (out[j] == '\\') ++j; ++j; }
+            i = j + 1;
+            continue;
+        }
+        if (c == '[')
+        {
+            const size_t lb = longBracket(i);
+            if (lb != std::string::npos) { i = lb; continue; }
+        }
+        // `local` as a whole word, not `local function`
+        if (c == 'l' && out.compare(i, 5, "local") == 0 && (i == 0 || !isId(out[i - 1])) && i + 5 < out.size() && !isId(out[i + 5]))
+        {
+            size_t j = i + 5;
+            for (;;)                                                        // each `name [: type]` of the statement
+            {
+                while (j < out.size() && (out[j] == ' ' || out[j] == '\t')) ++j;
+                const size_t n0 = j;
+                while (j < out.size() && isId(out[j])) ++j;
+                if (j == n0 || (j - n0 == 8 && out.compare(n0, 8, "function") == 0)) break;
+                const std::string varName = out.substr(n0, j - n0);
+                while (j < out.size() && (out[j] == ' ' || out[j] == '\t')) ++j;
+                if (j < out.size() && out[j] == '<')                        // attribute: <const> / <close>
+                {
+                    const size_t e = out.find('>', j);
+                    if (e == std::string::npos) break;
+                    j = e + 1;
+                    while (j < out.size() && (out[j] == ' ' || out[j] == '\t')) ++j;
+                }
+                if (j < out.size() && out[j] == ':')
+                {
+                    // The type runs to the first `=` / `,` / end of line at bracket depth 0.
+                    const size_t colon = j;
+                    size_t k = j + 1;
+                    int depth = 0;
+                    while (k < out.size())
+                    {
+                        const char d = out[k];
+                        if (d == '{' || d == '(' || d == '<') ++depth;
+                        else if (d == '}' || d == ')' || d == '>') { if (depth > 0) --depth; }
+                        else if (depth == 0 && (d == '=' || d == ',' || d == '\n' || d == ';')) break;
+                        else if (d == '-' && k + 1 < out.size() && out[k + 1] == '-' && depth == 0) break;
+                        ++k;
+                    }
+                    const std::string type = out.substr(colon + 1, k - colon - 1);
+                    if (!SeLuauTypeIsProperty(type))
+                    {
+                        for (size_t q = colon; q < k; ++q) if (out[q] != '\n') out[q] = ' ';   // keep the line count
+                        ++n;
+                        if (where && where->size() < 400)
+                            *where += (where->empty() ? "" : ", ") + std::string("line ") +
+                                      std::to_string(1 + std::count(out.begin(), out.begin() + static_cast<std::ptrdiff_t>(colon), '\n')) +
+                                      " (" + varName + ")";
+                    }
+                    j = k;
+                }
+                while (j < out.size() && (out[j] == ' ' || out[j] == '\t')) ++j;
+                if (j < out.size() && out[j] == ',') { ++j; continue; }
+                break;
+            }
+            i = j;
+            continue;
+        }
+        ++i;
+    }
+    if (stripped) *stripped = n;
+    return out;
+}
+
 static bool SeLuauPutSource(SDK::UObject* lgm, const std::string& name, const std::string& src0)
 {
     if (!lgm || !SeAlive(lgm)) return false;
-    const std::string src = src0.find("[Rigel] safety net") == std::string::npos ? src0 + kSeLuauGuard : src0;
+    int stripped = 0;
+    std::string where;
+    const std::string clean = SeLuauSanitize(src0, &stripped, &where);
+    if (stripped)
+    {
+        HxLog("[HalcyonA2][SPECEDIT] luau %s: removed %d type annotation(s) the property system can't build (they crash every machine): %s\n",
+              name.c_str(), stripped, where.c_str());
+        if (SDK::UObject* pc = g_seLuauCtx ? SeCallerPC(g_seLuauCtx) : nullptr)
+            SeBroadcast("SE|NOTE|" + name + ": the type on " + where + " was removed - typed locals become editor properties, "
+                        "and that type isn't one (it would crash every player). The script works the same; the variable keeps its value.", pc);
+    }
+    const std::string src = clean.find("[Rigel] safety net") == std::string::npos ? clean + kSeLuauGuard : clean;
     std::wstring w;
     if (!src.empty())
     {
@@ -4259,7 +4392,14 @@ static void SeLuauPart(const std::string& rawName, const std::string& hex)
 }
 // SE|LUAUSRC|<name> -- a script file was saved in VS Code: re-send it to every object we placed that runs
 // it (each is rebuilt to pick up the new code). Sent after the LUAUPART chunks, like SE|LUAU.
+static void SeLuauUpdateAllImpl(SDK::UObject* ctx, const std::string& rawName);
 static void SeLuauUpdateAll(SDK::UObject* ctx, const std::string& rawName)
+{
+    g_seLuauCtx = ctx;
+    SeLuauUpdateAllImpl(ctx, rawName);
+    g_seLuauCtx = nullptr;
+}
+static void SeLuauUpdateAllImpl(SDK::UObject* ctx, const std::string& rawName)
 {
     SDK::UObject* caller = SeCallerPC(ctx);
     const std::string name = SeLuauName(rawName);
@@ -4281,7 +4421,14 @@ static void SeLuauUpdateAll(SDK::UObject* ctx, const std::string& rawName)
     if (caller) SeBroadcast("SE|NOTE|" + name + " updated on " + std::to_string(n) + " object(s).", caller);
 }
 
+static void SeLuauImpl(SDK::UObject* ctx, const std::string& ident, const std::string& rawName);
 static void SeLuau(SDK::UObject* ctx, const std::string& ident, const std::string& rawName)
+{
+    g_seLuauCtx = ctx;
+    SeLuauImpl(ctx, ident, rawName);
+    g_seLuauCtx = nullptr;
+}
+static void SeLuauImpl(SDK::UObject* ctx, const std::string& ident, const std::string& rawName)
 {
     SDK::UObject* caller = SeCallerPC(ctx);
     const std::string name = SeLuauName(rawName);

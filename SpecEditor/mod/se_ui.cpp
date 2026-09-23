@@ -2749,12 +2749,136 @@ std::string LuauSyntaxError(const std::wstring& file, int* line)
     return std::string();
 }
 
+// Typed locals the game can't turn into editor properties (the same rule the server applies before it stores
+// a script -- specedit.h SeLuauSanitize): every `local name: Type` becomes a property of the object, and a
+// type like `{ [string]: boolean }` made the object's build crash natively on the server and every client.
+// Returns the offenders as "line N (name)"; strings and comments are skipped.
+struct UnsafeLocal { int line; std::string name, type; };
+std::vector<UnsafeLocal> LuauUnsafeTypedLocals(const std::string& src)
+{
+    std::vector<UnsafeLocal> out;
+    auto isId = [](char c) { return isalnum(static_cast<unsigned char>(c)) || c == '_'; };
+    auto isProperty = [](std::string t) {
+        while (!t.empty() && isspace(static_cast<unsigned char>(t.back()))) t.pop_back();
+        size_t a = 0; while (a < t.size() && isspace(static_cast<unsigned char>(t[a]))) ++a;
+        t = t.substr(a);
+        if (!t.empty() && t.back() == '?') t.pop_back();
+        if (t == "number" || t == "string" || t == "boolean") return true;
+        if (t.size() > 9 && t.compare(t.size() - 9, 9, "Component") == 0)
+        {
+            for (char c : t) if (!(isalnum(static_cast<unsigned char>(c)) || c == '_')) return false;
+            return true;
+        }
+        return false;
+    };
+    auto longBracket = [&](size_t i) -> size_t {
+        if (i >= src.size() || src[i] != '[') return std::string::npos;
+        size_t j = i + 1, eq = 0;
+        while (j < src.size() && src[j] == '=') { ++eq; ++j; }
+        if (j >= src.size() || src[j] != '[') return std::string::npos;
+        const std::string close = "]" + std::string(eq, '=') + "]";
+        const size_t e = src.find(close, j + 1);
+        return e == std::string::npos ? src.size() : e + close.size();
+    };
+    auto lineOf = [&](size_t at) { return 1 + static_cast<int>(std::count(src.begin(), src.begin() + static_cast<std::ptrdiff_t>(at), '\n')); };
+    size_t i = 0;
+    while (i < src.size())
+    {
+        const char c = src[i];
+        if (c == '-' && i + 1 < src.size() && src[i + 1] == '-')
+        {
+            const size_t lb = longBracket(i + 2);
+            if (lb != std::string::npos) { i = lb; continue; }
+            const size_t e = src.find('\n', i);
+            i = e == std::string::npos ? src.size() : e;
+            continue;
+        }
+        if (c == '"' || c == '\'' || c == '`')
+        {
+            size_t j = i + 1;
+            while (j < src.size() && src[j] != c && src[j] != '\n') { if (src[j] == '\\') ++j; ++j; }
+            i = j + 1;
+            continue;
+        }
+        if (c == '[') { const size_t lb = longBracket(i); if (lb != std::string::npos) { i = lb; continue; } }
+        if (c == 'l' && src.compare(i, 5, "local") == 0 && (i == 0 || !isId(src[i - 1])) && i + 5 < src.size() && !isId(src[i + 5]))
+        {
+            size_t j = i + 5;
+            for (;;)
+            {
+                while (j < src.size() && (src[j] == ' ' || src[j] == '\t')) ++j;
+                const size_t n0 = j;
+                while (j < src.size() && isId(src[j])) ++j;
+                if (j == n0 || (j - n0 == 8 && src.compare(n0, 8, "function") == 0)) break;
+                const std::string name = src.substr(n0, j - n0);
+                while (j < src.size() && (src[j] == ' ' || src[j] == '\t')) ++j;
+                if (j < src.size() && src[j] == '<') { const size_t e = src.find('>', j); if (e == std::string::npos) break; j = e + 1; }
+                while (j < src.size() && (src[j] == ' ' || src[j] == '\t')) ++j;
+                if (j < src.size() && src[j] == ':')
+                {
+                    const size_t colon = j;
+                    size_t k = j + 1;
+                    int depth = 0;
+                    while (k < src.size())
+                    {
+                        const char d = src[k];
+                        if (d == '{' || d == '(' || d == '<') ++depth;
+                        else if (d == '}' || d == ')' || d == '>') { if (depth > 0) --depth; }
+                        else if (depth == 0 && (d == '=' || d == ',' || d == '\n' || d == ';')) break;
+                        else if (d == '-' && k + 1 < src.size() && src[k + 1] == '-' && depth == 0) break;
+                        ++k;
+                    }
+                    std::string type = src.substr(colon + 1, k - colon - 1);
+                    if (!isProperty(type))
+                    {
+                        for (char& ch : type) if (ch == '\n' || ch == '\t') ch = ' ';
+                        out.push_back({ lineOf(colon), name, type.size() > 60 ? type.substr(0, 57) + "..." : type });
+                    }
+                    j = k;
+                }
+                while (j < src.size() && (src[j] == ' ' || src[j] == '\t')) ++j;
+                if (j < src.size() && src[j] == ',') { ++j; continue; }
+                break;
+            }
+            i = j;
+            continue;
+        }
+        ++i;
+    }
+    return out;
+}
+
 // True when the file is fine to send; otherwise explains the problem in a popup.
 bool CheckScriptFile(const std::wstring& path, const std::string& name)
 {
     int line = 0;
     const std::string err = LuauSyntaxError(path, &line);
-    if (err.empty()) return true;
+    if (err.empty())
+    {
+        // Compiles -- but a typed local the game can't build as a property would crash every player. The server
+        // removes those types itself (the script still works), so this is a heads-up, not a refusal.
+        const auto bad = LuauUnsafeTypedLocals(ReadFileUtf8(path));
+        if (!bad.empty())
+        {
+            ProblemBox::Item it;
+            it.title = name + ".luau: " + std::to_string(bad.size()) + " type(s) removed when sent (line " + std::to_string(bad[0].line) + ")";
+            std::string list;
+            for (const auto& b : bad) list += "  line " + std::to_string(b.line) + ":  local " + b.name + ":" + b.type + "\n";
+            it.text = "Every typed local at the top of a script (local Name: Type = ...) becomes a property of the object in the "
+                      "editor. Only these types can be properties: ...Component slots, number, string and boolean. Any other "
+                      "type - a table like { [string]: boolean }, a function type, a union - crashed the server and every "
+                      "player's game when the object was built.\n\n" + list +
+                      "\nThe server removes those type annotations before anyone runs the script, so it still works exactly as "
+                      "written and these variables keep their values. To silence this, drop the type yourself, e.g.\n"
+                      "  local " + bad[0].name + " = ...";
+            it.file = WideToUtf8(path);
+            it.line = bad[0].line;
+            Problems().Push(it);
+            Log("[script] %s.luau: %zu typed local(s) the game can't build as properties (first: line %d %s)", name.c_str(), bad.size(),
+                bad[0].line, bad[0].name.c_str());
+        }
+        return true;
+    }
     ProblemBox::Item it;
     it.title = "Typo in " + name + ".luau" + (line ? " (line " + std::to_string(line) + ")" : std::string()) + " - not sent";
     it.text = err + "\n\n" + ExplainLuauError(err) + "\n\nFix it and save the file. A script that's already attached is sent again automatically; otherwise click Attach again.";
