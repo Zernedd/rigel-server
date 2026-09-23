@@ -29,7 +29,8 @@ namespace se {
 void Log(const char* fmt, ...);          // %TEMP%\spec_editor.log
 void RequestUiSelect(const std::string& handle);   // se_ui.cpp: the UI selects this next frame (test scripts)
 std::wstring LevelsDir();                          // se_ui.cpp: Documents\RigelLevels (local .a2level projects)
-extern std::atomic<bool> g_sceneDirty;             // se_game.cpp: an edit was sent since the open level was last saved
+extern std::atomic<bool> g_sceneDirty;
+extern std::atomic<unsigned> g_presentCount;             // se_render.cpp: frames presented (camera diagnostics)             // se_game.cpp: an edit was sent since the open level was last saved
 unsigned long long IconTexture(const std::string& itemName);   // se_render.cpp: the game's own item icon (0 = none)
 void StartSyntheticDrag(int sx, int sy, int ex, int ey);        // se_render.cpp: tests -- a mouse drag fed to ImGui (screen px)
 

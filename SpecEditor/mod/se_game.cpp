@@ -130,7 +130,6 @@ std::vector<Snapshot::DataEntry> g_data;
 int g_dataSerial = 0;
 std::vector<std::string> g_glyphs;        // quest icon ids seen in any bundle (for the Quest Editor's picker)
 SDK::UFunction* g_clientMsgFn = nullptr;   // APlayerController::ClientMessage (see ApplyRemoteProp)
-SDK::UFunction* g_receiveTickFn = nullptr; // AActor::ReceiveTick: the editor camera's once-a-frame clock
 SDK::UFunction* g_timeSecondsFn = nullptr; // UGameplayStatics::GetTimeSeconds
 
 struct PendingStep { std::string handle; int kind; };
@@ -529,9 +528,36 @@ void UpdateTrigger(TriggerShape& t)
     }
     t.overlap = (c[0x25A] >> 3) & 1;
 }
-void BuildObjects(Snapshot& snap)
+struct BoundsEntry { Vec3 loc, scl, off, ext; Rot rot; bool valid = false; };
+std::unordered_map<SDK::UObject*, BoundsEntry> g_boundsCache;   // BuildObjects: picking boxes, by actor
+// The object list is built by walking every object in the game (~300k). Done all at once in the 4 Hz pump
+// that walk (plus what it gathers) cost 10-50 ms in ONE frame, 4 times a second -- the camera visibly jumped.
+// Now it is walked in slices, a few thousand objects per game-thread tick, and the finished list is picked up
+// by the pump: nothing lands on a single frame, and the list is fresher than before (~8 cycles a second).
+bool Alive(SDK::UObject* o);                    // below
+std::vector<SceneObject> g_builtObjects;       // the last complete walk
+bool g_builtOnce = false;
+// One slice of the walk (budget objects). Returns true when a full cycle completed (g_builtObjects updated).
+bool BuildObjectsStep(int32_t budget)
 {
-    g_markersSeen = 0;
+    static int32_t s_cursor = 0;
+    static std::vector<SceneObject> s_objs;
+    static std::vector<std::pair<SDK::UObject*, TriggerShape>> s_shapes;
+    static std::unordered_map<SDK::UObject*, BoundsEntry> s_boundsNext;
+    static int s_boundsBudget = 150, s_markers = 0;
+    static bool s_regReady = false;
+    if (s_cursor == 0)
+    {
+        s_objs.clear(); s_shapes.clear(); s_boundsNext.clear();
+        s_boundsBudget = 150; s_markers = 0;
+        // Once per cycle: while the sandbox registry is empty SandboxPrefabs() walks every object, so it must
+        // never be asked per class/actor (a "no" is only cached once the registry is in).
+        s_regReady = !SandboxPrefabs().empty();
+    }
+    const bool regReady = s_regReady;
+    auto& boundsNext = s_boundsNext;
+    int& boundsBudget = s_boundsBudget;
+    auto& shapes = s_shapes;
     // Trigger shapes ride the same walk (one extra IsA per object): collected here, attached to their
     // owning placed object after the loop.
     static SDK::UClass* s_shapeCls = SDK::UObject::FindClassFast("ShapeComponent");
@@ -539,40 +565,70 @@ void BuildObjects(Snapshot& snap)
     static SDK::UClass* s_sphCls = SDK::UObject::FindClassFast("SphereComponent");
     static SDK::UClass* s_capCls = SDK::UObject::FindClassFast("CapsuleComponent");
     static SDK::UClass* s_smcCls = SDK::UObject::FindClassFast("StaticMeshComponent");
-    std::vector<std::pair<SDK::UObject*, TriggerShape>> shapes;
     // Only components of PLACED objects: the station itself owns thousands of colliders. The owner's class
     // is checked once per class (cached), never by building a name string per component.
     static std::unordered_map<SDK::UClass*, bool> s_editorCls;
-    auto ownerIsPlaced = [](SDK::UObject* outer) -> bool {
+    auto ownerIsPlaced = [regReady](SDK::UObject* outer) -> bool {
         SDK::UClass* oc = outer ? outer->Class : nullptr;
         if (!oc) return false;
         auto it = s_editorCls.find(oc);
         if (it != s_editorCls.end()) return it->second;
         const std::string cn = oc->GetName();
         const bool yes = cn.rfind("LE_", 0) == 0 || IsSandboxClass(cn) || cn == "BP_BoostPad_Omnidirectional_C" || cn == "BP_BoostTank_World_C";
-        if (s_editorCls.size() < 8192 && (yes || !SandboxPrefabs().empty())) s_editorCls[oc] = yes;   // a "no" only once the registry is in
+        if (s_editorCls.size() < 8192 && (yes || regReady)) s_editorCls[oc] = yes;   // a "no" only once the registry is in
         return yes;
     };
     auto* actorCls = SDK::UObject::FindClassFast("Actor");
-    if (!actorCls) return;
+    if (!actorCls) return false;
+    // What each CLASS is, worked out once: this walk visits every object in the game (~300k) 4 times a
+    // second, and walking each one's class chain with IsA two or three times cost ~40 ms -- a hitch the
+    // player saw as the camera jumping 4 times a second. Now one cached lookup per class change.
+    // Bits: 1 actor, 2 shape component, 4 static mesh component; shape kind (1 box, 2 sphere, 3 capsule) << 4.
+    static std::unordered_map<SDK::UClass*, uint8_t> s_kind;
+    SDK::UClass* lastC = nullptr;
+    uint8_t lastK = 0;
+    auto kindOf = [&](SDK::UObject* o) -> uint8_t {
+        SDK::UClass* c = o->Class;
+        if (c == lastC) return lastK;
+        auto it = s_kind.find(c);
+        uint8_t k;
+        if (it != s_kind.end()) k = it->second;
+        else
+        {
+            k = 0;
+            if (o->IsA(actorCls)) k |= 1;
+            else if (s_shapeCls && o->IsA(s_shapeCls))
+                k |= 2 | (((s_boxCls && o->IsA(s_boxCls)) ? 1 : (s_sphCls && o->IsA(s_sphCls)) ? 2 : (s_capCls && o->IsA(s_capCls)) ? 3 : 0) << 4);
+            else if (s_smcCls && o->IsA(s_smcCls)) k |= 4;
+            s_kind[c] = k;
+        }
+        lastC = c; lastK = k;
+        return k;
+    };
     const int32_t n = SDK::UObject::GObjects->Num();
-    for (int32_t i = 0; i < n && snap.objects.size() < 4096; ++i)
+    int32_t i = s_cursor;
+    const int32_t stop = (std::min)(n, s_cursor + budget);
+    for (; i < stop && s_objs.size() < 4096; ++i)
     {
         auto* o = SDK::UObject::GObjects->GetByIndex(i);
-        if (!o || o->IsDefaultObject()) continue;
-        if (g_editorMode && s_shapeCls && o->Outer && o->IsA(s_shapeCls))
+        if (!o || !o->Class) continue;
+        const uint8_t kind = kindOf(o);
+        if (!kind) continue;
+        if (o->IsDefaultObject()) continue;
+        if ((kind & 2) && g_editorMode && o->Outer)
         {
             if (!ownerIsPlaced(o->Outer)) continue;
             TriggerShape t;
-            t.kind = (s_boxCls && o->IsA(s_boxCls)) ? 1 : (s_sphCls && o->IsA(s_sphCls)) ? 2 : (s_capCls && o->IsA(s_capCls)) ? 3 : 0;
+            t.kind = kind >> 4;
             t.comp = o;
             if (t.kind && shapes.size() < 2048) shapes.push_back({ o->Outer, t });
             continue;
         }
         // A mesh that IS the trigger (a team changer's pad): overlap events on, collision query-only
         // (BodyInstance @0x348, CollisionEnabled @+0x20 == QueryOnly). Solid meshes are not drawn.
-        if (g_editorMode && s_smcCls && o->Outer && o->IsA(s_smcCls))
+        if (kind & 6)
         {
+            if (!(kind & 4) || !g_editorMode || !o->Outer) continue;
             if (!ownerIsPlaced(o->Outer)) continue;
             const uint8_t* pc = reinterpret_cast<const uint8_t*>(o);
             if (((pc[0x25A] >> 3) & 1) && pc[0x348 + 0x20] == 1 && shapes.size() < 2048)
@@ -591,15 +647,28 @@ void BuildObjects(Snapshot& snap)
                 }
             continue;
         }
-        if (!o->IsA(actorCls)) continue;
+        if (!(kind & 1)) continue;
         auto* c = o->Class;
         if (!c) continue;
         // A destroyed actor stays in GObjects until the next garbage collection -- up to a minute -- so
         // without this a deleted object lingered in the Outliner and viewport long after the server
         // removed it. AActor::bActorIsBeingDestroyed is byte 0x65, bit 0.
         if (*(reinterpret_cast<const uint8_t*>(o) + 0x65) & 0x01) continue;
-        const std::string cn = c->GetName();
-        if (cn == "BP_LevelEditor_Pawn_C")                  // an editor's camera marker (server-spawned, SE|CAMPOS)
+        // What this class is, decided once per class (not a name string built for each of thousands of actors).
+        static std::unordered_map<SDK::UClass*, std::pair<uint8_t, std::string>> s_clsVerdict;   // 0 skip, 1 placed, 2 marker
+        auto cv = s_clsVerdict.find(c);
+        if (cv == s_clsVerdict.end())
+        {
+            std::string name = c->GetName();
+            uint8_t v = name == "BP_LevelEditor_Pawn_C" ? 2
+                      : (name.rfind("LE_", 0) == 0 || IsSandboxClass(name) || name == "BP_BoostPad_Omnidirectional_C" || name == "BP_BoostTank_World_C") ? 1 : 0;
+            // A sandbox class may only be recognised once the sandbox registry has loaded: don't cache a "no" before.
+            if (!v && !regReady) continue;                 // decided (and cached) once the registry is in
+            cv = s_clsVerdict.emplace(c, std::make_pair(v, v == 1 ? name : std::string())).first;
+        }
+        if (cv->second.first == 0) continue;
+        const std::string& cn = cv->second.second;          // (empty for a marker: not used there)
+        if (cv->second.first == 2)                          // an editor's camera marker (server-spawned, SE|CAMPOS)
         {
             auto* ma = static_cast<SDK::AActor*>(o);
             const bool mine = g_pc && ma->Owner == static_cast<SDK::AActor*>(g_pc);
@@ -608,11 +677,9 @@ void BuildObjects(Snapshot& snap)
                 SDK::Params::Actor_SetActorHiddenInGame h{}; h.bNewHidden = mine;
                 CallNative(o, "Actor", "SetActorHiddenInGame", h);
             }
-            ++g_markersSeen;
+            ++s_markers;
             continue;
         }
-        if (cn.rfind("LE_", 0) != 0 && !IsSandboxClass(cn) && cn != "BP_BoostPad_Omnidirectional_C" && cn != "BP_BoostTank_World_C") continue;
-
         SceneObject so;
         so.ptr = o;
         so.handle = o->GetName();
@@ -637,33 +704,64 @@ void BuildObjects(Snapshot& snap)
             so.scale    = { s[0], s[1], s[2] };
             so.rotation = QuatToRot(q[0], q[1], q[2], q[3]);
         }
-        // Bounds for click-picking in the viewport (only while editing: it walks every component).
+        // Bounds for click-picking in the viewport (only while editing). GetActorBounds walks every component,
+        // and calling it for all ~1300 placed objects every pump cost ~45 ms -- a 4-times-a-second hitch (the
+        // camera "jumping" while flying). Cached per actor; recomputed when its transform changes, at most
+        // 150 a pump (the rest keep last pump's box until their turn).
         if (g_editorMode)
         {
-            SDK::Params::Actor_GetActorBounds b{};
-            b.bOnlyCollidingComponents = false;
-            b.bIncludeFromChildActors = true;
-            if (CallNative(o, "Actor", "GetActorBounds", b))
+            BoundsEntry& be = boundsNext[o];
+            if (auto prev = g_boundsCache.find(o); prev != g_boundsCache.end()) be = prev->second;
+            const bool same = be.valid && be.loc.x == so.location.x && be.loc.y == so.location.y && be.loc.z == so.location.z &&
+                              be.rot.pitch == so.rotation.pitch && be.rot.yaw == so.rotation.yaw && be.rot.roll == so.rotation.roll &&
+                              be.scl.x == so.scale.x && be.scl.y == so.scale.y && be.scl.z == so.scale.z;
+            if (!same && boundsBudget > 0)
             {
-                so.boundsOff = { b.Origin.X - so.location.x, b.Origin.Y - so.location.y, b.Origin.Z - so.location.z };
-                so.boundsExt = { b.BoxExtent.X, b.BoxExtent.Y, b.BoxExtent.Z };
+                --boundsBudget;
+                SDK::Params::Actor_GetActorBounds b{};
+                b.bOnlyCollidingComponents = false;
+                b.bIncludeFromChildActors = true;
+                if (CallNative(o, "Actor", "GetActorBounds", b))
+                {
+                    be.off = { b.Origin.X - so.location.x, b.Origin.Y - so.location.y, b.Origin.Z - so.location.z };
+                    be.ext = { b.BoxExtent.X, b.BoxExtent.Y, b.BoxExtent.Z };
+                }
+                be.loc = so.location; be.rot = so.rotation; be.scl = so.scale; be.valid = true;
             }
+            so.boundsOff = be.off;
+            so.boundsExt = be.ext;
         }
-        snap.objects.push_back(std::move(so));
+        s_objs.push_back(std::move(so));
     }
+    s_cursor = i;
+    if (s_cursor < n && s_objs.size() < 4096) return false;       // more slices to go
+    s_cursor = 0;
+    if (g_editorMode) g_boundsCache.swap(boundsNext);
+    else g_boundsCache.clear();
     // Attach the trigger shapes to their placed objects.
     if (!shapes.empty())
     {
         std::unordered_map<void*, size_t> byActor;
-        for (size_t k = 0; k < snap.objects.size(); ++k) byActor[snap.objects[k].ptr] = k;
+        for (size_t k = 0; k < s_objs.size(); ++k) byActor[s_objs[k].ptr] = k;
         for (auto& sh : shapes)
         {
+            if (!Alive(static_cast<SDK::UObject*>(sh.second.comp))) continue;   // gone since its slice
             auto it = byActor.find(sh.first);
             if (it == byActor.end()) continue;
             UpdateTrigger(sh.second);
-            if (snap.objects[it->second].triggers.size() < 16) snap.objects[it->second].triggers.push_back(sh.second);
+            if (s_objs[it->second].triggers.size() < 16) s_objs[it->second].triggers.push_back(sh.second);
         }
     }
+    g_builtObjects.swap(s_objs);
+    g_markersSeen = s_markers;
+    g_builtOnce = true;
+    return true;
+}
+// The pump's view: the last complete walk (the first time, one full walk right away).
+void BuildObjects(Snapshot& snap)
+{
+    if (!g_builtOnce) while (!BuildObjectsStep(1 << 30)) {}
+    snap.objects = g_builtObjects;
 }
 
 // Actor NAMES are not replicated. An actor the server spawns generally carries a DIFFERENT name here on
@@ -1185,6 +1283,9 @@ struct EditorCamera
     double vel[3] = { 0, 0, 0 };     // eased toward the keys' target velocity (no instant start/stop steps)
 };
 EditorCamera g_cam;
+struct { double v[3] = { 0, 0, 0 }; ULONGLONG until = 0; } g_camFly;   // tests: "hold a key" (camfly)
+double g_camSetPrev[3] = { 0, 0, 0 };    // where CameraTick last put the camera
+double g_camLastStep = 0.0;
 
 template <typename P> bool CallNative(SDK::UObject* obj, const char* cls, const char* fn, P& parms)
 {
@@ -1413,6 +1514,7 @@ static void CameraFrame(double right[3] = nullptr)
     }
 }
 
+void CameraApply();   // below
 void CameraActivate(const Snapshot& snap)
 {
     if (!ObjectAlive(g_cam.actor))
@@ -1446,6 +1548,7 @@ void CameraActivate(const Snapshot& snap)
     g_gravZonesAt = 0;                                           // re-read the zones for this session
     CameraGravityUp(g_cam.up);                                   // start already the right way up
     CameraFrame();
+    CameraApply();
     SetViewTarget(g_cam.actor);
     Cam().active = true;
 }
@@ -1463,6 +1566,7 @@ void CameraDeactivate()
 
 CamReport CamPose() { return { g_cam.x, g_cam.y, g_cam.z, g_cam.rp, g_cam.ry, g_cam.rr }; }
 bool CamActive() { return Cam().active && ObjectAlive(g_cam.actor); }
+void CameraTick(double frameDt = -1.0);   // below
 
 void CameraApply()
 {
@@ -1477,7 +1581,7 @@ void CameraApply()
 
 // Once per game frame, from the ProcessEvent hook (game thread) -- see the frame clock there. frameDt is
 // the world's own delta for this frame (what the game advances everything else by); < 0 = measure it.
-void CameraTick(double frameDt = -1.0)
+void CameraTick(double frameDt)
 {
     CameraInput& in = Cam();
     if (!in.active || !ObjectAlive(g_cam.actor)) return;
@@ -1517,11 +1621,51 @@ void CameraTick(double frameDt = -1.0)
         const double spd = g_cam.speed * (down(VK_SHIFT) ? 3.0 : 1.0) / (len > 1.0 ? len : 1.0);   // diagonals no faster
         for (int i = 0; i < 3; ++i) target[i] = mv[i] * spd;
     }
+    if (GetTickCount64() < g_camFly.until) for (int i = 0; i < 3; ++i) target[i] = g_camFly.v[i];
+    // Diagnostics: last frame we put the camera at P; the game then rendered from its POV. If those
+    // differ, something else is the view (or moves it) -- the "jumps while moving".
+    {
+        static double s_maxGap = 0.0, s_maxStep = 0.0, s_lastStep = 0.0;
+        static int s_g0 = 0, s_g1 = 0, s_g2 = 0;
+        static ULONGLONG s_rep = 0;
+        static int s_frames = 0;
+        if (g_pc)
+            if (void* pcm = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(g_pc) + 0x350))
+            {
+                const double* l = reinterpret_cast<const double*>(reinterpret_cast<uintptr_t>(pcm) + 0x13A0 + 0x10);
+                const double gx = l[0] - g_camSetPrev[0], gy = l[1] - g_camSetPrev[1], gz = l[2] - g_camSetPrev[2];
+                const double gap = std::sqrt(gx * gx + gy * gy + gz * gz);
+                s_maxGap = (std::max)(s_maxGap, gap);
+                if (g_camLastStep > 0.5) { const double f = gap / g_camLastStep; if (f < 0.5) ++s_g0; else if (f < 1.5) ++s_g1; else ++s_g2; }
+            }
+        const double sx = g_cam.x - g_camSetPrev[0], sy = g_cam.y - g_camSetPrev[1], sz = g_cam.z - g_camSetPrev[2];
+        s_maxStep = (std::max)(s_maxStep, std::sqrt(sx * sx + sy * sy + sz * sz));
+        ++s_frames;
+        const double vel2 = g_cam.vel[0] * g_cam.vel[0] + g_cam.vel[1] * g_cam.vel[1] + g_cam.vel[2] * g_cam.vel[2];
+        if (GetTickCount64() - s_rep >= 1000)
+        {
+            if (vel2 > 1.0 && (GetTickCount64() < g_camFly.until || s_g1 + s_g2 > 0))   // tests, or a frame drawn late
+            {
+                SDK::Params::Controller_GetViewTarget vt{};
+                CallNative(g_pc, "Controller", "GetViewTarget", vt);
+                Log("[cam] moving: %d frames/s, step %.1f, max view gap %.1f, frames behind 0/1/2+ = %d/%d/%d, view target %s%s", s_frames, g_camLastStep,
+                    s_maxGap, s_g0, s_g1, s_g2, vt.ReturnValue ? vt.ReturnValue->GetName().c_str() : "none",
+                    vt.ReturnValue == g_cam.actor ? "" : "  <-- NOT the editor camera");
+            }
+            s_rep = GetTickCount64(); s_maxGap = s_maxStep = 0.0; s_frames = 0; s_g0 = s_g1 = s_g2 = 0;
+        }
+    }
     // Ease the velocity toward the target (~90% in 0.15 s): starts and stops glide instead of stepping.
     const double k = 1.0 - std::exp(-dt * 15.0);
     for (int i = 0; i < 3; ++i) g_cam.vel[i] += (target[i] - g_cam.vel[i]) * k;
     g_cam.x += g_cam.vel[0] * dt; g_cam.y += g_cam.vel[1] * dt; g_cam.z += g_cam.vel[2] * dt;
     CameraApply();
+    {
+        extern double g_camLastStep;
+        const double a = g_cam.x - g_camSetPrev[0], b = g_cam.y - g_camSetPrev[1], c = g_cam.z - g_camSetPrev[2];
+        g_camLastStep = std::sqrt(a * a + b * b + c * c);
+    }
+    g_camSetPrev[0] = g_cam.x; g_camSetPrev[1] = g_cam.y; g_camSetPrev[2] = g_cam.z;
 }
 
 // F: keep the view direction and move back far enough to frame the point.
@@ -2371,6 +2515,13 @@ void RunScript(const Snapshot& snap)
     if (!strcmp(op, "favclick")) { RequestUiSelect("!favclick " + rest); return; }               // favclick fav|<category>: click row 1's star
     if (!strcmp(op, "undo") || !strcmp(op, "redo")) { RequestUiSelect(std::string("!") + op); return; }   // Ctrl+Z / Ctrl+Y
     if (!strcmp(op, "delsel")) { RequestUiSelect("!del"); return; }                              // Delete key
+    if (!strcmp(op, "camfly"))                // camfly <vx> <vy> <vz> <seconds> -- as if a move key were held
+    {
+        double sec = 0;
+        sscanf_s(rest.c_str(), "%lf %lf %lf %lf", &g_camFly.v[0], &g_camFly.v[1], &g_camFly.v[2], &sec);
+        g_camFly.until = GetTickCount64() + static_cast<ULONGLONG>(sec * 1000.0);
+        return;
+    }
     if (!strcmp(op, "placeui")) { RequestUiSelect("!placeui " + rest); return; }                 // placeui <palette name>
     if (!strcmp(op, "scene")) { RequestUiSelect("!scene " + rest); return; }                     // scene save|saveas|open|new|upload|autosave [name]
     if (!strcmp(op, "expectscene")) { RequestUiSelect("!expectscene " + rest); return; }         // expectscene <name|-> <dirty 0|1>
@@ -3401,8 +3552,20 @@ void CoinStandinTick(const Snapshot& snap)
     }
 }
 
+// Pump stage timing (ms): a slow pump freezes the game for that long, 4 times a second.
+static LARGE_INTEGER g_pumpT0{}, g_pumpFreq{};
+static double g_pumpMs[8] = {};
+static int g_pumpStage = 0;
+static void PumpMark(int stage)
+{
+    LARGE_INTEGER t; QueryPerformanceCounter(&t);
+    if (stage > 0 && stage < 8) g_pumpMs[stage] = double(t.QuadPart - g_pumpT0.QuadPart) * 1000.0 / double(g_pumpFreq.QuadPart);
+    g_pumpT0 = t;
+}
 void PumpImpl()
 {
+    if (!g_pumpFreq.QuadPart) QueryPerformanceFrequency(&g_pumpFreq);
+    PumpMark(0);
     Snapshot snap;
     // Read GWorld directly rather than SDK::UWorld::GetWorld(): that one lives in Engine_functions.cpp,
     // 5 MB of generated code we would otherwise have to compile for a single pointer load.
@@ -3412,13 +3575,11 @@ void PumpImpl()
     if (!g_clientMsgFn && snap.worldReady)
         if (auto* pcCls = SDK::UObject::FindClassFast("PlayerController"))
             g_clientMsgFn = pcCls->GetFunction("PlayerController", "ClientMessage");
-    if (!g_receiveTickFn && snap.worldReady)
-        if (auto* ac = SDK::UObject::FindClassFast("Actor")) g_receiveTickFn = ac->GetFunction("Actor", "ReceiveTick");
     if (!g_timeSecondsFn && snap.worldReady)
         if (auto* gs = SDK::UObject::FindClassFast("GameplayStatics")) g_timeSecondsFn = gs->GetFunction("GameplayStatics", "GetTimeSeconds");
     {
         static bool s_said = false;
-        if (!s_said && snap.worldReady) { s_said = true; Log("[cam] frame clock fns: ReceiveTick=%p GetTimeSeconds=%p", (void*)g_receiveTickFn, (void*)g_timeSecondsFn); }
+        if (!s_said && snap.worldReady) { s_said = true; Log("[cam] frame clock: GetTimeSeconds=%p", (void*)g_timeSecondsFn); }
     }
     if (!g_setQuestsFn && snap.worldReady)
         if (auto* qc = SDK::UObject::FindClassFast("A2PlayerQuestComponent"))
@@ -3426,8 +3587,20 @@ void PumpImpl()
             g_setQuestsFn = qc->GetFunction("A2PlayerQuestComponent", "Client_SetQuests");
             Log("[quests] watching Client_SetQuests: class=%p fn=%p", (void*)qc, (void*)g_setQuestsFn);
         }
+    PumpMark(1);
     g_pc     = snap.worldReady ? FindLocalController() : nullptr;
-    g_lePawn = snap.worldReady ? FindLocalEditorPawn() : nullptr;
+    PumpMark(2);
+    {   // a full object walk (~3 ms): keep the one we have while it lives, search at most every 2 s
+        static ULONGLONG s_lastLeSearch = 0;
+        if (!snap.worldReady) g_lePawn = nullptr;
+        else if (!(g_lePawn && Alive(g_lePawn)) && GetTickCount64() - s_lastLeSearch >= 2000)
+        {
+            s_lastLeSearch = GetTickCount64();
+            g_lePawn = FindLocalEditorPawn();
+        }
+        else if (g_lePawn && !Alive(g_lePawn)) g_lePawn = nullptr;
+    }
+    PumpMark(3);
     snap.inEditor = g_editorMode;
 
     // The camera is the RENDER view: APlayerController::PlayerCameraManager (+0x350) ->
@@ -3474,7 +3647,9 @@ void PumpImpl()
         s_lastPaletteTry = GetTickCount64();
     }
     snap.palette = g_palette;
+    PumpMark(4);
     BuildObjects(snap);
+    PumpMark(5);
     snap.status = !snap.worldReady ? "waiting for world" : (!g_pc ? "no player controller yet" : (snap.inEditor ? "editing" : "ready"));
 
     // Keep a game-thread copy of what we just listed, so HandleCommands can turn a handle into the
@@ -3484,6 +3659,7 @@ void PumpImpl()
     LogReplicationChanges(snap);
     RunScript(snap);
     CoinStandinTick(snap);
+    PumpMark(6);
 
     // The editor camera follows state: it is the view while editing with the UI up, and F12 or Stop
     // Editing hands the player their own view back. A travel destroys the camera actor, so a dead actor
@@ -3535,6 +3711,15 @@ void PumpImpl()
     snap.slotCands = g_slotCands;
     State().Publish(std::move(snap));
     HandleCommands();
+    PumpMark(7);
+    double total = 0; for (int i = 1; i < 8; ++i) total += g_pumpMs[i];
+    static ULONGLONG s_rep = 0;
+    if (total > 8.0 && GetTickCount64() - s_rep > 5000)
+    {
+        s_rep = GetTickCount64();
+        Log("[pump] %.1f ms: start %.1f  findPC %.1f  findLEpawn %.1f  palette %.1f  objects %.1f  post %.1f  publish %.1f", total,
+            g_pumpMs[1], g_pumpMs[2], g_pumpMs[3], g_pumpMs[4], g_pumpMs[5], g_pumpMs[6], g_pumpMs[7]);
+    }
 }
 
 // Evidence that authored quests reach this client: A2PlayerQuestComponent::Client_SetQuests(
@@ -3731,6 +3916,49 @@ namespace se {
 namespace {
 #endif
 
+// World time for the editor camera's frame clock (PE_Hook).
+// Read straight out of UWorld once its offset is known (a single load, so every call can look -- no chance of
+// missing the start of a frame); until then GetTimeSeconds at most every 0.5 ms, which also finds the offset
+// (the double in the world that tracks it frame after frame).
+static bool ReadWorldTime(double& out, const LARGE_INTEGER& t, const LARGE_INTEGER& freq, LARGE_INTEGER& lastCheck)
+{
+    static int s_wtOff = -1;
+    static std::vector<int> s_wtCand;
+    static int s_rounds = 0;
+    const uintptr_t worldP = *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)) + SDK::Offsets::GWorld);
+    if (!worldP) return false;
+    if (s_wtOff >= 0) { out = *reinterpret_cast<const double*>(worldP + s_wtOff); return true; }
+    if (!g_timeSecondsFn || !g_pc || t.QuadPart - lastCheck.QuadPart < freq.QuadPart / 2000) return false;
+    lastCheck = t;
+    SDK::Params::GameplayStatics_GetTimeSeconds ts{};
+    ts.WorldContextObject = g_pc;
+    const auto saved = g_timeSecondsFn->FunctionFlags;
+    g_timeSecondsFn->FunctionFlags |= 0x400;
+    const bool ok = SafePE(static_cast<SDK::UClass*>(g_timeSecondsFn->Outer)->ClassDefaultObject, g_timeSecondsFn, &ts);
+    g_timeSecondsFn->FunctionFlags = saved;
+    if (!ok) return false;
+    out = ts.ReturnValue;
+    if (ts.ReturnValue > 1.0)
+    {
+        const double* w = reinterpret_cast<const double*>(worldP);
+        if (s_wtCand.empty() && s_rounds == 0)
+            for (int off = 0x100; off < 0x1000; off += 8) { if (w[off / 8] == ts.ReturnValue) s_wtCand.push_back(off); }
+        else
+        {
+            std::vector<int> keep;
+            for (int off : s_wtCand) if (w[off / 8] == ts.ReturnValue) keep.push_back(off);
+            s_wtCand.swap(keep);
+        }
+        if (++s_rounds >= 8 && !s_wtCand.empty())
+        {
+            s_wtOff = s_wtCand.front();
+            Log("[cam] world time found at UWorld+0x%X (%zu candidate(s)): read directly from now on", s_wtOff, s_wtCand.size());
+        }
+        else if (s_rounds >= 8 && s_wtCand.empty() && s_rounds == 8) Log("[cam] world time offset not found -- using GetTimeSeconds every 0.5 ms");
+    }
+    return true;
+}
+
 void __fastcall PE_Hook(void* ctx, void* fn, void* parms)
 {
     if (fn && fn == g_setQuestsFn && parms && GetCurrentThreadId() == g_mainThread)
@@ -3754,11 +3982,12 @@ void __fastcall PE_Hook(void* ctx, void* fn, void* parms)
     GlyphFix_PeTick();   // the Rift build's parkour glyph fix shares this hook (see glyphfix.cpp)
 #endif
 
-    // The editor camera moves exactly ONCE PER GAME FRAME, before the game computes the view: on the first
-    // actor tick (ReceiveTick -- tick groups run before the camera manager updates) whose world time is new,
-    // by that frame's world delta. It used to run on whatever ProcessEvent came along after a 4 ms timer:
-    // some frames it moved after the view was already taken (drawn a frame late), some frames twice, and dt
-    // came from those random call times -- the jitter. The timer stays as a fallback (paused world, no ticks).
+    // The editor camera moves exactly ONCE PER GAME FRAME, early in it: the world's time advances at the start
+    // of a frame and the camera manager takes the view at the end, so the first game-thread call (checked every
+    // 0.5 ms) that sees a new world time moves the camera by that frame's world delta. It used to move on
+    // whatever ProcessEvent came along after a 4 ms timer: some frames after the view was already taken (drawn
+    // a frame late, then a double step -- the jumps while flying), and dt came from those random call times.
+    // The timer stays as a fallback (paused world: time stands still).
     if (Cam().active)
     {
         static LARGE_INTEGER s_last{}, s_freq{}, s_frameTick{}, s_check{};
@@ -3766,17 +3995,9 @@ void __fastcall PE_Hook(void* ctx, void* fn, void* parms)
         LARGE_INTEGER t;
         QueryPerformanceCounter(&t);
         if (!s_freq.QuadPart) QueryPerformanceFrequency(&s_freq);
-        static int s_rtSeen = 0;
-        if (fn && g_receiveTickFn && static_cast<SDK::UObject*>(fn)->Name.ComparisonIndex == g_receiveTickFn->Name.ComparisonIndex && ++s_rtSeen == 1) Log("[cam] first ReceiveTick seen (timeFn=%p pc=%p)", (void*)g_timeSecondsFn, (void*)g_pc);
-        if (fn && g_receiveTickFn && static_cast<SDK::UObject*>(fn)->Name.ComparisonIndex == g_receiveTickFn->Name.ComparisonIndex && g_timeSecondsFn && g_pc && t.QuadPart - s_check.QuadPart >= s_freq.QuadPart / 2000)
+        SDK::Params::GameplayStatics_GetTimeSeconds ts{};
+        const bool ok = ReadWorldTime(ts.ReturnValue, t, s_freq, s_check);
         {
-            s_check = t;                                   // at most one world-time read per 0.5 ms
-            SDK::Params::GameplayStatics_GetTimeSeconds ts{};
-            ts.WorldContextObject = g_pc;
-            const auto saved = g_timeSecondsFn->FunctionFlags;
-            g_timeSecondsFn->FunctionFlags |= 0x400;
-            const bool ok = SafePE(static_cast<SDK::UClass*>(g_timeSecondsFn->Outer)->ClassDefaultObject, g_timeSecondsFn, &ts);
-            g_timeSecondsFn->FunctionFlags = saved;
             if (ok && ts.ReturnValue != s_worldT)
             {
                 const double dt = s_worldT < 0.0 || ts.ReturnValue < s_worldT ? 0.0 : ts.ReturnValue - s_worldT;
@@ -3784,6 +4005,18 @@ void __fastcall PE_Hook(void* ctx, void* fn, void* parms)
                 s_frameTick = s_last = t;
                 static bool s_said = false;
                 if (!s_said) { s_said = true; Log("[cam] frame clock: moving once per game frame (world dt %.4f)", dt); }
+                // Trace 90 ticks while flying: wall ms since the last tick, world dt, frames presented since.
+                static LARGE_INTEGER s_prevT{};
+                static unsigned s_prevP = 0;
+                static int s_traced = 0;
+                const unsigned pc = g_presentCount.load();
+                if (GetTickCount64() < g_camFly.until && s_traced < 90)
+                {
+                    ++s_traced;
+                    Log("[camtrace] wall %.2f ms  world dt %.2f ms  presents %u", double(t.QuadPart - s_prevT.QuadPart) * 1000.0 / double(s_freq.QuadPart),
+                        dt * 1000.0, pc - s_prevP);
+                }
+                s_prevT = t; s_prevP = pc;
                 __try { CameraTick(dt); } __except (EXCEPTION_EXECUTE_HANDLER) { Cam().active = false; Log("[cam] tick faulted - camera released"); }
             }
         }
@@ -3807,6 +4040,7 @@ void __fastcall PE_Hook(void* ctx, void* fn, void* parms)
             s_in = true;
             s_lastD = t;
             __try { SimDragTick(); } __except (EXCEPTION_EXECUTE_HANDLER) { g_sim.on = false; }
+            __try { BuildObjectsStep(20000); } __except (EXCEPTION_EXECUTE_HANDLER) { Log("[game] object walk slice faulted"); }
             if (g_uiVisible)
             {
                 __try { RefreshTransforms(); } __except (EXCEPTION_EXECUTE_HANDLER) {}

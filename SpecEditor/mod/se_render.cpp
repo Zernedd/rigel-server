@@ -37,6 +37,7 @@
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
 
 namespace se {
+std::atomic<unsigned> g_presentCount{ 0 };
 
 #ifdef RIGEL_EOS
 bool g_uiVisible = false;   // published Rift build: hidden until F12, so ordinary spectators never see it
@@ -516,8 +517,10 @@ void SyntheticDragTick()
     if (f > 2 + kSteps + 3) { g_synth.on = false; Log("[ui] synthetic drag done"); }
 }
 
+
 HRESULT __stdcall Hook_Present(IDXGISwapChain3* sc, UINT interval, UINT flags)
 {
+    se::g_presentCount.fetch_add(1, std::memory_order_relaxed);
     if (!g_imguiReady)
     {
         if (!InitImGui(sc)) return g_presentOrig(sc, interval, flags);

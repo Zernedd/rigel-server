@@ -1,0 +1,8 @@
+log T-FLY start
+enter
+wait 8
+camfly 800 0 0 4
+wait 5
+camfly 0 1200 0 3
+wait 4
+log T-FLY done
