@@ -1,0 +1,5 @@
+# Luau client-crash repro (observer half): just be connected and receive everything.
+log BSP-OBS start
+enter
+wait 90
+log BSP-OBS done

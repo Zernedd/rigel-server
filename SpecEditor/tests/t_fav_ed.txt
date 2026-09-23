@@ -1,0 +1,10 @@
+log T-FAV start
+enter
+wait 4
+fav HalfPipeWall_3x1x4_A_01
+wait 1
+expectfav HalfPipeWall_3x1x4_A_01 1
+fav HalfPipeWall_3x1x4_A_01
+wait 1
+expectfav HalfPipeWall_3x1x4_A_01 0
+log T-FAV done

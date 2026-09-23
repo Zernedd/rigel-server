@@ -1,0 +1,7 @@
+log T-MK-OBS start
+enter
+wait 30
+expectmarkers 1
+wait 32
+expectmarkers 0
+log T-MK-OBS done

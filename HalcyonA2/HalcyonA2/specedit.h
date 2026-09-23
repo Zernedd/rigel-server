@@ -303,6 +303,13 @@ static std::vector<std::string> g_sbPendingScripts;   // custom Luau script name
 static std::string   g_sbForceIdx;                  // respawn under this idx (a rebuilt scripted object keeps its id)
 static SDK::UObject* g_sbForceLgm = nullptr;         // host the spawn in flight in this gamemode (script references)
 static std::string g_lvLoading;    // the saved level whose content is being created right now ("" = editor work)
+// Per-object owner locks. Every sandbox object remembers who placed it; its owner can lock it, and then no
+// other editor can move, delete, re-script or edit it. Keyed by sandbox idx, which survives the rebuild a
+// move does. g_seCaller is whoever sent the command being handled ("" for the server's own work).
+struct SeOwnLock { std::string owner, ownerName; bool locked = false; };
+static std::unordered_map<std::string, SeOwnLock> g_ownLocks;
+static std::string g_seCaller, g_seCallerName;
+static void SeOwnLocksPush(SDK::UObject* onlyPc);   // below
 static void SeLvRecordPlain(SDK::AActor* a, const std::string& path);   // below (saved levels)
 static std::string SeLvIdent(SDK::AActor* a);                            // below (saved levels)
 static int  SeBroadcast(const std::string& msg, SDK::UObject* pc);   // below
@@ -590,6 +597,7 @@ static void SeDropProxies(SDK::AActor* a)
 static void SeQuestTick();   // below
 
 static void SeLvTick();   // below (saved levels)
+static void SeCamMarkersTick(ULONGLONG now);   // below (editor camera markers)
 static void SpecEditTick()
 {
     if (!g_specEdit) return;
@@ -597,6 +605,7 @@ static void SpecEditTick()
     SeLvTick();
     SbMoveFlush();
     const ULONGLONG now = GetTickCount64();
+    SeCamMarkersTick(now);
     SeProxyWantTick(now);
     SbEditorSlotTick(now);
     SbEditorSlotClearTick(now);
@@ -3252,6 +3261,7 @@ static std::string SeSandboxSpawn(const std::string& uniqueId, const double* loc
         SbOwned o;
         o.idx = idxA; o.cls = g_sbSpawnCls; o.lgm = lgm;
         o.uniqueId = uniqueId; o.path = g_sbSpawnPath; o.level = g_lvLoading;
+        if (!g_seCaller.empty() && !g_ownLocks.count(idxA)) g_ownLocks[idxA] = { g_seCaller, g_seCallerName, false };
         memcpy(o.loc, loc, sizeof(o.loc)); memcpy(o.rot, rot, sizeof(o.rot)); memcpy(o.scl, scl, sizeof(o.scl));
         g_sbOwned.push_back(o);
         SeWantProxy(idxA);                               // collision stand-ins, whichever path spawned it
@@ -4320,6 +4330,12 @@ static std::string SbRehost(SbOwned& o, SDK::UObject* lgm)
     if (!idx.empty()) if (SDK::AActor* na = SbActorForIdx(idx)) for (const auto& d : keep.data) SeSbSet(nullptr, SeLvIdent(na), d[0], d[1], d[2]);
     // anything that pointed at the old id now points at the new one
     for (auto& other : g_sbOwned) for (auto& r : other.refs) if (r[2] == keep.idx) r[2] = idx;
+    if (auto ol = g_ownLocks.find(keep.idx); ol != g_ownLocks.end() && !idx.empty())
+    {
+        const SeOwnLock moved = ol->second;
+        g_ownLocks.erase(ol);
+        g_ownLocks[idx] = moved;
+    }
     return idx;
 }
 // SE|SBDUP|<ident#id>|loc|rot|scale -- Duplicate. A copy of a sandbox object made from the object itself:
@@ -4573,7 +4589,7 @@ static std::string SeLvResolve(const std::string& value)
 // the saved objects become that level's. It used to take only unsaved work plus content already tagged
 // with this exact name, so loading a level, editing it and saving (under any other name, or a different
 // capitalisation) wrote only the new pieces and silently dropped everything that had been loaded.
-static std::string SeLvBuild(const std::string& name, int* counts)
+static std::string SeLvBuild(const std::string& name, int* counts, bool tag = true)   // tag=false: export only
 {
     std::string t = "L\t" + SeLvClean(name) + "\t1\n";
     struct Wire { int from; std::string script, slot, targetIdx, key; };
@@ -4587,7 +4603,7 @@ static std::string SeLvBuild(const std::string& name, int* counts)
     {
         if (runObjs.count(o.idx) || o.uniqueId.empty() || o.cls.empty()) continue;
         if (o.lgm && !SeAlive(o.lgm)) continue;
-        o.level = name;
+        if (tag) o.level = name;
         ownedIdx[o.idx] = n;
         if (SDK::AActor* a = SbActorForIdx(o.idx)) actorIdx[a] = n;
         t += "O\t" + std::to_string(n) + "\tS\t" + o.uniqueId + "\t" + o.cls + "\t" + SeLvClean(o.path) + "\t" + SeLvVec(o.loc) + "\t" +
@@ -4607,7 +4623,7 @@ static std::string SeLvBuild(const std::string& name, int* counts)
     for (auto& p : g_lvPlain)
     {
         if (!SeLvPlainAlive(p)) continue;
-        p.level = name;
+        if (tag) p.level = name;
         const SDK::FVector l = p.actor->K2_GetActorLocation(); const SDK::FRotator r = p.actor->K2_GetActorRotation();
         const SDK::FVector sc = p.actor->GetActorScale3D();
         const double L[3] = { l.X, l.Y, l.Z }, R[3] = { r.Pitch, r.Yaw, r.Roll }, S[3] = { sc.X, sc.Y, sc.Z };
@@ -4624,7 +4640,7 @@ static std::string SeLvBuild(const std::string& name, int* counts)
     for (auto& q : g_seAuthored)
     {
         if (q.deleted) continue;
-        q.level = name;
+        if (tag) q.level = name;
         std::string steps;
         for (SDK::AActor* a : q.checkpoints)
         {
@@ -4638,7 +4654,7 @@ static std::string SeLvBuild(const std::string& name, int* counts)
     }
     for (auto& r : g_lvRuns)
     {
-        r.level = name;
+        if (tag) r.level = name;
         char b[64];
         snprintf(b, sizeof(b), "%.0f", r.dur);
         t += "R\t" + r.questRef + "\t" + b + "\t" + std::to_string(r.thr) + "\t" + SeLvVec(r.at) + "\t" + SeLvVec(r.button) + "\t" + r.coins + "\n";
@@ -4959,6 +4975,72 @@ static void SeLvSave(SDK::UObject* ctx, const std::string& rawName)
     }).detach();
     HxLog("[HalcyonA2][LEVELS] saving '%s': %s\n", name.c_str(), summary);
 }
+// ---- local projects (.a2level) -------------------------------------------------------------------------
+// A level file on the editor's own PC: the same text a saved level is (see SeLvBuild), so it can be taken
+// home, shared, and brought back to any server -- loaded here as a level, or uploaded as a saved level.
+// Export: SE|LVEXPORT|<name> -> SE|LVDATA|<name>|<i>|<n>|<hex> to the caller (hex: every byte survives the
+// trip, titles included). Import: SE|LVPART|<hex> (repeated, in order) then SE|LVIMPORT|<name>|load|save.
+static std::unordered_map<std::string, std::string> g_lvImportBuf;   // caller id -> text so far
+static void SeLvExport(SDK::UObject* ctx, const std::string& rawName)
+{
+    SDK::UObject* pc = SeCallerPC(ctx);
+    if (!pc) return;
+    std::string name;
+    for (char c : rawName) if (isalnum(static_cast<unsigned char>(c)) || c == ' ' || c == '_' || c == '-') name += c;
+    if (name.empty()) name = "Untitled";
+    int counts[3] = {};
+    const std::string text = SeLvBuild(name, counts, false);
+    static const char* hx = "0123456789ABCDEF";
+    std::string hex;
+    hex.reserve(text.size() * 2);
+    for (unsigned char c : text) { hex.push_back(hx[c >> 4]); hex.push_back(hx[c & 15]); }
+    const size_t kChunk = 16000;
+    const size_t n = (std::max<size_t>)(1, (hex.size() + kChunk - 1) / kChunk);
+    for (size_t i = 0; i < n; ++i)
+        SeBroadcast("SE|LVDATA|" + name + "|" + std::to_string(i) + "|" + std::to_string(n) + "|" + hex.substr(i * kChunk, kChunk), pc);
+    HxLog("[HalcyonA2][LEVELS] exported '%s' to the caller: %d object(s), %zu byte(s), %zu message(s)\n", name.c_str(), counts[0], text.size(), n);
+}
+static void SeLvImportPart(const std::string& hex)
+{
+    std::string& buf = g_lvImportBuf[g_seCaller];
+    if (buf.size() > 4 * 1024 * 1024) return;                   // a level is tens of KB; refuse runaway uploads
+    for (size_t i = 0; i + 1 < hex.size(); i += 2)
+        buf.push_back(static_cast<char>(strtoul(hex.substr(i, 2).c_str(), nullptr, 16)));
+}
+static void SeLvImport(SDK::UObject* ctx, const std::string& rawName, const std::string& mode)
+{
+    SDK::UObject* pc = SeCallerPC(ctx);
+    std::string text;
+    text.swap(g_lvImportBuf[g_seCaller]);
+    g_lvImportBuf.erase(g_seCaller);
+    std::string name;
+    for (char c : rawName) if (isalnum(static_cast<unsigned char>(c)) || c == ' ' || c == '_' || c == '-') name += c;
+    if (name.empty() || name.size() > 64 || text.rfind("L\t", 0) != 0)
+    {
+        if (pc) SeBroadcast("SE|NOTE|That file isn't a level (or its name is invalid) - nothing loaded.", pc);
+        HxLog("[HalcyonA2][LEVELS] import '%s' refused: %zu byte(s), bad header or name\n", name.c_str(), text.size());
+        return;
+    }
+    // The file's own name line is replaced by the one it is imported as.
+    const size_t eol = text.find('\n');
+    text = "L\t" + SeLvClean(name) + "\t1" + (eol == std::string::npos ? std::string("\n") : text.substr(eol));
+    if (std::find(g_lvLoaded.begin(), g_lvLoaded.end(), name) != g_lvLoaded.end()) SeLvUnload(name);   // replace, don't stack
+    SeLvLoad(name, text);
+    if (mode == "save")
+    {
+        std::thread([name, text, pc]() {
+            DWORD st = 0;
+            SeLvHttp(L"PUT", "/v1/spec/levels/" + SeLvUrlName(name), text, &st);
+            SeLvQueue({ 3, name, st == 200 ? "SE|NOTE|Uploaded '" + name + "' to the server's saved levels (and loaded it here)." :
+                                             "SE|NOTE|Loaded '" + name + "' here, but uploading it FAILED (backend HTTP " + std::to_string(st) + ").", pc });
+            g_lvPollNow = true;
+        }).detach();
+    }
+    else if (pc) SeBroadcast("SE|NOTE|Loaded '" + name + "' on this server (not uploaded - Unload removes it).", pc);
+    g_lvStatusDirty = true;
+    HxLog("[HalcyonA2][LEVELS] imported '%s' (%zu byte(s), %s)\n", name.c_str(), text.size(), mode.c_str());
+}
+
 static void SeLvList(SDK::UObject* ctx)
 {
     SDK::UObject* pc = SeCallerPC(ctx);
@@ -4984,6 +5066,188 @@ static void SeLvSetLoaded(SDK::UObject* ctx, const std::string& name, bool load)
     }).detach();
 }
 
+// ---- owner locks ---------------------------------------------------------------------------
+static std::string SeCallerIdOf(SDK::UObject* ctx)
+{
+    SDK::UObject* pc = SeCallerPC(ctx);
+    if (!pc) return std::string();
+    std::string uid = FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(pc) + 0xA30));
+    if (uid.empty() && g_seLocalTest) uid = "local:" + pc->GetName();    // no dashboard login on a test server
+    return uid;
+}
+static std::string SeCallerNameOf(SDK::UObject* ctx)
+{
+    SDK::UObject* pc = SeCallerPC(ctx);
+    auto* ps = pc ? static_cast<SDK::APlayerController*>(pc)->PlayerState : nullptr;
+    std::string n = ps ? ps->GetPlayerName().ToString() : std::string();
+    for (char& c : n) if (c == '|' || c == ';' || c == ',' || static_cast<unsigned char>(c) < 32) c = ' ';
+    return n.empty() ? std::string("another editor") : n;
+}
+// The sandbox idx an ident names: "#<id>" when the client sent one, else the actor at that spot.
+static std::string SeIdxOfIdent(const std::string& ident)
+{
+    const size_t h = ident.find('#');
+    if (h != std::string::npos && ident.size() - h - 1 >= 32) return ident.substr(h + 1);
+    SDK::AActor* a = SeFindEditorActor(ident);
+    SDK::UObject* pc = a ? SbPrefabOf(a) : nullptr;
+    return pc ? FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(pc) + 0x248)) : std::string();
+}
+// Tell editors which objects are locked: SE|OWNLOCKS|<idx>,<1 if theirs>,<owner name>;...  Each controller
+// gets its own copy (the "theirs" flag differs). Locks on objects that no longer exist are dropped.
+static void SeOwnLocksPush(SDK::UObject* onlyPc)
+{
+    for (auto it = g_ownLocks.begin(); it != g_ownLocks.end();)
+    {
+        bool alive = false;
+        for (const auto& o : g_sbOwned) if (o.idx == it->first) { alive = true; break; }
+        it = alive ? std::next(it) : g_ownLocks.erase(it);
+    }
+    auto sendTo = [&](SDK::UObject* pc) {
+        const std::string me = SeCallerIdOf(pc);
+        std::string msg = "SE|OWNLOCKS|";
+        for (const auto& kv : g_ownLocks)
+            if (kv.second.locked)
+                msg += kv.first + "," + (kv.second.owner == me ? "1" : "0") + "," + kv.second.ownerName + ";";
+        SeBroadcast(msg, pc);
+    };
+    if (onlyPc) { sendTo(onlyPc); return; }
+    for (SDK::UObject* o : ClassObjects(SDK::APlayerController::StaticClass()))
+    {
+        if (!o || o->IsDefaultObject() || (*(reinterpret_cast<const uint8_t*>(o) + 0x65) & 0x01)) continue;
+        if (SeAuthorised(o)) sendTo(o);
+    }
+}
+// SE|OWNLOCK|<ident#id>|1|0. Only the placer may lock or unlock. An object nobody is recorded as owning
+// (placed before owners were tracked, or loaded from a saved level) goes to the first editor who locks it.
+static void SeOwnLockSet(SDK::UObject* pawn, const std::string& ident, bool on)
+{
+    SDK::UObject* pc = SeCallerPC(pawn);
+    const std::string idx = SeIdxOfIdent(ident);
+    if (idx.empty() || !SbOwnedByIdx(idx))
+    {
+        if (pc) SeBroadcast("SE|NOTE|Only objects placed with the editor can be locked.", pc);
+        return;
+    }
+    SeOwnLock& L = g_ownLocks[idx];
+    if (L.owner.empty()) { L.owner = g_seCaller; L.ownerName = g_seCallerName; }
+    if (L.owner != g_seCaller)
+    {
+        if (pc) SeBroadcast("SE|NOTE|Only " + L.ownerName + " (who placed it) can lock or unlock this object.", pc);
+        return;
+    }
+    L.locked = on;
+    HxLog("[HalcyonA2][SPECEDIT] owner lock %s: %s by %s\n", idx.c_str(), on ? "LOCKED" : "unlocked", L.ownerName.c_str());
+    SeOwnLocksPush(nullptr);
+}
+// Refuse an edit to an object its owner has locked. True = refused (the command must not run).
+static bool SeOwnLockRefuses(SDK::UObject* pawn, const std::string& op, const std::string& ident)
+{
+    static const char* kGuarded[] = { "XFORM", "DELETE", "SBSET", "LUAU", "LUAUREF", "LUAUDEL", "PROP" };
+    bool guarded = false;
+    for (const char* g : kGuarded) if (op == g) guarded = true;
+    if (!guarded || g_ownLocks.empty()) return false;
+    bool anyLocked = false;
+    for (const auto& kv : g_ownLocks) if (kv.second.locked) { anyLocked = true; break; }
+    if (!anyLocked) return false;                        // the common case: no lookup at all
+    const std::string idx = SeIdxOfIdent(ident);
+    auto it = idx.empty() ? g_ownLocks.end() : g_ownLocks.find(idx);
+    if (it == g_ownLocks.end() || !it->second.locked || it->second.owner == g_seCaller) return false;
+    static ULONGLONG s_lastNote = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (now - s_lastNote > 1500)                         // a drag sends 25/s: one note, not a flood
+    {
+        s_lastNote = now;
+        if (SDK::UObject* pc = SeCallerPC(pawn)) SeBroadcast("SE|NOTE|Locked by " + it->second.ownerName + " - only they can change it.", pc);
+    }
+    return true;
+}
+
+// ---- editor camera markers -------------------------------------------------------------------
+// Someone editing flies a client-local camera; to everyone else they were a VR avatar standing wherever
+// they entered the editor. Each editor now gets the game's own level-editor pawn (BP_LevelEditor_Pawn: a
+// floating cube), spawned by the server, replicated, and moved to the editor camera the client reports
+// (SE|CAMPOS|x,y,z|p,y,r, ~8/s while it moves, a heartbeat otherwise). It goes on EXIT, or 20 s after the
+// last report (left / crashed). The editor hides their own copy locally.
+struct SeCamMarker { SDK::AActor* actor = nullptr; int32_t index = -1; ULONGLONG seen = 0; };
+static std::unordered_map<std::string, SeCamMarker> g_camMarkers;   // caller id -> marker
+static bool SeCamMarkerAlive(const SeCamMarker& m)
+{
+    return m.actor && SDK::UObject::GObjects->GetByIndex(m.index) == m.actor &&
+           !(*(reinterpret_cast<const uint8_t*>(m.actor) + 0x65) & 0x01);
+}
+static void SeCamMarkerDrop(SeCamMarker& m)
+{
+    if (SeCamMarkerAlive(m)) m.actor->K2_DestroyActor();
+    m.actor = nullptr; m.index = -1;
+}
+static void SeCamMarkersExpire()
+{
+    const ULONGLONG now = GetTickCount64();
+    for (auto it = g_camMarkers.begin(); it != g_camMarkers.end();)
+    {
+        if (now - it->second.seen > 20000) { SeCamMarkerDrop(it->second); it = g_camMarkers.erase(it); }
+        else ++it;
+    }
+}
+static std::unordered_map<std::string, ULONGLONG> g_camExitAt;   // caller -> when they left the editor
+static void SeCamMarkersTick(ULONGLONG now)
+{
+    static ULONGLONG s_last = 0;
+    if (g_camMarkers.empty() || now - s_last < 1000) return;   // a map of a few entries, once a second
+    s_last = now;
+    SeCamMarkersExpire();
+}
+static SDK::UClass* SeCamMarkerClass()
+{
+    static SDK::UClass* s_cls = nullptr;
+    static bool s_tried = false;
+    if (s_cls || s_tried) return s_cls;
+    s_tried = true;
+    if ((s_cls = SDK::UObject::FindClassFast("BP_LevelEditor_Pawn_C")) != nullptr) return s_cls;
+    SDK::FSoftClassPath scp = SDK::UKismetSystemLibrary::MakeSoftClassPath(SDK::FString(L"/Game/BP_LevelEditor_Pawn.BP_LevelEditor_Pawn_C"));
+    s_cls = SDK::UKismetSystemLibrary::LoadClassAsset_Blocking(SDK::UKismetSystemLibrary::Conv_SoftClassPathToSoftClassRef(scp));
+    HxLog("[HalcyonA2][SPECEDIT] editor camera marker class: %s\n", s_cls ? "loaded" : "NOT FOUND - markers off");
+    return s_cls;
+}
+static void SeCamMarkerMove(SDK::UObject* pawn, const std::string& locs, const std::string& rots)
+{
+    double l[3], r[3] = { 0, 0, 0 };
+    if (g_seCaller.empty() || !SeVec(locs, l)) return;
+    // A report already in flight when the editor left must not bring the marker back.
+    if (auto ex = g_camExitAt.find(g_seCaller); ex != g_camExitAt.end() && GetTickCount64() - ex->second < 5000) return;
+    SeVec(rots, r);
+    SeCamMarker& m = g_camMarkers[g_seCaller];
+    m.seen = GetTickCount64();
+    const SDK::FVector loc{ l[0], l[1], l[2] };
+    const SDK::FRotator rot{ r[0], r[1], r[2] };
+    if (!SeCamMarkerAlive(m))
+    {
+        SDK::UClass* cls = SeCamMarkerClass();
+        if (!cls) return;
+        SDK::FTransform xf{};
+        xf.Rotation = SDK::FQuat{ 0, 0, 0, 1 };
+        xf.Translation = loc;
+        xf.Scale3D = SDK::FVector{ 1, 1, 1 };
+        SDK::AActor* a = SDK::UGameplayStatics::BeginDeferredActorSpawnFromClass(
+            pawn, cls, xf, SDK::ESpawnActorCollisionHandlingMethod::AlwaysSpawn, nullptr, SDK::ESpawnActorScaleMethod::MultiplyWithRoot);
+        if (!a) return;
+        SDK::UGameplayStatics::FinishSpawningActor(a, xf, SDK::ESpawnActorScaleMethod::MultiplyWithRoot);
+        a->SetActorEnableCollision(false);                // a marker: nothing may bump into it
+        if (SDK::UObject* pc = SeCallerPC(pawn)) a->SetOwner(static_cast<SDK::AActor*>(pc));   // its editor hides their own copy
+        a->SetReplicates(true);
+        a->SetReplicateMovement(true);
+        m.actor = a; m.index = a->Index;
+        HxLog("[HalcyonA2][SPECEDIT] editor camera marker for %s: %s\n", g_seCallerName.c_str(), a->GetName().c_str());
+    }
+    // The pawn's own replicated pose (RepData: NetQuantize10 position + rotation, OnRep_Data) and its actor
+    // transform (replicated movement): whichever a client applies, both say the same thing.
+    double* rep = reinterpret_cast<double*>(reinterpret_cast<uintptr_t>(m.actor) + 0x400);
+    rep[0] = l[0]; rep[1] = l[1]; rep[2] = l[2]; rep[3] = r[0]; rep[4] = r[1]; rep[5] = r[2];
+    SDK::FHitResult hit{};
+    m.actor->K2_SetActorLocationAndRotation(loc, rot, false, &hit, true);
+    m.actor->ForceNetUpdate();
+}
+
 // ---- entry point ---------------------------------------------------------------------------
 // Returns true when the string was ours and the original lock RPC should NOT run.
 static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
@@ -5000,8 +5264,15 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
 
     const auto p = SeSplit(cmd, '|', 16);
     const std::string op = p.size() > 1 ? p[1] : std::string();
+    g_seCaller = SeCallerIdOf(pawn);
+    g_seCallerName = SeCallerNameOf(pawn);
+    struct CallerReset { ~CallerReset() { g_seCaller.clear(); g_seCallerName.clear(); } } callerReset;
+    if (p.size() >= 3 && SeOwnLockRefuses(pawn, op, p[2])) return true;
 
-    if      (op == "SPAWN"  && p.size() >= 5) SeSpawn(pawn, p[2], p[3], p[4], p.size() >= 6 ? p[5] : std::string());
+    if (!g_camMarkers.empty()) SeCamMarkersExpire();
+    if      (op == "OWNLOCK" && p.size() >= 4) SeOwnLockSet(pawn, p[2], p[3] == "1");
+    else if (op == "CAMPOS" && p.size() >= 4) SeCamMarkerMove(pawn, p[2], p[3]);
+    else if (op == "SPAWN"  && p.size() >= 5) SeSpawn(pawn, p[2], p[3], p[4], p.size() >= 6 ? p[5] : std::string());
     else if (op == "XFORM"  && p.size() >= 6) SeTransform(SeResolveIdent(p[2]), p[3], p[4], p[5]);
     else if (op == "DELETE" && p.size() >= 3) SeDelete(SeResolveIdent(p[2]));
     else if (op == "PROP"   && p.size() >= 5) SeSetProp(p[2], p[3], p[4]);
@@ -5020,6 +5291,9 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
     else if (op == "LVSAVE" && p.size() >= 3) SeLvSave(pawn, p[2]);
     else if (op == "SBDUP"  && p.size() >= 6) SeSandboxDuplicate(pawn, p[2], p[3], p[4], p[5]);
     else if (op == "LVLIST") SeLvList(pawn);
+    else if (op == "LVEXPORT" && p.size() >= 3) SeLvExport(pawn, p[2]);
+    else if (op == "LVPART" && p.size() >= 3) SeLvImportPart(p[2]);
+    else if (op == "LVIMPORT" && p.size() >= 4) SeLvImport(pawn, p[2], p[3]);
     else if (op == "LVLOAD" && p.size() >= 3) SeLvSetLoaded(pawn, p[2], true);
     else if (op == "LVUNLOAD" && p.size() >= 3) SeLvSetLoaded(pawn, p[2], false);
     else if (op == "LUAUPART" && p.size() >= 4) SeLuauPart(p[2], p[3]);
@@ -5053,7 +5327,13 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
         if (op == "ENTER")
         {
             // The caller's controller: the context is the controller itself (Vivox path) or a pawn.
-            if (SDK::UObject* pc = SeCallerPC(pawn)) SeReplayEdits(pc);
+            if (SDK::UObject* pc = SeCallerPC(pawn)) { SeReplayEdits(pc); SeOwnLocksPush(pc); }
+            g_camExitAt.erase(g_seCaller);
+        }
+        else
+        {
+            g_camExitAt[g_seCaller] = GetTickCount64();
+            if (auto m = g_camMarkers.find(g_seCaller); m != g_camMarkers.end()) { SeCamMarkerDrop(m->second); g_camMarkers.erase(m); }
         }
     }
     else HxLog("[HalcyonA2][SPECEDIT] unknown command\n");

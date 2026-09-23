@@ -1,0 +1,13 @@
+# Icon memory: the editor UI (palette, Content Browser) draws the game icons every frame. Private memory
+# must not climb over a minute of that. (The load itself is logged by [icons].)
+log T-MEM start
+enter
+wait 10
+mem start
+wait 30
+mem mid
+wait 30
+mem end
+
+expectmemgrowth 8
+log T-MEM done

@@ -1,0 +1,15 @@
+log T-MK start
+enter
+wait 6
+camto 0 -2600 -27500
+wait 3
+camto 0 -2400 -27500
+wait 3
+expectmarkers 1
+expecticon LE_SM_SP_HalfPipeWall_3x1x4_A_01_C 1
+expecticon LE_BP_ProgressionButton_C 1
+expecticon LE_BP_NoSuchThing_C 0
+wait 30
+exit
+wait 25
+log T-MK done

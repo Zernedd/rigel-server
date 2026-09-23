@@ -28,6 +28,8 @@ namespace se {
 
 void Log(const char* fmt, ...);          // %TEMP%\spec_editor.log
 void RequestUiSelect(const std::string& handle);   // se_ui.cpp: the UI selects this next frame (test scripts)
+std::wstring LevelsDir();                          // se_ui.cpp: Documents\RigelLevels (local .a2level projects)
+unsigned long long IconTexture(const std::string& itemName);   // se_render.cpp: the game's own item icon (0 = none)
 
 // ── what the render thread is allowed to know about the world ────────────────────────────────
 struct Vec3 { double x = 0, y = 0, z = 0; };
@@ -54,8 +56,9 @@ struct SceneObject
     Vec3        location;
     Rot         rotation;
     Vec3        scale{ 1, 1, 1 };
-    bool        lockedByMe = false;
-    bool        lockedByOther = false;
+    bool        lockedByMe = false;     // owner lock: mine, others can't edit it
+    bool        lockedByOther = false;  // owner lock: someone else's -- read only
+    std::string lockOwner;              // who holds the owner lock
     void*       ptr = nullptr;      // the actor -- GAME THREAD ONLY; the render thread must never deref it
     Vec3        boundsOff;          // world bounding box: centre = location + boundsOff, half-size = boundsExt
     Vec3        boundsExt;          // (what clicking in the viewport picks against)
@@ -135,6 +138,9 @@ enum class CmdType
     SetProperty,      // str = handle, str2 = property path, str3 = value (wire encoding)
     SendRaw,          // str = a complete SE| line (the red-coin run publish)
     Duplicate,        // str = handle, str2 = palette path (may be empty), loc/rot/scale = the copy's transform
+    OwnLock,          // str = handle, str2 = "1" lock / "0" unlock (owner lock: only the placer may edit)
+    LevelExport,      // str = level name: the server sends what is built here back as a .a2level file
+    LevelImport,      // str = level name, str2 = "load" | "save", str3 = the .a2level text
     DataRequest,      // str = handle: ask the server for the object's Game data
     DataSet,          // str = handle, str2 = path, str3 = kind, str4 = value
     LuauAttach,       // str = handle, str2 = script name, str3 = source

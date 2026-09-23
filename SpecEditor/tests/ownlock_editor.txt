@@ -1,0 +1,14 @@
+# Owner lock: the editor places a wall and locks it; the other editor (observer) must not be able to move it.
+# Then it unlocks, and the observer's move goes through.
+log OL start
+enter
+wait 3
+spawnat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625 0
+wait 5
+ownlock 1
+wait 4
+lockinfo
+wait 26
+ownlock 0
+wait 20
+log OL done

@@ -1,0 +1,23 @@
+log T-LV start
+enter
+wait 3
+spawnat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625 0
+wait 4
+spawnat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2660 -28625 45
+wait 5
+lvexport LvTest
+wait 6
+pickat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625
+delete
+wait 3
+pickat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2660 -28625
+delete
+wait 6
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625 0
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2660 -28625 0
+lvimport LvTest load
+wait 14
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625 1
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2660 -28625 1
+expectxf LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2660 -28625 0 45 0 1 1 1
+log T-LV done

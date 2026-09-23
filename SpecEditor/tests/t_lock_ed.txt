@@ -1,0 +1,15 @@
+log T-LOCK start
+enter
+wait 3
+spawnat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625 0
+wait 5
+expectlock 0 0
+ownlock 1
+wait 4
+expectlock 1 0
+wait 26
+ownlock 0
+wait 4
+expectlock 0 0
+wait 18
+log T-LOCK done

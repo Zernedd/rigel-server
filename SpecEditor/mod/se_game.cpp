@@ -38,6 +38,9 @@ static_assert(static_cast<int>(sereflect::PType::Object) == se::PT_Object &&
               "se::PropType must mirror sereflect::PType");
 #include <cmath>
 #include <unordered_set>
+#include <unordered_map>
+#include <psapi.h>
+#pragma comment(lib, "psapi.lib")
 #include <algorithm>
 #include <cstdlib>
 
@@ -56,6 +59,69 @@ SDK::UFunction* g_setQuestsFn = nullptr;   // A2PlayerQuestComponent::Client_Set
 std::vector<Snapshot::GameScript> g_gameScripts;   // ScanScripts result
 std::string g_dumpScriptsTo;                       // test op: also write the scan to this folder
 std::vector<Snapshot::LevelInfo> g_levels;       // saved levels (SE|LVLIST), for the Levels tab
+// Where this editor's camera is, for the marker everyone else sees (SE|CAMPOS): ~8/s while it moves or
+// turns, a heartbeat every 5 s while it sits still (the server drops a marker 20 s after the last report).
+struct CamReport { double x, y, z, p, yw, r; };
+CamReport CamPose();                                     // below (the editor camera's pose)
+bool      CamActive();                                   // below
+void SendToServer(const std::string& payload);           // below
+void CamReportTick()
+{
+    static ULONGLONG s_last = 0;
+    static CamReport s_sent{ 1e30, 0, 0, 0, 0, 0 };
+    extern bool g_editorMode;
+    if (!g_editorMode || !CamActive()) { s_sent.x = 1e30; return; }
+    const ULONGLONG now = GetTickCount64();
+    if (now - s_last < 125) return;
+    const CamReport c = CamPose();
+    const double dx = c.x - s_sent.x, dy = c.y - s_sent.y, dz = c.z - s_sent.z;
+    const bool moved = dx * dx + dy * dy + dz * dz > 25.0 || std::fabs(c.yw - s_sent.yw) > 2.0 || std::fabs(c.p - s_sent.p) > 2.0 ||
+                       std::fabs(c.r - s_sent.r) > 2.0;
+    if (!moved && now - s_last < 5000) return;
+    s_last = now;
+    s_sent = c;
+    char b[160];
+    snprintf(b, sizeof(b), "SE|CAMPOS|%.1f,%.1f,%.1f|%.1f,%.1f,%.1f", c.x, c.y, c.z, c.p, c.yw, c.r);
+    SendToServer(b);
+}
+
+// Commands paced out to the server (it takes at most 60 a second): a level upload is dozens of parts.
+void SendToServer(const std::string& payload);   // below
+std::vector<std::string> g_paced;
+size_t g_pacedAt = 0;
+void PacedTick()
+{
+    static ULONGLONG s_last = 0;
+    if (g_pacedAt >= g_paced.size()) { if (!g_paced.empty()) { g_paced.clear(); g_pacedAt = 0; } return; }
+    const ULONGLONG now = GetTickCount64();
+    if (now - s_last < 30) return;                                 // ~33/s, leaving room for everything else
+    s_last = now;
+    SendToServer(g_paced[g_pacedAt++]);
+}
+// Level export arriving from the server in hex chunks: name -> parts.
+std::unordered_map<std::string, std::vector<std::string>> g_lvExportParts;
+
+// Owner locks the server told us about (SE|OWNLOCKS): sandbox id -> whose, and whether it is ours.
+struct OwnLockInfo { bool mine = false; std::string owner; };
+std::unordered_map<std::string, OwnLockInfo> g_ownLockMap;
+// The sandbox id at the front of a handle (<GUID> or <GUID>_<n>), or "".
+std::string HandleGuid(const std::string& h)
+{
+    if (h.size() < 36 || h[8] != '-' || h[13] != '-' || h[18] != '-' || h[23] != '-') return std::string();
+    if (h.size() > 36 && h[36] != '_') return std::string();
+    return h.substr(0, 36);
+}
+// Someone else's owner lock is on this object: don't move, delete or predict it here either (the server
+// refuses, and a locally predicted move would leave this client showing it somewhere it isn't).
+bool LockedByOther(const std::string& handle)
+{
+    if (g_ownLockMap.empty()) return false;
+    auto it = g_ownLockMap.find(HandleGuid(handle));
+    if (it == g_ownLockMap.end() || it->second.mine) return false;
+    static ULONGLONG s_last = 0;
+    if (GetTickCount64() - s_last > 1500) { s_last = GetTickCount64(); Notes().Set("Locked by " + it->second.owner + " - only they can change it."); }
+    return true;
+}
 int g_levelsSerial = 0;
 std::vector<Snapshot::QuestRef> g_knownQuests;   // every quest row seen, for the Game data quest pickers
 std::string g_dataHandle, g_dataIdent;             // Game data: the object asked about, and how we named it
@@ -401,8 +467,12 @@ Rot QuatToRot(double X, double Y, double Z, double W)
 // one of the LE prefabs, which is what this editor creates - the rest of the level is not ours to move.
 template <typename P> bool CallNative(SDK::UObject* obj, const char* cls, const char* fn, P& parms);   // below
 
+Vec3 g_markPos;                                      // markpos / expectdelta
+double g_memFirstMB = -1.0;                          // first `mem` sample (leak checks)
+int g_markersSeen = 0;                               // camera markers found by the last BuildObjects
 void BuildObjects(Snapshot& snap)
 {
+    g_markersSeen = 0;
     auto* actorCls = SDK::UObject::FindClassFast("Actor");
     if (!actorCls) return;
     const int32_t n = SDK::UObject::GObjects->Num();
@@ -417,6 +487,18 @@ void BuildObjects(Snapshot& snap)
         // removed it. AActor::bActorIsBeingDestroyed is byte 0x65, bit 0.
         if (*(reinterpret_cast<const uint8_t*>(o) + 0x65) & 0x01) continue;
         const std::string cn = c->GetName();
+        if (cn == "BP_LevelEditor_Pawn_C")                  // an editor's camera marker (server-spawned, SE|CAMPOS)
+        {
+            auto* ma = static_cast<SDK::AActor*>(o);
+            const bool mine = g_pc && ma->Owner == static_cast<SDK::AActor*>(g_pc);
+            if (mine != ma->bHidden)                        // hide our own (we are inside it); show everyone else's
+            {
+                SDK::Params::Actor_SetActorHiddenInGame h{}; h.bNewHidden = mine;
+                CallNative(o, "Actor", "SetActorHiddenInGame", h);
+            }
+            ++g_markersSeen;
+            continue;
+        }
         if (cn.rfind("LE_", 0) != 0 && !IsSandboxClass(cn) && cn != "BP_BoostPad_Omnidirectional_C" && cn != "BP_BoostTank_World_C") continue;
 
         SceneObject so;
@@ -424,6 +506,13 @@ void BuildObjects(Snapshot& snap)
         so.handle = o->GetName();
         so.label = so.handle;
         so.className = cn;
+        if (!g_ownLockMap.empty())
+            if (auto ol = g_ownLockMap.find(HandleGuid(so.handle)); ol != g_ownLockMap.end())
+            {
+                so.lockedByMe = ol->second.mine;
+                so.lockedByOther = !ol->second.mine;
+                so.lockOwner = ol->second.owner;
+            }
 
         // RootComponent@0x1A8 -> ComponentToWorld@0x1D0 (quat@+0, translation@+0x20, scale@+0x40)
         void* root = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(o) + 0x1A8);
@@ -652,6 +741,7 @@ void HandleCommands()
         {
             // c.loc/rot/scale are the NEW transform; the identity has to be built from where the actor
             // still is, which is what the server will match on.
+            if (LockedByOther(c.str)) break;
             const std::string id = IdentForEdit(c.str);
             if (id.empty()) { Log("[game] xform: no identity for handle %s", c.str.c_str()); break; }
             SendToServer("SE|XFORM|" + id + "|" + Fmt3(c.loc) + "|" + Fmt3(c.rot) + "|" + Fmt3(c.scale));
@@ -662,6 +752,7 @@ void HandleCommands()
 
         case CmdType::DeleteObject:
         {
+            if (LockedByOther(c.str)) break;
             const std::string id = IdentForEdit(c.str);
             if (id.empty()) { Log("[game] delete: no identity for handle %s", c.str.c_str()); break; }
             SendToServer("SE|DELETE|" + id);
@@ -680,6 +771,33 @@ void HandleCommands()
         case CmdType::SendRaw:
             SendToServer(c.str);
             break;
+
+        case CmdType::LevelExport:
+            SendToServer("SE|LVEXPORT|" + c.str);
+            Log("[levels] export '%s' requested", c.str.c_str());
+            break;
+
+        case CmdType::LevelImport:
+        {
+            static const char* hx = "0123456789ABCDEF";
+            std::string hex;
+            for (unsigned char ch : c.str3) { hex.push_back(hx[ch >> 4]); hex.push_back(hx[ch & 15]); }
+            size_t parts = 0;
+            for (size_t i = 0; i < hex.size(); i += 960, ++parts) g_paced.push_back("SE|LVPART|" + hex.substr(i, 960));
+            g_paced.push_back("SE|LVIMPORT|" + c.str + "|" + c.str2);
+            Notes().Set((c.str2 == "save" ? "Uploading '" : "Loading '") + c.str + "' (" + std::to_string(c.str3.size() / 1024 + 1) + " KB)...");
+            Log("[levels] import '%s' (%s): %zu byte(s) in %zu part(s)", c.str.c_str(), c.str2.c_str(), c.str3.size(), parts);
+            break;
+        }
+
+        case CmdType::OwnLock:
+        {
+            const std::string id = IdentForEdit(c.str);
+            if (id.empty()) break;
+            SendToServer("SE|OWNLOCK|" + id + "|" + c.str2);
+            Log("[locks] %s %s", c.str2 == "1" ? "lock" : "unlock", id.c_str());
+            break;
+        }
 
         case CmdType::Duplicate:
         {
@@ -1216,6 +1334,9 @@ void CameraDeactivate()
     SetViewTarget(pawn ? pawn : g_pc);
 }
 
+CamReport CamPose() { return { g_cam.x, g_cam.y, g_cam.z, g_cam.rp, g_cam.ry, g_cam.rr }; }
+bool CamActive() { return Cam().active && ObjectAlive(g_cam.actor); }
+
 void CameraApply()
 {
     if (!ObjectAlive(g_cam.actor)) return;
@@ -1385,8 +1506,8 @@ void DragTick()
         if (seq != s_sentSeq || d.active)
         {
             s_all.clear();
-            s_all.push_back({ d.handle, d.loc, d.scale, d.rot });
-            for (const auto& m : d.group) s_all.push_back(m);
+            if (!LockedByOther(d.handle)) s_all.push_back({ d.handle, d.loc, d.scale, d.rot });
+            for (const auto& m : d.group) if (!LockedByOther(m.handle)) s_all.push_back(m);
             s_active = d.active;
         }
     }
@@ -1655,8 +1776,12 @@ void LogScreenPos(const Snapshot& snap, const SceneObject& o)
     double rzx = -1, rzy = -1;
     const Vec3 ringZ{ o.location.x + L * wpp, o.location.y, o.location.z };
     proj(ringZ, rzx, rzy, nullptr);
-    Log("[script] SCREENPOS center=%.0f,%.0f handleX=%.0f,%.0f handleY=%.0f,%.0f handleZ=%.0f,%.0f ringZ=%.0f,%.0f worldPerPx=%.4f",
-        cx, cyy, hx[0], hy[0], hx[1], hy[1], hx[2], hy[2], rzx, rzy, wpp);
+    // The XY plane square (Move): its centre sits 0.32 of the handle length along both X and Y.
+    double pxx = -1, pxy = -1;
+    const Vec3 planeXY{ o.location.x + 0.32 * L * wpp, o.location.y + 0.32 * L * wpp, o.location.z };
+    proj(planeXY, pxx, pxy, nullptr);
+    Log("[script] SCREENPOS center=%.0f,%.0f handleX=%.0f,%.0f handleY=%.0f,%.0f handleZ=%.0f,%.0f ringZ=%.0f,%.0f planeXY=%.0f,%.0f worldPerPx=%.4f",
+        cx, cyy, hx[0], hy[0], hx[1], hy[1], hx[2], hy[2], rzx, rzy, pxx, pxy, wpp);
 }
 
 // The replicated copy of the object we last spawned: same class, nearest the spot we asked for.
@@ -1958,6 +2083,130 @@ void RunScript(const Snapshot& snap)
         Log("[script] gmove %s", rest.c_str());
         return;
     }
+    // ---- assertions (each logs PASS or FAIL, which the regression suite counts) ----
+    if (!strcmp(op, "expectnear"))            // expectnear <Class> x y z <count> [radius=60] -- that many of it there
+    {
+        char name[128] = {}; Vec3 at; int want = 0; double rad = 60.0;
+        if (sscanf_s(rest.c_str(), "%127s %lf %lf %lf %d %lf", name, (unsigned)sizeof(name), &at.x, &at.y, &at.z, &want, &rad) < 5)
+        { Log("[script] FAIL expectnear: want <Class> x y z <count> [radius]"); return; }
+        int n = 0;
+        for (const SceneObject& so : g_lastObjects)
+        {
+            if (so.className.find(name) == std::string::npos) continue;
+            const double dx = so.location.x - at.x, dy = so.location.y - at.y, dz = so.location.z - at.z;
+            if (dx * dx + dy * dy + dz * dz <= rad * rad) ++n;
+        }
+        Log("[script] %s expectnear %s at (%.0f,%.0f,%.0f) r=%.0f: %d (wanted %d)", n == want ? "PASS" : "FAIL", name, at.x, at.y, at.z, rad, n, want);
+        return;
+    }
+    if (!strcmp(op, "expectxf"))              // expectxf <Class> x y z pitch yaw roll sx sy sz -- the one nearest has that transform
+    {
+        char name[128] = {}; Vec3 at, sc; Rot r;
+        if (sscanf_s(rest.c_str(), "%127s %lf %lf %lf %lf %lf %lf %lf %lf %lf", name, (unsigned)sizeof(name), &at.x, &at.y, &at.z,
+                     &r.pitch, &r.yaw, &r.roll, &sc.x, &sc.y, &sc.z) != 10) { Log("[script] FAIL expectxf: bad args"); return; }
+        const SceneObject* best = nullptr; double bd = 1e30;
+        for (const SceneObject& so : g_lastObjects)
+        {
+            if (so.className.find(name) == std::string::npos) continue;
+            const double dx = so.location.x - at.x, dy = so.location.y - at.y, dz = so.location.z - at.z, d = dx * dx + dy * dy + dz * dz;
+            if (d < bd) { bd = d; best = &so; }
+        }
+        if (!best || bd > 60.0 * 60.0) { Log("[script] FAIL expectxf: no %s near (%.0f,%.0f,%.0f)", name, at.x, at.y, at.z); return; }
+        auto angOk = [](double a, double b) { double d = std::fmod(std::fabs(a - b), 360.0); return (std::min)(d, 360.0 - d) < 1.5; };
+        // A rotator has two spellings for one orientation (p,y,r) == (180-p, y+180, r+180): compare either.
+        const bool rotOk = (angOk(best->rotation.pitch, r.pitch) && angOk(best->rotation.yaw, r.yaw) && angOk(best->rotation.roll, r.roll)) ||
+                           (angOk(best->rotation.pitch, 180 - r.pitch) && angOk(best->rotation.yaw, r.yaw + 180) && angOk(best->rotation.roll, r.roll + 180));
+        const bool sOk = std::fabs(best->scale.x - sc.x) < 0.02 && std::fabs(best->scale.y - sc.y) < 0.02 && std::fabs(best->scale.z - sc.z) < 0.02;
+        Log("[script] %s expectxf %s: rot(%.1f,%.1f,%.1f) scale(%.2f,%.2f,%.2f), wanted rot(%.1f,%.1f,%.1f) scale(%.2f,%.2f,%.2f)",
+            rotOk && sOk ? "PASS" : "FAIL", name, best->rotation.pitch, best->rotation.yaw, best->rotation.roll, best->scale.x, best->scale.y,
+            best->scale.z, r.pitch, r.yaw, r.roll, sc.x, sc.y, sc.z);
+        return;
+    }
+    if (!strcmp(op, "mem"))                   // mem [label] -- this client's private memory (leak checks)
+    {
+        PROCESS_MEMORY_COUNTERS_EX pm{};
+        GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pm), sizeof(pm));
+        Log("[script] MEM %s private=%.1f MB working=%.1f MB", rest.c_str(), pm.PrivateUsage / 1048576.0, pm.WorkingSetSize / 1048576.0);
+        if (g_memFirstMB < 0) g_memFirstMB = pm.PrivateUsage / 1048576.0;
+        return;
+    }
+    if (!strcmp(op, "expectmemgrowth"))       // expectmemgrowth <max MB> -- private memory since the first `mem`
+    {
+        PROCESS_MEMORY_COUNTERS_EX pm{};
+        GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pm), sizeof(pm));
+        const double grew = pm.PrivateUsage / 1048576.0 - g_memFirstMB, lim = atof(rest.c_str());
+        Log("[script] %s expectmemgrowth: +%.1f MB since the first sample (limit %.1f)", g_memFirstMB >= 0 && grew <= lim ? "PASS" : "FAIL", grew, lim);
+        return;
+    }
+    if (!strcmp(op, "expecticon"))            // expecticon <item name> 0|1 -- the game's own icon is loaded for it
+    {
+        char name[128] = {}; int want = 1;
+        sscanf_s(rest.c_str(), "%127s %d", name, (unsigned)sizeof(name), &want);
+        const bool has = IconTexture(name) != 0;
+        Log("[script] %s expecticon %s: %s", has == (want != 0) ? "PASS" : "FAIL", name, has ? "game icon" : "drawn fallback");
+        return;
+    }
+    if (!strcmp(op, "expectmarkers"))         // expectmarkers <n> -- camera markers this client can see (not its own)
+    {
+        int want = atoi(rest.c_str()), shown = 0, mine = 0;
+        auto* acls = SDK::UObject::FindClassFast("BP_LevelEditor_Pawn_C");
+        const int32_t n = SDK::UObject::GObjects->Num();
+        for (int32_t i = 0; acls && i < n; ++i)
+        {
+            SDK::UObject* ob = SDK::UObject::GObjects->GetByIndex(i);
+            if (!ob || ob->IsDefaultObject() || ob->Class != acls) continue;
+            if (*(reinterpret_cast<const uint8_t*>(ob) + 0x65) & 0x01) continue;
+            auto* ma = static_cast<SDK::AActor*>(ob);
+            if (g_pc && ma->Owner == static_cast<SDK::AActor*>(g_pc)) { ++mine; continue; }
+            if (ma->bHidden) continue;
+            // Really drawn? Its Cube mesh (BP_LevelEditor_Pawn_C +0x440) must be visible, not just the actor.
+            auto* cube = *reinterpret_cast<SDK::UPrimitiveComponent**>(reinterpret_cast<uintptr_t>(ob) + 0x440);
+            const bool drawn = cube && cube->bVisible && !cube->bHiddenInGame;
+            const SDK::FVector l = ma->RootComponent ? ma->RootComponent->RelativeLocation : SDK::FVector{};
+            Log("[script] marker %s at (%.0f,%.0f,%.0f) cube=%s", ob->GetName().c_str(), l.X, l.Y, l.Z, drawn ? "VISIBLE" : "not drawn");
+            if (drawn) ++shown;
+        }
+        Log("[script] %s expectmarkers: %d visible other-editor marker(s) (wanted %d), %d of my own (hidden)", shown == want ? "PASS" : "FAIL",
+            shown, want, mine);
+        return;
+    }
+    if (!strcmp(op, "expectup"))              // expectup ux uy uz -- the editor camera's gravity frame up (after camto)
+    {
+        double u[3] = {};
+        sscanf_s(rest.c_str(), "%lf %lf %lf", &u[0], &u[1], &u[2]);
+        const double d = std::fabs(g_cam.up[0] - u[0]) + std::fabs(g_cam.up[1] - u[1]) + std::fabs(g_cam.up[2] - u[2]);
+        Log("[script] %s expectup: camera up (%.2f,%.2f,%.2f), wanted (%.2f,%.2f,%.2f); rot(p=%.1f,y=%.1f,r=%.1f)", d < 0.15 ? "PASS" : "FAIL",
+            g_cam.up[0], g_cam.up[1], g_cam.up[2], u[0], u[1], u[2], g_cam.rp, g_cam.ry, g_cam.rr);
+        return;
+    }
+    if (!strcmp(op, "fav"))                   // fav <palette substring> -- star/unstar it (Favorites), then log its state
+    {
+        RequestUiSelect("!fav " + rest);
+        return;
+    }
+    if (!strcmp(op, "expectfav"))             // expectfav <palette substring> 0|1
+    {
+        RequestUiSelect("!expectfav " + rest);
+        return;
+    }
+    if (!strcmp(op, "lvexport")) { Command c{ CmdType::LevelExport }; c.str = rest; State().Push(c); return; }   // lvexport <name>
+    if (!strcmp(op, "lvimport"))              // lvimport <file name> <load|save> -- Documents\RigelLevels\<file>.a2level
+    {
+        char nm[80] = {}, mode[16] = {};
+        sscanf_s(rest.c_str(), "%79s %15s", nm, (unsigned)sizeof(nm), mode, (unsigned)sizeof(mode));
+        const std::string sn = nm;
+        const std::wstring path = LevelsDir() + L"\\" + std::wstring(sn.begin(), sn.end()) + L".a2level";
+        FILE* f = nullptr;
+        if (_wfopen_s(&f, path.c_str(), L"rb") != 0 || !f) { Log("[script] FAIL lvimport: no %ls", path.c_str()); return; }
+        std::string text;
+        char buf[4096];
+        for (size_t r; (r = fread(buf, 1, sizeof(buf), f)) > 0;) text.append(buf, r);
+        fclose(f);
+        Command c{ CmdType::LevelImport }; c.str = sn; c.str2 = !strcmp(mode, "save") ? "save" : "load"; c.str3 = text;
+        State().Push(c);
+        Log("[script] lvimport %s (%zu byte(s), %s)", nm, text.size(), c.str2.c_str());
+        return;
+    }
     if (!strcmp(op, "sbadd"))                 // sbadd <UniqueID> -- LOCAL TEST: sandbox-system placement in front of us
     {
         const double d2r = 3.14159265358979 / 180.0;
@@ -2207,6 +2456,42 @@ void RunScript(const Snapshot& snap)
     }
     if (!o) { Log("[script] FAIL %s: the spawned %s never replicated to this client", op, g_lastSpawnClass.c_str()); return; }
 
+    if (!strcmp(op, "ownlock"))               // ownlock 1|0 -- owner-lock the last object (Details > Lock)
+    {
+        Command c{ CmdType::OwnLock }; c.str = o->handle; c.str2 = rest == "0" ? "0" : "1"; State().Push(c);
+        Log("[script] ownlock %s %s", c.str2.c_str(), o->handle.c_str());
+        return;
+    }
+    if (!strcmp(op, "markpos"))               // markpos -- remember where the last object is now (for expectdelta)
+    {
+        g_markPos = o->location;
+        Log("[script] markpos (%.1f,%.1f,%.1f)", o->location.x, o->location.y, o->location.z);
+        return;
+    }
+    if (!strcmp(op, "expectdelta"))           // expectdelta <x> <y> <z> -- per axis 1 = must have moved (>10), 0 = must not (<3)
+    {
+        int f[3] = {};
+        sscanf_s(rest.c_str(), "%d %d %d", &f[0], &f[1], &f[2]);
+        const double d[3] = { o->location.x - g_markPos.x, o->location.y - g_markPos.y, o->location.z - g_markPos.z };
+        bool ok = true;
+        for (int k = 0; k < 3; ++k) if (f[k] != 2) ok = ok && (f[k] ? std::fabs(d[k]) > 10.0 : std::fabs(d[k]) < 3.0);   // 2 = either
+        Log("[script] %s expectdelta: moved (%.1f,%.1f,%.1f), wanted change x=%d y=%d z=%d", ok ? "PASS" : "FAIL", d[0], d[1], d[2], f[0], f[1], f[2]);
+        return;
+    }
+    if (!strcmp(op, "expectlock"))            // expectlock <mine 0|1> <other 0|1> -- the last object's owner-lock state
+    {
+        int m = 0, ot = 0;
+        sscanf_s(rest.c_str(), "%d %d", &m, &ot);
+        const bool ok = o->lockedByMe == (m != 0) && o->lockedByOther == (ot != 0);
+        Log("[script] %s expectlock: mine=%d other=%d owner='%s' (wanted mine=%d other=%d)", ok ? "PASS" : "FAIL", o->lockedByMe,
+            o->lockedByOther, o->lockOwner.c_str(), m, ot);
+        return;
+    }
+    if (!strcmp(op, "lockinfo"))              // lockinfo -- what this client thinks of the last object's lock
+    {
+        Log("[script] LOCK %s mine=%d other=%d owner='%s'", o->handle.c_str(), o->lockedByMe, o->lockedByOther, o->lockOwner.c_str());
+        return;
+    }
     if (!strcmp(op, "move"))
     {
         double dx = 0, dy = 0, dz = 0;
@@ -3050,6 +3335,53 @@ void HandleServerMessage(const wchar_t* w)
     for (int i = 0; w[i] && i < 60000; ++i) msg.push_back(static_cast<char>(w[i] < 128 ? w[i] : '?'));
     if (msg.rfind("SE|PROP|", 0) == 0) ApplyRemoteProp(msg);
     else if (msg.rfind("SE|NOTE|", 0) == 0) { Notes().Set(msg.substr(8)); Log("[note] %s", msg.substr(8).c_str()); }
+    else if (msg.rfind("SE|LVDATA|", 0) == 0)
+    {
+        // SE|LVDATA|<name>|<i>|<n>|<hex>: assemble, then write Documents\RigelLevels\<name>.a2level.
+        const size_t a = 10, b = msg.find('|', a), c2 = b == std::string::npos ? b : msg.find('|', b + 1),
+                     d = c2 == std::string::npos ? c2 : msg.find('|', c2 + 1);
+        if (d == std::string::npos) return;
+        const std::string name = msg.substr(a, b - a);
+        const int i = atoi(msg.substr(b + 1, c2 - b - 1).c_str()), n = atoi(msg.substr(c2 + 1, d - c2 - 1).c_str());
+        if (n <= 0 || n > 4096 || i < 0 || i >= n) return;
+        auto& parts = g_lvExportParts[name];
+        if (static_cast<int>(parts.size()) != n) parts.assign(n, std::string());
+        parts[i] = msg.substr(d + 1);
+        if (parts[i].empty()) parts[i] = " ";                     // an empty level still completes
+        for (const auto& p : parts) if (p.empty()) return;
+        std::string text;
+        for (const auto& p : parts)
+            for (size_t k = 0; k + 1 < p.size(); k += 2) text.push_back(static_cast<char>(strtoul(p.substr(k, 2).c_str(), nullptr, 16)));
+        g_lvExportParts.erase(name);
+        const std::wstring path = LevelsDir() + L"\\" + std::wstring(name.begin(), name.end()) + L".a2level";
+        FILE* f = nullptr;
+        if (_wfopen_s(&f, path.c_str(), L"wb") == 0 && f)
+        {
+            fwrite(text.data(), 1, text.size(), f);
+            fclose(f);
+            int objs = 0;
+            for (size_t k = 0; (k = text.find("\nO\t", k)) != std::string::npos; ++k) ++objs;
+            Notes().Set("Saved '" + name + "' to Documents\\RigelLevels (" + std::to_string(objs) + " object(s)).");
+            Log("[levels] exported '%s' -> %ls (%zu byte(s), %d object(s))", name.c_str(), path.c_str(), text.size(), objs);
+        }
+        else Notes().Set("Couldn't write the level file to Documents\\RigelLevels.");
+    }
+    else if (msg.rfind("SE|OWNLOCKS|", 0) == 0)
+    {
+        g_ownLockMap.clear();
+        const std::string body = msg.substr(12);
+        for (size_t b = 0; b < body.size();)
+        {
+            size_t e = body.find(';', b);
+            if (e == std::string::npos) e = body.size();
+            const std::string ent = body.substr(b, e - b);
+            b = e + 1;
+            const size_t c1 = ent.find(','), c2 = c1 == std::string::npos ? std::string::npos : ent.find(',', c1 + 1);
+            if (c2 == std::string::npos) continue;
+            g_ownLockMap[ent.substr(0, c1)] = { ent.substr(c1 + 1, c2 - c1 - 1) == "1", ent.substr(c2 + 1) };
+        }
+        Log("[locks] %zu object(s) owner-locked", g_ownLockMap.size());
+    }
     else if (msg.rfind("SE|ERR|", 0) == 0)
     {
         // SE|ERR|<title>|<what happened and how to fix it>
@@ -3215,6 +3547,8 @@ void __fastcall PE_Hook(void* ctx, void* fn, void* parms)
                 __try { PickTick(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
             }
             __try { DragTick(); } __except (EXCEPTION_EXECUTE_HANDLER) { Log("[drag] tick faulted"); }
+            CamReportTick();
+            PacedTick();
             __try { HandleCommands(); } __except (EXCEPTION_EXECUTE_HANDLER) { Log("[game] commands faulted"); }
             s_in = false;
         }

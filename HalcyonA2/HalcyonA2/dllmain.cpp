@@ -4462,6 +4462,27 @@ static void DumpSimSeats()
     InterlockedExchange(&g_seatedPlayers, seated);
 }
 static void SafeDumpSimSeats() { __try { DumpSimSeats(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+// [MI 2026-09-23] The seated-player count, read straight off the ball sim manager we already hold. DumpSimSeats
+// is diagnostic-only (a full GObjects walk + printf per outline), so without -HalcyonDiag g_seatedPlayers was
+// NEVER updated: it stayed 0, SEATFIX believed nobody could ever be seated, and armed a reconcile burst every
+// 30 s forever -- each burst a >55 ms game-thread hitch (see SEATFIX below), i.e. a regular MI spike on prod.
+// -1 = no manager (leave the count alone).
+static LONG CountSeatedFast()
+{
+    if (!g_ballSimMgr) return -1;
+    const uintptr_t p = reinterpret_cast<uintptr_t>(g_ballSimMgr);
+    const uintptr_t olData = *reinterpret_cast<uintptr_t*>(p + 0x350);
+    const int       olNum  = *reinterpret_cast<int*>(p + 0x358);
+    if (!olData || olNum <= 0 || olNum > 64) return 0;
+    LONG seated = 0;
+    for (int k = 0; k < olNum; ++k)
+    {
+        const int piN = *reinterpret_cast<int*>(olData + static_cast<uintptr_t>(k) * 0x30 + 0x18);
+        if (piN > 0 && piN <= 32) seated += piN;
+    }
+    return seated;
+}
+static LONG SafeCountSeatedFast() { __try { return CountSeatedFast(); } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; } }
 
 // [2026-09-03 ★ BALL-HIT REGRESSION FIX] g_ballSimMgr is assigned ONLY inside the now-disabled hand-spawn
 // path (g_ballsimEnabled=false). Since the game spawns the BallSimManager NATIVELY now, g_ballSimMgr stayed
@@ -4687,6 +4708,10 @@ static void DriveSeater()
     HxLog("[HalcyonA2][SEATDRIVE] outline@0x358=%d pawns=%d wanted=%ld seated=%ld (reconcile gated -> physics runs)\n",
           outline, g_vrPawnCount, (long)g_reconcileWanted, (long)g_seatedPlayers);
     SafeDumpSimSeats();
+    if (!g_diag) { const LONG seatedNow = SafeCountSeatedFast(); if (seatedNow >= 0) InterlockedExchange(&g_seatedPlayers, seatedNow); }
+    // [MI 2026-09-23] DiscCensus is a full 167k-object walk (+ a log line per player disc): 30-46 ms every
+    // 5 s on prod ([PROF] SafeDriveSeater pk46). Diagnostic only -- behind -HalcyonDiag like DumpSimSeats.
+    if (g_diag)
     { static uint64_t s_lastDisc = 0;
       if (now - s_lastDisc > 5000) { s_lastDisc = now; SafeDiscCensus(); } }
 
@@ -4713,8 +4738,10 @@ static void DriveSeater()
         // ever succeeds (seated>0, checked at the top-level guard), s_fails resets and normal cadence
         // returns, so a real client that CAN seat is unaffected.
         static uint64_t s_lastArm = 0;
-        const uint64_t interval = (uint64_t)3000 << (s_seatFails < 4 ? s_seatFails : 4);   // 3s,6,12,24,48->cap
-        const uint64_t capped   = interval > 30000 ? 30000 : interval;
+        const uint64_t interval = (uint64_t)3000 << (s_seatFails < 6 ? s_seatFails : 6);   // 3s,6,12,24,48,96,192->cap
+        // [MI 2026-09-23] cap 30 s -> 120 s: a burst that has failed six times in a row is not going to start
+        // working on the seventh, and every one is a hitch. A join (pawn count change) still re-arms at once.
+        const uint64_t capped   = interval > 120000 ? 120000 : interval;
         if (now - s_lastArm > capped)
         {
             s_lastArm = now;
@@ -6001,6 +6028,34 @@ static void PumpBallOverlaps()
         }
         const int idx = s_ovCursor;
         s_ovCursor = (idx + 1 >= totalItems) ? 0 : (idx + 1);
+        // [MI 2026-09-23] The time budget is checked BETWEEN items, so one expensive item still ran whole:
+        // [PROF] SafePumpBallOverlaps peaked at 69 ms in a single call on prod (big colliders -- level
+        // geometry, editor-placed walls). Time every item; one that costs >8 ms sits out for 30 s, so it can
+        // still be re-checked but can no longer stall back-to-back frames. Discs are never benched.
+        SDK::UObject* const itemObj = idx < nDisc ? discs[idx] : idx < nDisc + nPhys ? phys[idx - nDisc] : goals[idx - nDisc - nPhys];
+        static std::unordered_map<SDK::UObject*, ULONGLONG> s_benched;
+        if (idx >= nDisc && !s_benched.empty())
+        {
+            auto b = s_benched.find(itemObj);
+            if (b != s_benched.end()) { if (now < b->second) continue; s_benched.erase(b); }
+        }
+        LARGE_INTEGER _itT0; QueryPerformanceCounter(&_itT0);
+        struct ItemTimer
+        {
+            LARGE_INTEGER t0, qpf; SDK::UObject* obj; bool benchable; ULONGLONG now;
+            std::unordered_map<SDK::UObject*, ULONGLONG>* benched;
+            ~ItemTimer()
+            {
+                LARGE_INTEGER t1; QueryPerformanceCounter(&t1);
+                const double ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)qpf.QuadPart;
+                if (ms > 8.0 && benchable && benched->size() < 256)
+                {
+                    (*benched)[obj] = now + 30000;
+                    static int s_logged = 0;
+                    if (s_logged < 40) { ++s_logged; HxLog("[HalcyonA2][OVERLAPS] %.1f ms for one item -- benched 30 s\n", ms); }
+                }
+            }
+        } itemTimer{ _itT0, _ovQpf, itemObj, idx >= nDisc, now, &s_benched };
         if (idx < nDisc)
         {
             // Disc side: the ball's root primitive AND its SphereComponent@0x4D0 (the real
@@ -10201,7 +10256,7 @@ static void NvWorldCensus()
 {
     static bool s_done = false;
     static ULONGLONG s_first = 0;
-    if (s_done) return;
+    if (s_done || !g_diag) return;                   // [MI 2026-09-23] log-only full walk: diagnostics only
     const ULONGLONG now = GetTickCount64();
     if (!s_first) s_first = now;
     if (now - s_first < 90000) return;                // after the world has settled

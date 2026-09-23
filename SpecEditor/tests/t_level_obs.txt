@@ -1,0 +1,6 @@
+log T-LV-OBS start
+enter
+wait 70
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625 1
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2660 -28625 1
+log T-LV-OBS done

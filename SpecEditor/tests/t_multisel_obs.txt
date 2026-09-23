@@ -1,0 +1,8 @@
+log T-MS-OBS start
+enter
+wait 75
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28325 1
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2660 -28325 1
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -49 2060 -28325 1
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -49 2660 -28325 1
+log T-MS-OBS done

@@ -1,0 +1,17 @@
+log T-LOCK-OBS start
+enter
+wait 20
+pickat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625
+expectlock 0 1
+move 0 0 300
+wait 6
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625 1
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28325 0
+wait 14
+pickat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625
+expectlock 0 0
+move 0 0 300
+wait 7
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28325 1
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625 0
+log T-LOCK-OBS done

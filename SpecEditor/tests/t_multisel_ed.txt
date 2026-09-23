@@ -1,0 +1,34 @@
+log T-MS start
+enter
+wait 3
+spawnat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625 0
+wait 4
+spawnat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2660 -28625 45
+wait 4
+pickat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625
+select
+wait 1
+pickat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2660 -28625
+selectadd
+wait 1
+gmove 0 0 200
+wait 5
+gmove 0 0 100
+wait 5
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28325 1
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2660 -28325 1
+dupsel
+wait 8
+selinfo
+gmove 400 0 0
+wait 6
+gmove 0 0 50
+wait 2
+gmove 0 0 -50
+wait 7
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28325 1
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2660 -28325 1
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -49 2060 -28325 1
+expectnear LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -49 2660 -28325 1
+expectxf LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -49 2660 -28325 0 45 0 1 1 1
+log T-MS done

@@ -272,6 +272,30 @@ float SegDist(ImVec2 p, ImVec2 a, ImVec2 b)
     return std::sqrt(dx * dx + dy * dy);
 }
 
+// Plane / centre handles: 3,4,5 = the plane whose normal is X,Y,Z; 6 = the centre (Move: the view plane,
+// Scale: uniform). g_planeA/B span the plane being dragged, g_planeHit0 is where the grab ray met it.
+Vec3 g_planeA, g_planeB, g_planeHit0;
+bool RayPlane(const Vec3& e, const Vec3& dir, const Vec3& p0, const Vec3& n, Vec3& hit)
+{
+    const double den = Dot(dir, n);
+    if (std::fabs(den) < 1e-4) return false;
+    const double t = Dot(Sub(p0, e), n) / den;
+    if (t < 0.0) return false;
+    hit = Add(e, Mul(dir, t));
+    return true;
+}
+bool PointInQuad(ImVec2 m, const ImVec2 q[4])
+{
+    int pos = 0, neg = 0;
+    for (int k = 0; k < 4; ++k)
+    {
+        const ImVec2 a = q[k], b = q[(k + 1) % 4];
+        const float cr = (b.x - a.x) * (m.y - a.y) - (b.y - a.y) * (m.x - a.x);
+        if (cr > 0) ++pos; else if (cr < 0) ++neg;
+    }
+    return pos == 0 || neg == 0;
+}
+
 void WriteDrag(bool active)
 {
     LiveDrag& d = Drag();
@@ -376,6 +400,26 @@ void DrawGizmoOverlay(const Snapshot& snap, const SceneObject* sel)
             if (d < best) { best = d; hover = i; hoverK = dk; }
         }
     }
+    // Move: a small square in each plane (drag in two axes at once, as Unreal's widget); both modes: the
+    // centre (Move: slide in the view plane; Scale: uniform). Axes win when both are under the mouse.
+    ImVec2 quad[3][4];
+    bool quadOk[3] = { false, false, false };
+    if (g_gizmo == GizmoMode::Translate)
+        for (int i = 0; i < 3; ++i)
+        {
+            const Vec3& a = ax[(i + 1) % 3];
+            const Vec3& b = ax[(i + 2) % 3];
+            const double s0 = 0.22 * L * worldPerPx, s1 = 0.42 * L * worldPerPx;
+            const Vec3 w[4] = { Add(at, Add(Mul(a, s0), Mul(b, s0))), Add(at, Add(Mul(a, s1), Mul(b, s0))),
+                                Add(at, Add(Mul(a, s1), Mul(b, s1))), Add(at, Add(Mul(a, s0), Mul(b, s1))) };
+            quadOk[i] = true;
+            for (int k = 0; k < 4; ++k) if (!W2S(v, w[k], quad[i][k])) quadOk[i] = false;
+        }
+    if (hover < 0 && g_dragAxis < 0 && !uiWantsMouse && !Cam().looking && g_gizmo != GizmoMode::Rotate)
+    {
+        for (int i = 0; i < 3 && hover < 0; ++i) if (quadOk[i] && PointInQuad(mouse, quad[i])) hover = 3 + i;
+        if (hover < 0 && (mouse.x - c.x) * (mouse.x - c.x) + (mouse.y - c.y) * (mouse.y - c.y) <= 81.0f) hover = 6;
+    }
     g_gizmoHover = hover >= 0;
 
     if (hover >= 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !sel->lockedByOther)
@@ -385,7 +429,13 @@ void DrawGizmoOverlay(const Snapshot& snap, const SceneObject* sel)
         g_dragStartRot   = sel->rotation;
         g_dragStartScale = sel->scale;
         g_dragStartMouse = mouse;
-        g_dragAxisWorld  = ax[hover];
+        g_dragAxisWorld  = hover < 3 ? ax[hover] : hover < 6 ? ax[hover - 3] : v.fwd;   // axis, or the plane's normal
+        if (hover >= 3)
+        {
+            g_planeA = hover < 6 ? ax[(hover - 3 + 1) % 3] : v.right;
+            g_planeB = hover < 6 ? ax[(hover - 3 + 2) % 3] : v.up;
+            if (!RayPlane(v.eye, ScreenRay(v, mouse), sel->location, g_dragAxisWorld, g_planeHit0)) g_planeHit0 = sel->location;
+        }
         g_dragHandle     = sel->handle;
         g_pendLoc = sel->location; g_pendRot = sel->rotation; g_pendScale = sel->scale;
         g_dragGroupStart.clear();
@@ -430,7 +480,21 @@ void DrawGizmoOverlay(const Snapshot& snap, const SceneObject* sel)
         Vec3 loc = g_dragStartLoc, scale = g_dragStartScale;
         Rot  rot = g_dragStartRot;
         const double rotSign = Dot(g_dragAxisWorld, v.fwd) < 0.0 ? 1.0 : -1.0;
-        if (g_gizmo == GizmoMode::Translate)
+        if (g_gizmo == GizmoMode::Translate && g_dragAxis >= 3)
+        {
+            Vec3 hit;
+            if (RayPlane(v.eye, ScreenRay(v, mouse), g_dragStartLoc, g_dragAxisWorld, hit))
+            {
+                const Vec3 d = Sub(hit, g_planeHit0);
+                double da = (std::max)(-50000.0, (std::min)(50000.0, Dot(d, g_planeA)));
+                double db = (std::max)(-50000.0, (std::min)(50000.0, Dot(d, g_planeB)));
+                da = Snap(static_cast<float>(da), g_gridSnap, g_snapEnabled);
+                db = Snap(static_cast<float>(db), g_gridSnap, g_snapEnabled);
+                loc = Add(g_dragStartLoc, Add(Mul(g_planeA, da), Mul(g_planeB, db)));
+            }
+            else loc = g_pendLoc;                                  // plane edge-on: hold where it is
+        }
+        else if (g_gizmo == GizmoMode::Translate)
         {
             double s = 0.0, dWorld;
             if (AxisParamUnderRay(g_dragStartLoc, g_dragAxisWorld, v.eye, ScreenRay(v, mouse), s))
@@ -470,11 +534,19 @@ void DrawGizmoOverlay(const Snapshot& snap, const SceneObject* sel)
         }
         else
         {
-            const ImVec2 dir(ends[g_dragAxis].x - c.x, ends[g_dragAxis].y - c.y);
+            // An axis handle scales along its screen direction; the centre (6) scales uniformly with
+            // right/up mouse travel.
+            const ImVec2 dir = g_dragAxis < 3 ? ImVec2(ends[g_dragAxis].x - c.x, ends[g_dragAxis].y - c.y) : ImVec2(0.7071f, -0.7071f);
             const float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
-            const double along = len > 1.0f
+            const double along = len > 1e-3f
                 ? ((mouse.x - g_dragStartMouse.x) * dir.x + (mouse.y - g_dragStartMouse.y) * dir.y) / len : 0.0;
             const double f = (std::max)(0.05, 1.0 + along / L);
+            if (g_dragAxis == 6)
+            {
+                scale.x = (std::max)(0.01, g_dragStartScale.x * f);
+                scale.y = (std::max)(0.01, g_dragStartScale.y * f);
+                scale.z = (std::max)(0.01, g_dragStartScale.z * f);
+            }
             g_groupF = f;
             if (g_dragAxis == 0) scale.x = (std::max)(0.01, g_dragStartScale.x * f);
             if (g_dragAxis == 1) scale.y = (std::max)(0.01, g_dragStartScale.y * f);
@@ -500,8 +572,10 @@ void DrawGizmoOverlay(const Snapshot& snap, const SceneObject* sel)
             }
             else
             {
-                m.loc = Add(Add(pivot, d), Mul(a, (g_groupF - 1.0) * Dot(d, a)));
+                m.loc = g_dragAxis == 6 ? Add(pivot, Mul(d, g_groupF)) : Add(Add(pivot, d), Mul(a, (g_groupF - 1.0) * Dot(d, a)));
                 m.scale = m0.scale;
+                if (g_dragAxis == 6) { m.scale.x = (std::max)(0.01, m0.scale.x * g_groupF); m.scale.y = (std::max)(0.01, m0.scale.y * g_groupF);
+                                       m.scale.z = (std::max)(0.01, m0.scale.z * g_groupF); }
                 if (g_dragAxis == 0) m.scale.x = (std::max)(0.01, m0.scale.x * g_groupF);
                 if (g_dragAxis == 1) m.scale.y = (std::max)(0.01, m0.scale.y * g_groupF);
                 if (g_dragAxis == 2) m.scale.z = (std::max)(0.01, m0.scale.z * g_groupF);
@@ -517,18 +591,52 @@ void DrawGizmoOverlay(const Snapshot& snap, const SceneObject* sel)
                 const bool h = g_dragAxis == i || hover == i;
                 dl->AddPolyline(ring[i], ringN[i], h ? hot : axisCol[i], ImDrawFlags_Closed, h ? 4.0f : 2.5f);
             }
+    // Plane squares (Move), drawn under the axes: translucent in the colour of the axis they are normal to.
+    if (g_gizmo == GizmoMode::Translate)
+        for (int i = 0; i < 3; ++i)
+        {
+            if (!quadOk[i]) continue;
+            const bool h = g_dragAxis == 3 + i || hover == 3 + i;
+            const ImU32 base = axisCol[i];
+            const ImU32 fill = h ? IM_COL32(255, 220, 90, 150) : ((base & 0x00FFFFFF) | (70u << 24));
+            dl->AddQuadFilled(quad[i][0], quad[i][1], quad[i][2], quad[i][3], fill);
+            dl->AddQuad(quad[i][0], quad[i][1], quad[i][2], quad[i][3], h ? hot : base, 1.5f);
+        }
+    static const char* kAxisName[3] = { "X", "Y", "Z" };
     for (int i = 0; i < 3; ++i)
     {
         if (!endOk[i] || g_gizmo == GizmoMode::Rotate) continue;
         const bool h = g_dragAxis == i || hover == i;
         const ImU32 col = h ? hot : axisCol[i];
-        dl->AddLine(c, ends[i], col, h ? 4.0f : 3.0f);
+        float dx = ends[i].x - c.x, dy = ends[i].y - c.y;
+        const float len = std::sqrt(dx * dx + dy * dy);
+        if (len < 1.0f) continue;                           // the axis points at the camera: nothing to draw
+        dx /= len; dy /= len;
+        const ImVec2 shaft(ends[i].x - dx * (g_gizmo == GizmoMode::Scale ? 6.0f : 12.0f), ends[i].y - dy * (g_gizmo == GizmoMode::Scale ? 6.0f : 12.0f));
+        dl->AddLine(c, shaft, col, h ? 3.5f : 2.5f);
         if (g_gizmo == GizmoMode::Scale)
-            dl->AddRectFilled(ImVec2(ends[i].x - 6, ends[i].y - 6), ImVec2(ends[i].x + 6, ends[i].y + 6), col);
+            dl->AddRectFilled(ImVec2(ends[i].x - 6, ends[i].y - 6), ImVec2(ends[i].x + 6, ends[i].y + 6), col, 1.5f);
         else
-            dl->AddCircleFilled(ends[i], 7.0f, col);
+        {
+            // Cone head: tip past the end, base across the shaft (the flat silhouette of Unreal's cone).
+            const ImVec2 tip(ends[i].x + dx * 6.0f, ends[i].y + dy * 6.0f);
+            const ImVec2 b1(shaft.x - dy * 6.5f, shaft.y + dx * 6.5f), b2(shaft.x + dy * 6.5f, shaft.y - dx * 6.5f);
+            dl->AddTriangleFilled(tip, b1, b2, col);
+        }
+        dl->AddText(ImVec2(ends[i].x + dx * 14.0f - 4.0f, ends[i].y + dy * 14.0f - 7.0f), col, kAxisName[i]);
     }
-    dl->AddCircleFilled(c, 4.0f, IM_COL32(230, 230, 230, 255));
+    if (g_gizmo != GizmoMode::Rotate)
+    {
+        const bool h = g_dragAxis == 6 || hover == 6;
+        if (g_gizmo == GizmoMode::Scale)
+            dl->AddRectFilled(ImVec2(c.x - 6, c.y - 6), ImVec2(c.x + 6, c.y + 6), h ? hot : IM_COL32(230, 230, 230, 255), 1.5f);
+        else
+        {
+            dl->AddCircleFilled(c, 6.0f, h ? hot : IM_COL32(230, 230, 230, 235));
+            dl->AddCircle(c, 6.0f, IM_COL32(40, 40, 40, 200), 0, 1.0f);
+        }
+    }
+    else dl->AddCircleFilled(c, 4.0f, IM_COL32(230, 230, 230, 255));
 }
 
 // Test hook (script `gmove`): move the whole selection by dv through the gizmo's own release path.
@@ -666,8 +774,78 @@ bool g_showPlace = true, g_showOutliner = true, g_showDetails = true, g_showCont
 char g_detailsFilter[64] = {};
 char g_contentFilter[96] = {};
 std::string g_cbFolder = "/Game/A2/Prefabs";   // current Content Browser folder
-std::string g_placeCat;                          // Place Actors category ("" = Recently Placed)
+std::string g_placeCat;                          // Place Actors category ("" = Recently Placed, "*fav" = Favorites)
 std::vector<std::string> g_recent;               // class paths, most recent first
+
+// ---- favorites: starred palette items, kept per PC in %LOCALAPPDATA%\RigelEditor\favorites.txt ----
+std::vector<std::string> g_favorites;            // class paths, in the order they were starred
+bool g_favLoaded = false;
+std::wstring FavFile()
+{
+    wchar_t buf[MAX_PATH] = {};
+    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH);
+    std::wstring dir = (n && n < MAX_PATH) ? std::wstring(buf) + L"\\RigelEditor" : std::wstring(L".");
+    CreateDirectoryW(dir.c_str(), nullptr);
+    return dir + L"\\favorites.txt";
+}
+void FavLoad()
+{
+    g_favLoaded = true;
+    g_favorites.clear();
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, FavFile().c_str(), L"rb") != 0 || !f) return;
+    char line[1024];
+    while (fgets(line, sizeof(line), f))
+    {
+        std::string l = line;
+        while (!l.empty() && (l.back() == '\n' || l.back() == '\r' || l.back() == ' ')) l.pop_back();
+        if (!l.empty() && std::find(g_favorites.begin(), g_favorites.end(), l) == g_favorites.end()) g_favorites.push_back(l);
+    }
+    fclose(f);
+}
+void FavSave()
+{
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, FavFile().c_str(), L"wb") != 0 || !f) return;
+    for (const auto& l : g_favorites) fprintf(f, "%s\n", l.c_str());
+    fclose(f);
+}
+bool IsFav(const std::string& path)
+{
+    if (!g_favLoaded) FavLoad();
+    return std::find(g_favorites.begin(), g_favorites.end(), path) != g_favorites.end();
+}
+void ToggleFav(const std::string& path)
+{
+    if (!g_favLoaded) FavLoad();
+    auto it = std::find(g_favorites.begin(), g_favorites.end(), path);
+    if (it != g_favorites.end()) g_favorites.erase(it); else g_favorites.push_back(path);
+    FavSave();
+}
+// A five-point star (filled = favourite), for rows and tiles.
+void DrawStar(ImDrawList* dl, ImVec2 c, float r, bool filled, ImU32 col)
+{
+    ImVec2 pts[10];
+    for (int i = 0; i < 10; ++i)
+    {
+        const float a = -1.5707963f + i * 0.6283185f;
+        const float rr = (i & 1) ? r * 0.45f : r;
+        pts[i] = ImVec2(c.x + std::cos(a) * rr, c.y + std::sin(a) * rr);
+    }
+    if (filled) dl->AddConcavePolyFilled(pts, 10, col);
+    else dl->AddPolyline(pts, 10, col, ImDrawFlags_Closed, 1.3f);
+}
+// The star button on a row/tile: click toggles. Returns true when it ate the click.
+bool FavStarButton(ImDrawList* dl, ImVec2 c, float r, const std::string& path)
+{
+    const bool fav = IsFav(path);
+    const ImVec2 m = ImGui::GetIO().MousePos;
+    const bool hov = std::fabs(m.x - c.x) <= r + 2 && std::fabs(m.y - c.y) <= r + 2 && ImGui::IsWindowHovered();
+    DrawStar(dl, c, r, fav, fav ? IM_COL32(250, 200, 60, 255) : hov ? IM_COL32(230, 230, 230, 230) : IM_COL32(150, 150, 150, 140));
+    if (hov) ImGui::SetTooltip(fav ? "Remove from Favorites" : "Add to Favorites");
+    if (hov && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) { ToggleFav(path); return true; }
+    return false;
+}
 std::string g_dragName;
 
 const ImU32 kSelBlue   = IM_COL32(0, 112, 224, 255);   // #0070E0
@@ -711,6 +889,12 @@ void IconLevel(ImDrawList* dl, ImVec2 p, float s)
 }
 void IconFor(ImDrawList* dl, ImVec2 p, float s, const std::string& cls)
 {
+    if (const unsigned long long tex = IconTexture(cls))   // the game's own icon for this item
+    {
+        dl->AddRectFilled(p, ImVec2(p.x + s, p.y + s), IM_COL32(20, 20, 20, 255), s * 0.12f);
+        dl->AddImageRounded(static_cast<ImTextureID>(tex), p, ImVec2(p.x + s, p.y + s), ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE, s * 0.12f);
+        return;
+    }
     if (cls.rfind("LE_SM_", 0) == 0) IconCube(dl, p, s, IM_COL32(170, 190, 210, 255));
     else IconBlueprint(dl, p, s);
 }
@@ -1027,6 +1211,7 @@ void DrawPlaceActors(const Snapshot& snap, ImVec2 pos, ImVec2 size)
     ImGui::BeginChild("##placecats", ImVec2(122, 0), ImGuiChildFlags_None);
     ImGui::PushStyleColor(ImGuiCol_Header, kSelBlue);
     if (ImGui::Selectable("Recent", g_placeCat.empty())) g_placeCat.clear();
+    if (ImGui::Selectable("Favorites", g_placeCat == "*fav")) g_placeCat = "*fav";
     std::string last;
     for (const auto& it : snap.palette)
     {
@@ -1063,12 +1248,24 @@ void DrawPlaceActors(const Snapshot& snap, ImVec2 pos, ImVec2 size)
         IconFor(dl, ImVec2(p.x + 2, p.y + 2), 22, it.name);
         const std::string label = PrettyName(it.name) + (!it.blocked.empty() ? "  (unavailable)" : !it.limited.empty() ? "  (display only)" : "");
         dl->AddText(ImVec2(p.x + 30, p.y + 5), it.blocked.empty() ? kFg : kDim, label.c_str());
-        if (clicked && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) SpawnInFront(snap, it);
+        const bool starAte = FavStarButton(dl, ImVec2(p.x + ImGui::GetContentRegionAvail().x - 12, p.y + 13), 7.0f, it.path);
+        if (ImGui::BeginPopupContextItem("##favctx"))
+        {
+            if (ImGui::MenuItem(IsFav(it.path) ? "Remove from Favorites" : "Add to Favorites")) ToggleFav(it.path);
+            ImGui::EndPopup();
+        }
+        if (!starAte && clicked && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) SpawnInFront(snap, it);
         ImGui::PopID();
     };
     if (g_paletteFilter[0])
     {
         for (const auto& it : snap.palette) if (ContainsCi(it.name, g_paletteFilter)) row(it);
+    }
+    else if (g_placeCat == "*fav")
+    {
+        if (!g_favLoaded) FavLoad();
+        if (g_favorites.empty()) ImGui::TextDisabled("No favorites yet.\nClick the star on any item\n(or right-click it) to add it.");
+        for (const auto& path : g_favorites) if (const PaletteItem* it = FindItem(snap, path)) row(*it);
     }
     else if (g_placeCat.empty())
     {
@@ -2802,6 +2999,72 @@ void DrawLevels(const Snapshot& snap)
     if (ImGui::SmallButton("Refresh")) refresh();
     ImGui::Spacing();
     ImGui::TextDisabled("Autoload on server boot is set on the dashboard (station > Editor levels).");
+
+    // Local projects: level files on this PC (Documents\RigelLevels\*.a2level). Export what is built here to
+    // one; load one onto this server (as a level you can Unload), or upload it as a saved level.
+    ImGui::SeparatorText("Local projects (.a2level)");
+    {
+        const std::string nm = g_levelName[0] ? std::string(g_levelName) : std::string("Untitled");
+        ImGui::BeginDisabled(!snap.inEditor);
+        if (ImGui::Button(("Export to file: " + nm + ".a2level").c_str(), ImVec2(-1, 0)))
+        {
+            Command c{ CmdType::LevelExport }; c.str = nm; State().Push(c);
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Everything built on this server, saved to Documents\\RigelLevels on this PC.\nUses the name typed above.");
+
+        static std::vector<std::wstring> s_files;
+        static double s_listed = -100.0;
+        if (ImGui::GetTime() - s_listed > 3.0)
+        {
+            s_listed = ImGui::GetTime();
+            s_files.clear();
+            WIN32_FIND_DATAW fd{};
+            HANDLE h = FindFirstFileW((LevelsDir() + L"\\*.a2level").c_str(), &fd);
+            if (h != INVALID_HANDLE_VALUE)
+            {
+                do { std::wstring f = fd.cFileName; s_files.push_back(f.substr(0, f.size() - 8)); } while (FindNextFileW(h, &fd));
+                FindClose(h);
+            }
+        }
+        if (s_files.empty()) ImGui::TextDisabled("No level files yet. Export one, or drop .a2level files into Documents\\RigelLevels.");
+        for (const auto& wf : s_files)
+        {
+            const std::string f(wf.begin(), wf.end());
+            ImGui::PushID(f.c_str());
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(f.c_str());
+            ImGui::SameLine(ImGui::GetWindowWidth() - 150);
+            auto readFile = [&]() -> std::string {
+                std::string text;
+                FILE* fp = nullptr;
+                if (_wfopen_s(&fp, (LevelsDir() + L"\\" + wf + L".a2level").c_str(), L"rb") == 0 && fp)
+                {
+                    char buf[4096];
+                    for (size_t r; (r = fread(buf, 1, sizeof(buf), fp)) > 0;) text.append(buf, r);
+                    fclose(fp);
+                }
+                return text;
+            };
+            std::string clean;
+            for (char ch : f) if (isalnum(static_cast<unsigned char>(ch)) || ch == ' ' || ch == '_' || ch == '-') clean += ch;
+            ImGui::BeginDisabled(!snap.inEditor || clean.empty());
+            if (ImGui::SmallButton("Load here"))
+            {
+                Command c{ CmdType::LevelImport }; c.str = clean; c.str2 = "load"; c.str3 = readFile(); State().Push(c);
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Place this level on this server now (not saved to the server - Unload removes it).");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Upload"))
+            {
+                Command c{ CmdType::LevelImport }; c.str = clean; c.str2 = "save"; c.str3 = readFile(); State().Push(c);
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Save it to the server's levels (so it can autoload / be loaded anywhere) and load it here.");
+            ImGui::EndDisabled();
+            ImGui::PopID();
+        }
+        if (ImGui::SmallButton("Open folder")) ShellExecuteW(nullptr, L"open", LevelsDir().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    }
 }
 
 
@@ -2828,7 +3091,20 @@ void DrawDetailsPanel(const Snapshot& snap, const SceneObject* sel, ImVec2 pos, 
                 ImGui::TextUnformatted(PrettyName(sel->className).c_str());
                 ImGui::TextDisabled("%s", sel->className.c_str());
                 ImGui::EndGroup();
-                if (sel->lockedByOther) ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.2f, 1), "Locked by another editor - read only");
+                if (sel->lockedByOther)
+                    ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.2f, 1), "Locked by %s - read only",
+                                       sel->lockOwner.empty() ? "another editor" : sel->lockOwner.c_str());
+                else if (sel->handle.size() >= 36 && sel->handle[8] == '-' && sel->handle[23] == '-')   // a placed (sandbox) object
+                {
+                    // Owner lock, per object: on = only you (who placed it) can move, delete or edit it.
+                    bool locked = sel->lockedByMe;
+                    if (ImGui::Checkbox("Lock (only I can edit it)", &locked))
+                    {
+                        Command c{ CmdType::OwnLock }; c.str = sel->handle; c.str2 = locked ? "1" : "0"; State().Push(c);
+                    }
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Other editors can still see it, but can't move, delete, script or change it.\nOnly whoever placed the object can lock or unlock it.");
+                }
 
                 ImGui::SetNextItemWidth(-1);
                 ImGui::InputTextWithHint("##df", "Search Details", g_detailsFilter, sizeof(g_detailsFilter));
@@ -2953,7 +3229,7 @@ void DrawContentBrowser(const Snapshot& snap, ImVec2 pos, ImVec2 size)
     // Top bar: breadcrumb path + search, as UE5's.
     ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(0, 0, 0, 0));
     std::string crumb;
-    const std::string shown = "/All" + g_cbFolder;               // "/All/Game/A2/Prefabs"
+    const std::string shown = g_cbFolder == "*fav" ? std::string("/All/Favorites") : "/All" + g_cbFolder;               // "/All/Game/A2/Prefabs"
     size_t at = 1;
     bool first = true;
     while (at <= shown.size())
@@ -2966,7 +3242,7 @@ void DrawContentBrowser(const Snapshot& snap, ImVec2 pos, ImVec2 size)
         if (!first) { ImGui::SameLine(0, 2); ImGui::TextDisabled(">"); ImGui::SameLine(0, 2); }
         first = false;
         const std::string target = crumb.size() > 4 ? crumb.substr(4) : "/Game";
-        if (ImGui::SmallButton((part + "##c" + std::to_string(at)).c_str()) && target.size() >= 5) g_cbFolder = target;
+        if (ImGui::SmallButton((part + "##c" + std::to_string(at)).c_str()) && target.size() >= 5) g_cbFolder = target == "/Favorites" ? std::string("*fav") : target;
         at = nx + 1;
     }
     ImGui::PopStyleColor();
@@ -2977,6 +3253,11 @@ void DrawContentBrowser(const Snapshot& snap, ImVec2 pos, ImVec2 size)
     // Left: folder tree.
     ImGui::BeginChild("##cbtree", ImVec2(220, 0), ImGuiChildFlags_Borders);
     ImGui::PushStyleColor(ImGuiCol_Header, kSelBlue);
+    {
+        const ImVec2 fp = ImGui::GetCursorScreenPos();
+        if (ImGui::Selectable("      Favorites", g_cbFolder == "*fav", ImGuiSelectableFlags_SpanAvailWidth)) g_cbFolder = "*fav";
+        DrawStar(ImGui::GetWindowDrawList(), ImVec2(fp.x + 10, fp.y + 8), 7.0f, true, IM_COL32(250, 200, 60, 255));
+    }
     const ImVec2 p = ImGui::GetCursorScreenPos();
     const bool rootOpen = ImGui::TreeNodeEx("/Game", ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth |
                                             (g_cbFolder == "/Game" ? ImGuiTreeNodeFlags_Selected : 0), "      Content");
@@ -3021,7 +3302,8 @@ void DrawContentBrowser(const Snapshot& snap, ImVec2 pos, ImVec2 size)
     ImGui::PushStyleColor(ImGuiCol_Header, kSelBlue);
     for (const auto& it : snap.palette)
     {
-        if (g_contentFilter[0] ? !ContainsCi(it.name, g_contentFilter) : FolderOf(it.path) != g_cbFolder) continue;
+        if (g_contentFilter[0] ? !ContainsCi(it.name, g_contentFilter)
+                               : g_cbFolder == "*fav" ? !IsFav(it.path) : FolderOf(it.path) != g_cbFolder) continue;
         nextTile();
         ImGui::PushID(it.path.c_str());
         const ImVec2 q = ImGui::GetCursorScreenPos();
@@ -3045,11 +3327,17 @@ void DrawContentBrowser(const Snapshot& snap, ImVec2 pos, ImVec2 size)
         }
         dl->AddText(ImVec2(q.x + 4, q.y + 84), kFg, n.c_str());
         dl->AddText(ImVec2(q.x + 4, q.y + 100), kDim, it.name.rfind("LE_SM_", 0) == 0 ? "Mesh Prefab" : "Blueprint");
+        if (hov || IsFav(it.path)) FavStarButton(dl, ImVec2(q.x + tileW - 12, q.y + 12), 8.0f, it.path);
+        if (ImGui::BeginPopupContextItem("##favctx"))
+        {
+            if (ImGui::MenuItem(IsFav(it.path) ? "Remove from Favorites" : "Add to Favorites")) ToggleFav(it.path);
+            ImGui::EndPopup();
+        }
         ImGui::PopID();
         ++count;
     }
     ImGui::PopStyleColor();
-    if (count == 0) ImGui::TextDisabled(g_contentFilter[0] ? "No matching assets." : "This folder is empty.");
+    if (count == 0) ImGui::TextDisabled(g_contentFilter[0] ? "No matching assets." : g_cbFolder == "*fav" ? "No favorites yet - star an asset (or right-click it) to add it." : "This folder is empty.");
     ImGui::EndChild();
     ImGui::End();
 }
@@ -3212,6 +3500,15 @@ static std::mutex g_uiSelectMx;
 static std::string g_uiSelectReq;                         // a test script asked the UI to select this handle
 void RequestUiSelect(const std::string& handle) { std::lock_guard<std::mutex> lk(g_uiSelectMx); g_uiSelectReq = handle; }
 
+std::wstring LevelsDir()
+{
+    wchar_t docs[MAX_PATH] = {};
+    std::wstring dir = SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_PERSONAL, nullptr, 0, docs)) ? std::wstring(docs) + L"\\RigelLevels"
+                                                                                               : std::wstring(L"C:\\RigelLevels");
+    CreateDirectoryW(dir.c_str(), nullptr);
+    return dir;
+}
+
 void DrawEditorUI()
 {
     const Snapshot snap = State().ReadSnapshot();
@@ -3221,6 +3518,25 @@ void DrawEditorUI()
         if (req.empty()) {}
         else if (req[0] == '+') { ToggleMultiSel(req.substr(1)); Log("[ui] selection toggle %s -> %zu selected", req.c_str() + 1, g_selected.empty() ? 0 : 1 + g_multiSel.size()); }
         else if (req == "!dup") { DuplicateSelected(snap); Log("[ui] duplicate: %zu pending", g_dupPending.size()); }
+        else if (req.rfind("!fav ", 0) == 0 || req.rfind("!expectfav ", 0) == 0)
+        {
+            const bool check = req[1] == 'e';
+            std::string arg = req.substr(check ? 11 : 5), want;
+            if (check) { const size_t sp = arg.rfind(' '); want = arg.substr(sp + 1); arg = arg.substr(0, sp); }
+            const PaletteItem* hit = nullptr;
+            for (const auto& it : snap.palette) if (ContainsCi(it.name, arg.c_str())) { hit = &it; break; }
+            if (!hit) Log("[ui] FAIL fav: no palette item like '%s'", arg.c_str());
+            else if (!check) { ToggleFav(hit->path); Log("[ui] fav %s -> %d (%zu favorite(s))", hit->name.c_str(), IsFav(hit->path), g_favorites.size()); }
+            else
+            {
+                FavLoad();                                            // re-read the file: it must have been saved
+                const bool on = IsFav(hit->path);
+                bool listed = false;                                  // and it shows under Place Actors > Favorites
+                for (const auto& p : g_favorites) if (p == hit->path && FindItem(snap, p)) listed = true;
+                const bool ok = on == (want == "1") && listed == on;
+                Log("[ui] %s expectfav %s: favorite=%d listed=%d (wanted %s)", ok ? "PASS" : "FAIL", hit->name.c_str(), on, listed, want.c_str());
+            }
+        }
         else if (req.rfind("!gmove ", 0) == 0)
         {
             Vec3 dv{};

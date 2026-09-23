@@ -1,0 +1,8 @@
+# A plain player (never enters the editor): the editor's camera marker must reach them, drawn, where the
+# editor's camera is -- then go when the editor leaves.
+log T-MK-PL start
+wait 30
+expectmarkers 1
+wait 32
+expectmarkers 0
+log T-MK-PL done

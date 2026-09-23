@@ -1,0 +1,17 @@
+log OL-OBS start
+enter
+wait 20
+pickat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625
+lockinfo
+move 0 0 300
+wait 6
+pickat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625
+where
+wait 16
+pickat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28625
+lockinfo
+move 0 0 300
+wait 6
+pickat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2060 -28325
+where
+log OL-OBS done
