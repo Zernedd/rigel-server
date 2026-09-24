@@ -1,0 +1,15 @@
+log TB start
+enter
+wait 3
+spawnat LE_BP_Text_C -450 2060 -28625 0
+wait 8
+raw SE|SBSET|LE_BP_Text_C@-450.000,2060.000,-28625.000|props/Text|text|Score: {score} / {missing}
+wait 4
+spawnat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2660 -28625 0
+wait 6
+pickat LE_SM_SP_HalfPipeWall_3x1x4_A_01_C -450 2660 -28625
+luaufile ZScore
+wait 16
+spawnat Prefab_BP_GravityVolume_C -450 3460 -28625 0
+wait 10
+log TB done

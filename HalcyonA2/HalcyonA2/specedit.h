@@ -513,7 +513,12 @@ static bool SeHasComponent(SDK::AActor* a, const char* cls)
 // DefaultMeshObject, DiscGolfHole -- from the SE|AUDIT sweep of the whole catalogue).
 static bool SeNeedsProxy(SDK::AActor* a)
 {
-    return a && a->Class && (a->Class->GetName().rfind("LE_SM_", 0) == 0 || SeHasComponent(a, "PhysicalComponent"));
+    if (!a || !a->Class) return false;
+    const std::string cn = a->Class->GetName();
+    // Volumes (the gravity volume) are areas players pass THROUGH: their mesh is only the region's shape and is
+    // query-only, and the game reacts to the overlap. A BlockAll stand-in turned them into a solid invisible box.
+    if (cn.find("Volume") != std::string::npos) return false;
+    return cn.rfind("LE_SM_", 0) == 0 || SeHasComponent(a, "PhysicalComponent");
 }
 
 static void SeDestroyProxies(SeCollisionProxy& e)
@@ -616,6 +621,7 @@ static void SeDropProxies(SDK::AActor* a)
 
 static void SeQuestTick();   // below
 
+static void SeTextTick();   // below (text from scripts)
 static void SeLvTick();   // below (saved levels)
 static void SeCamMarkersTick(ULONGLONG now);   // below (editor camera markers)
 static void SpecEditTick()
@@ -623,6 +629,7 @@ static void SpecEditTick()
     if (!g_specEdit) return;
     SeQuestTick();
     SeLvTick();
+    SeTextTick();
     SbMoveFlush();
     const ULONGLONG now = GetTickCount64();
     SeCamMarkersTick(now);
@@ -3787,6 +3794,8 @@ static void SeSbData(SDK::UObject* ctx, const std::string& ident)
 }
 
 // SE|SBSET|<ident>|<path>|<kind>|<value>
+static bool g_seSbNoRecord = false;   // SeTextTick: write a rendered text without replacing the saved template
+static void SeTextQueueObject(SDK::UObject* prefab);   // below
 static void SeSbSet(SDK::UObject* ctx, const std::string& ident, const std::string& path, const std::string& kind,
                     const std::string& value)
 {
@@ -3849,9 +3858,11 @@ static void SeSbSet(SDK::UObject* ctx, const std::string& ident, const std::stri
         SDK::AActor* slot = lgm ? *reinterpret_cast<SDK::AActor**>(reinterpret_cast<uintptr_t>(lgm) + 0x320) : nullptr;
         if (ok && slot) static_cast<SDK::AModuleSlot*>(slot)->PushNetVars();
     }
+    if (g_seSbNoRecord) return;                          // a rendered template: the saved value stays the template
     HxLog("[HalcyonA2][SPECEDIT] SBSET %s %s (%s) = '%s': %s\n", a->GetName().c_str(), path.c_str(), kind.c_str(), value.c_str(),
           ok ? "ok" : "FAILED");
     if (ok) SeLvRecordData(pc, path, kind, value);
+    if (ok && path == "props/Text" && value.find('{') != std::string::npos) SeTextQueueObject(pc);   // show it filled in
     SeSbData(ctx, ident);                               // refresh the editor's view
 }
 
@@ -4137,6 +4148,30 @@ end
 if type(BeginPlay) == "function" then BeginPlay = __rigelWrap("BeginPlay", BeginPlay) end
 if type(EndPlay) == "function" then EndPlay = __rigelWrap("EndPlay", EndPlay) end
 if type(Tick) == "function" then Tick = __rigelWrap("Tick", Tick) end
+-- [Rigel] VRPawn.getPlayerName: the game answers from a registry keyed by the player index a pawn had when it
+-- spawned, so it can say "None" for a real player. Fall back to the pawn's own replicated name.
+pcall(function()
+	local VR: any = VRPawn
+	local native = VR.getPlayerName
+	local function own(p: any): string?
+		if p == nil then return nil end
+		local ok, n = pcall(function() return p:getStoredName() end)
+		if ok and type(n) == "string" and n ~= "" then return n end
+		return nil
+	end
+	VR.getPlayerName = function(id: number): string
+		local ok, n = pcall(native, id)
+		if ok and type(n) == "string" and n ~= "" and n ~= "None" then return n end
+		local okl, lp = pcall(VR.getLocalPlayer)
+		if okl and lp ~= nil then
+			local oki, li = pcall(function() return lp:getPlayerIndex() end)
+			if oki and li == id then local s = own(lp); if s then return s end end
+		end
+		local okp, p = pcall(VR.getPlayer, id)
+		if okp then local s = own(p); if s then return s end end
+		return if ok and type(n) == "string" then n else "None"
+	end
+end)
 )LUAU";
 
 // Typed `local` declarations become the object's editor properties (the game's "External Dependencies"):
@@ -4634,6 +4669,26 @@ static void SeError(SDK::UObject* caller, const std::string& title, const std::s
 }
 
 // SE|LUAUREF|<scripted object ident>|<script>|<slot>|<type>|<target ident, or "-" to clear>
+// A script variable of the gamemode hosting `a` (what Luau's Gamemode:setStringVariable / setNumberVariable /
+// setBoolVariable write): LoadedGameMode(+0x320 slot) -> AModuleSlot::ModuleState(+0x300) -> SubVariables(+0xA0).
+// Returns false when the object, its gamemode or the variable isn't there.
+static bool SeGamemodeVar(SDK::AActor* a, const std::string& name, std::string* out)
+{
+    SDK::UObject* pc = SbPrefabOf(a);
+    SDK::UObject* lgm = pc ? *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(pc) + 0x440) : nullptr;
+    if (!lgm || !SeAlive(lgm)) return false;
+    SDK::UObject* slot = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(lgm) + 0x320);
+    SDK::UObject* ms = slot && SeAlive(slot) ? *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(slot) + 0x300) : nullptr;
+    if (!ms || !SeAlive(ms)) return false;
+    void* vars = reinterpret_cast<uint8_t*>(ms) + 0xA0;
+    const uint64_t fn = NvNameBits(NvName(name));
+    NvOrig o{};
+    if (NvReadNative(vars, fn, NvNative::TString, &o) != 1) return false;
+    out->clear();
+    for (const wchar_t* w = o.str; *w; ++w) *out += static_cast<char>(*w < 128 ? *w : '?');
+    return true;
+}
+static std::string g_seForceRefKey;   // SE|REFKEY|<key> (local test): the next slot wiring uses this component key
 static void SeLuauRef(SDK::UObject* ctx, const std::string& ident, const std::string& script, const std::string& slot,
                       const std::string& type, const std::string& targetIdent)
 {
@@ -4662,7 +4717,9 @@ static void SeLuauRef(SDK::UObject* ctx, const std::string& ident, const std::st
             return;
         }
         std::string have;
-        const std::string key = SbComponentKey(t, type, &have);
+        std::string key = SbComponentKey(t, type, &have);
+        if (!g_seForceRefKey.empty() && !key.empty()) { HxLog("[HalcyonA2][SPECEDIT] slot key %s forced to %s\n", key.c_str(), g_seForceRefKey.c_str()); key = g_seForceRefKey; }
+        g_seForceRefKey.clear();
         if (key.empty())
         {
             SeError(caller, "Wrong kind of object for " + slot,
@@ -5157,6 +5214,124 @@ static void SeLvPoller()
 }
 
 // Game thread: start the poller once, and apply what it fetched.
+// ---- text from scripts -----------------------------------------------------------------------------------
+// The game never hands a TextComponent to a Luau script (a script slot of that type is always nil), so a
+// script can't set text directly. Instead: an editor types a template into a Text object's Text in Game data,
+// e.g. "Score: {score}", and a script calls  Gamemode:broadcastEventString("score", "3")  -- the server sees
+// that call (the server runs every script too), fills {score} into every Text object that uses it, and writes
+// the result through the same synced path the Game data panel uses, so every player sees it (Quest too).
+// The saved value stays the template; unknown {names} are shown as written until something sets them.
+static std::unordered_map<std::string, std::string> g_seTextVars;
+static std::vector<std::pair<std::string, std::string>> g_seTextQueue;   // (name, value) from scripts
+static std::vector<std::string> g_seTextObjQueue;                        // object ids to (re)render
+static SRWLOCK g_seTextLock = SRWLOCK_INIT;
+static std::string SeTextRender(const std::string& t)
+{
+    std::string out;
+    for (size_t i = 0; i < t.size();)
+    {
+        if (t[i] == '{')
+        {
+            const size_t e = t.find('}', i + 1);
+            if (e != std::string::npos && e - i - 1 <= 64)
+            {
+                auto it = g_seTextVars.find(t.substr(i + 1, e - i - 1));
+                if (it != g_seTextVars.end()) { out += it->second; i = e + 1; continue; }
+            }
+        }
+        out += t[i++];
+    }
+    return out;
+}
+using SeBesFn = __int64(__fastcall*)(void*, void*, void*);
+static SeBesFn g_seBesOrig = nullptr;
+struct SeFStr { wchar_t* d; int32_t n; int32_t m; };
+// POD: copy an FString's text into buf (ASCII, '?' for the rest). 0 on a bad pointer.
+static int SeFStrCopy(const void* f, char* buf, int cap)
+{
+    int k = 0;
+    __try
+    {
+        const SeFStr* fs = static_cast<const SeFStr*>(f);
+        if (fs && fs->d) for (int32_t i = 0; i < fs->n && k < cap - 1 && fs->d[i]; ++i) buf[k++] = static_cast<char>(fs->d[i] < 128 ? fs->d[i] : '?');
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { k = 0; }
+    buf[k] = 0;
+    return k;
+}
+// UModuleStateLuaAPI::BroadcastEventString (Luau Gamemode:broadcastEventString). The strings are copied before
+// the original runs (it takes ownership of them).
+static void SeBesQueue(void* name, void* value)
+{
+    static char nb[80], vb[1100];
+    if (SeFStrCopy(name, nb, sizeof(nb)) <= 0 || strlen(nb) > 64) return;
+    SeFStrCopy(value, vb, sizeof(vb));
+    AcquireSRWLockExclusive(&g_seTextLock);
+    if (g_seTextQueue.size() < 4096) g_seTextQueue.push_back({ nb, vb });
+    ReleaseSRWLockExclusive(&g_seTextLock);
+}
+static __int64 __fastcall SeBes_Hook(void* api, void* name, void* value)
+{
+    SeBesQueue(name, value);
+    return g_seBesOrig(api, name, value);
+}
+static void SeTextQueueObject(SDK::UObject* prefab)
+{
+    if (!prefab) return;
+    const std::string idx = FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(prefab) + 0x248));
+    AcquireSRWLockExclusive(&g_seTextLock);
+    g_seTextObjQueue.push_back(idx);
+    ReleaseSRWLockExclusive(&g_seTextLock);
+}
+static void SeTextTick()
+{
+    static bool s_hooked = false;
+    if (!s_hooked && g_seSandbox)
+    {
+        s_hooked = true;
+        void* at = reinterpret_cast<void*>(GetBase() + 0x46CC430);   // BroadcastEventString (luau binding 0x46A5B00 -> here)
+        const int c = MH_CreateHook(at, &SeBes_Hook, reinterpret_cast<void**>(&g_seBesOrig));
+        const int e = c == MH_OK ? MH_EnableHook(at) : -1;
+        HxLog("[HalcyonA2][SPECEDIT] text bridge: broadcastEventString hook create=%d enable=%d\n", c, e);
+    }
+    std::vector<std::pair<std::string, std::string>> q;
+    std::vector<std::string> objs;
+    AcquireSRWLockExclusive(&g_seTextLock);
+    q.swap(g_seTextQueue);
+    objs.swap(g_seTextObjQueue);
+    ReleaseSRWLockExclusive(&g_seTextLock);
+    if (q.empty() && objs.empty()) return;
+    std::unordered_set<std::string> changed;
+    for (auto& kv : q)
+    {
+        auto it = g_seTextVars.find(kv.first);
+        if (it != g_seTextVars.end() && it->second == kv.second) continue;
+        g_seTextVars[kv.first] = kv.second;
+        changed.insert(kv.first);
+    }
+    const std::unordered_set<std::string> only(objs.begin(), objs.end());
+    int n = 0;
+    for (size_t i = 0; i < g_sbOwned.size() && n < 200; ++i)
+    {
+        const SbOwned& o = g_sbOwned[i];
+        const std::array<std::string, 3>* tpl = nullptr;
+        for (const auto& d : o.data) if (d[0] == "props/Text" && d[2].find('{') != std::string::npos) tpl = &d;
+        if (!tpl) continue;
+        bool want = only.count(o.idx) > 0;
+        for (const auto& c : changed) if (!want && (*tpl)[2].find("{" + c + "}") != std::string::npos) want = true;
+        if (!want) continue;
+        SDK::AActor* a = SbActorForIdx(o.idx);
+        if (!a) continue;
+        const std::string idx = o.idx, kind = (*tpl)[1], text = SeTextRender((*tpl)[2]);
+        g_seSbNoRecord = true;
+        SeSbSet(nullptr, SeLvIdent(a), "props/Text", kind, text);   // (g_sbOwned may not move: no spawn happens here)
+        g_seSbNoRecord = false;
+        ++n;
+    }
+    if (n || !changed.empty())
+        HxLog("[HalcyonA2][SPECEDIT] text bridge: %zu value(s) from scripts, %d text object(s) updated\n", changed.size(), n);
+}
+
 static void SeLvTick()
 {
     static bool s_started = false;
@@ -5558,6 +5733,13 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
     else if (op == "LUAU" && p.size() >= 4) SeLuau(pawn, p[2], p[3]);
     else if (op == "LUAUSRC" && p.size() >= 3) SeLuauUpdateAll(pawn, p[2]);
     else if (op == "LUAUREF" && p.size() >= 7) SeLuauRef(pawn, p[2], p[3], p[4], p[5], p[6]);
+    else if (op == "REFKEY" && p.size() >= 3 && g_seLocalTest) g_seForceRefKey = p[2];
+    else if (op == "GMVAR" && p.size() >= 4 && g_seLocalTest)                 // SE|GMVAR|<object>|<name> (local test)
+    {
+        std::string v;
+        const bool ok = SeGamemodeVar(SeFindEditorActor(p[2]), p[3], &v);
+        HxLog("[HalcyonA2][SPECEDIT] GMVAR %s.%s -> %s '%s'\n", p[2].c_str(), p[3].c_str(), ok ? "ok" : "MISSING", v.c_str());
+    }
     else if (op == "LGMTREE") SeLgmTree();
     else if (op == "LGMDESC" && p.size() >= 3) SeLgmDesc(p[2]);
     else if (op == "LUAUDUMP") SeLuauDump(p.size() >= 3 ? p[2] : std::string());

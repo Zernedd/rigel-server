@@ -1,0 +1,18 @@
+log T-TEXT start
+enter
+wait 3
+spawnat LE_BP_Text_C -450 2060 -28625 0
+wait 6
+pickat LE_BP_Text_C -450 2060 -28625
+luaufile ZText
+wait 12
+pickat LE_BP_Text_C -450 2060 -28625
+luauref ZText Label TextComponent self
+wait 15
+raw SE|SBPROBE|LE_BP_Text_C@-450.000,2060.000,-28625.000
+wait 3
+spawnat LE_BP_LightSwitch_C -450 2660 -28625 0
+wait 8
+raw SE|SBPROBE|LE_BP_LightSwitch_C@-450.000,2660.000,-28625.000
+wait 3
+log T-TEXT done

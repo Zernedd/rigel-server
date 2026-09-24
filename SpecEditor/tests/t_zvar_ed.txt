@@ -1,0 +1,12 @@
+log ZV start
+enter
+wait 3
+spawnat LE_BP_Text_C -450 2060 -28625 0
+wait 8
+pickat LE_BP_Text_C -450 2060 -28625
+luaufile ZVar
+wait 12
+raw SE|GMVAR|LE_BP_Text_C@-450.000,2060.000,-28625.000|rigelTest
+raw SE|GMVAR|LE_BP_Text_C@-450.000,2060.000,-28625.000|nothere
+wait 3
+log ZV done

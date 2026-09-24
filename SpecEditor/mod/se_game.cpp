@@ -3132,11 +3132,18 @@ void RunScript(const Snapshot& snap)
         auto* compCls = SDK::UObject::FindClassFast("ActorComponent");
         auto* smcCls  = SDK::UObject::FindClassFast("StaticMeshComponent");
         const int32_t n = SDK::UObject::GObjects->Num();
-        Log("[script] comps of %s", root->GetName().c_str());
+        auto* cacCls = SDK::UObject::FindClassFast("ChildActorComponent");
+        std::vector<SDK::UObject*> owners{ root };           // the actor, then any child actors it holds
+        for (size_t oi = 0; oi < owners.size() && oi < 8; ++oi)
+        {
+        SDK::UObject* owner = owners[oi];
+        Log("[script] comps of %s (%s)", owner->GetName().c_str(), owner->Class ? owner->Class->GetName().c_str() : "?");
         for (int32_t i = 0; i < n; ++i)
         {
             SDK::UObject* c = SDK::UObject::GObjects->GetByIndex(i);
-            if (!c || c->Outer != root || !compCls || !c->IsA(compCls)) continue;
+            if (!c || c->Outer != owner || !compCls || !c->IsA(compCls)) continue;
+            if (cacCls && c->IsA(cacCls))
+                if (SDK::UObject* child = static_cast<SDK::UChildActorComponent*>(c)->ChildActor) owners.push_back(child);
             std::string extra;
             if (primCls && c->IsA(primCls))
             {
@@ -3159,6 +3166,7 @@ void RunScript(const Snapshot& snap)
                 }
             }
             Log("[script]   %-40s %-32s%s", c->GetName().c_str(), c->Class ? c->Class->GetName().c_str() : "?", extra.c_str());
+        }
         }
         return;
     }

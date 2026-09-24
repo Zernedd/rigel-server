@@ -1,0 +1,9 @@
+log GV start
+enter
+wait 3
+spawnat Prefab_BP_GravityVolume_C -450 2060 -28625 0
+wait 8
+pickat Prefab_BP_GravityVolume_C -450 2060 -28625
+comps
+wait 2
+log GV done

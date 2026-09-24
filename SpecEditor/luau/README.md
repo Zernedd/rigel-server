@@ -52,6 +52,20 @@ because the game calls `BeginPlay`/`EndPlay` and the linter can't see that.
 * Globals: `log`, `warn`, `LuauClock`, `Promise`, `Vector`, `VRPawn.*`, `Quests.*`,
   `Gamemode`, `BallSpawnParameters.new`, `LinearColor.new`, `Enum.TextJustify`, ...
 
+### Showing text from a script
+
+The game never hands a `TextComponent` to a script (a `local Label: TextComponent = nil` slot stays nil),
+so text is set through a **template** instead:
+
+1. Place a Text object and, in **Details > Game data**, set its Text to something like `Score: {score}`.
+2. In any script: `Gamemode:broadcastEventString("score", "3")`.
+
+The server fills `{score}` into every Text object that uses it, for every player (Quest too). Use as many
+`{names}` as you like; one not set yet is shown as written. The saved level keeps the template.
+
+`VRPawn.getPlayerName(id)` falls back to the player's own name when the game's lookup says `"None"`.
+A desktop spectator (and the server) has no local player, so there it is still `"None"`.
+
 ### Rigel checks (the traps IntelliSense can't see)
 
 `tools/rigel-check.ps1` runs in the background as the VS Code task **Rigel: check scripts**
