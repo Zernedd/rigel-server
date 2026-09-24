@@ -4269,7 +4269,8 @@ static void CheckBallSimRestitutionCurve()
     void* cur = *live;
 
     void* cdoCurve = nullptr;
-    SDK::UClass* bsm = SDK::UObject::FindClassFast("BallSimManager");
+    static SDK::UClass* bsm = nullptr;   // [PERF 2026-09-24] cached: FindClassFast walks GObjects (was every call)
+    if (!bsm) bsm = SDK::UObject::FindClassFast("BallSimManager");
     if (bsm)
     {
         SDK::UObject* cdo = bsm->ClassDefaultObject;
@@ -7464,7 +7465,11 @@ static void GolfHitEvent(SDK::UObject* ball)
 }
 static void GolfSinkDetect()
 {
-    auto* cupCls  = SDK::UObject::FindClassFast("GolfCup");
+    // [PERF 2026-09-24] was an UNCACHED FindClassFast (a GObjects walk up to the class) on every call, 9-10x/s:
+    // [PROF] SafeGolfSinkDetect ~4.5 ms per call, peaks 33 ms, on prod. A class that isn't there is re-looked-up
+    // every 10 s at most.
+    static SDK::UClass* cupCls = nullptr; static ULONGLONG s_cupTry = 0;
+    if (!cupCls && GetTickCount64() - s_cupTry > 10000) { s_cupTry = GetTickCount64(); cupCls = SDK::UObject::FindClassFast("GolfCup"); }
     static SDK::UClass* ballCls = nullptr;   // [PERF] cached class lookup
     if (!ballCls) ballCls = SDK::UObject::FindClassFast("BP_JakeBall_C"); // golf balls are subclasses
     if (!cupCls || !ballCls) return;                                // not a golf level -> nothing to do

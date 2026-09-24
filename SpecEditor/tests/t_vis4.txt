@@ -1,0 +1,19 @@
+log VIS4 start
+enter
+wait 5
+scene open AutoStartLobby
+wait 15
+raw SE|SLOTS
+raw SE|SBADD|PrimitiveCubeBlue|0.0,2000.0,-28525.0
+raw SE|SBADD|aa_se_LE_BP_LightSwitch|360.0,2540.0,-28625.0
+raw SE|SBADD|PrimitiveCubeBlue|0.0,30000.0,-28525.0
+wait 12
+log VIS NOW
+wait 45
+raw SE|SBADD|PrimitiveCubeBlue|300.0,1500.0,-28525.0
+raw SE|SBADD|aa_se_LE_BP_LightSwitch|-300.0,1500.0,-28625.0
+wait 10
+log VIS LATE
+wait 20
+scene close
+log VIS end

@@ -43,6 +43,30 @@
 //  (SDK::Offsets::ProcessEvent) rather than hardcoded, so it tracks whatever build the SDK
 //  under gamesdk\<GameBuild>\ was dumped from.
 //  UA2PlayerEntity::Pawn                        (AVRPawn*)
+// Quest culling state of one sandbox prefab (UPrefabComponent): ULoadedGameMode::Enter/ExitImportanceVolume set
+// byte +0x19 of entry [prefab+0x394] in the table at *(*(lgm+0x120)+0xD8)+0x28 (56-byte entries) for every prefab in
+// lgm.loadedPrefabs (+0x2C0). A prefab whose flag is 0 while the player stands among them is hidden on Quest
+// (HideOutsideImportanceVolume); the PC spec build ignores it. -1 = unreadable.
+static int PrefabImportance(uintptr_t prefab, uintptr_t* lgmOut, int* inLoaded)
+{
+    __try
+    {
+        const uintptr_t lgm = *reinterpret_cast<uintptr_t*>(prefab + 0x440);
+        *lgmOut = lgm;
+        if (!lgm) return -2;
+        const int idx = *reinterpret_cast<int*>(prefab + 0x394);
+        const uintptr_t* arr = *reinterpret_cast<uintptr_t**>(lgm + 0x2C0);
+        const int n = *reinterpret_cast<int*>(lgm + 0x2C8);
+        *inLoaded = 0;
+        for (int i = 0; i < n && i < 100000; ++i) if (arr[i] == prefab) { *inLoaded = 1; break; }
+        if (idx < 0) return -3;
+        const uintptr_t sys = *reinterpret_cast<uintptr_t*>(lgm + 0x120);
+        const uintptr_t tbl = *reinterpret_cast<uintptr_t*>(sys + 0xD8);
+        const uint8_t* ent = *reinterpret_cast<uint8_t**>(tbl + 0x28);
+        return ent[56 * static_cast<size_t>(idx) + 25];
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+}
 static constexpr uintptr_t kPlayerEntityPawnOff = 0xE8;
 //  UA2PlayerEntity::FrequentDataReplicationOnly (FReplicatedFrequentData, 0x110 bytes)
 static constexpr uintptr_t kPlayerEntityFreqOff = 0xF0;
@@ -696,6 +720,77 @@ static void Tick()
                     if (sscanf_s(line, "move %lf %lf %lf", &x, &y, &z) == 3) { g_cmdTarget = { p.X + x, p.Y + y, p.Z + z }; g_cmdActive = true; }
                     else if (sscanf_s(line, "goto %lf %lf %lf", &x, &y, &z) == 3) { g_cmdTarget = { x, y, z }; g_cmdActive = true; }
                     else if (!strncmp(line, "throw", 5)) g_cmdThrow = true;
+                    else if (!strncmp(line, "near", 4))
+                    {
+                        // near [radius cm]: what this player's game has around it and whether it is DRAWN: per actor,
+                        // its primitive components (count), how many are visible, and how many the renderer drew
+                        // in the last second (WasRecentlyRendered) -- the "I can't see the object" check.
+                        double rad = 2000.0;
+                        sscanf_s(line, "near %lf", &rad);
+                        auto* primCls = SDK::UObject::FindClassFast("PrimitiveComponent");
+                        const int32_t num = SDK::UObject::GObjects->Num();
+                        int shown = 0;
+                        for (int32_t oi = 0; oi < num && shown < 60; ++oi)
+                        {
+                            auto* o = SDK::UObject::GObjects->GetByIndex(oi);
+                            if (!o || o->IsDefaultObject() || !o->IsA(SDK::AActor::StaticClass())) continue;
+                            auto* ac = static_cast<SDK::AActor*>(o);
+                            if (ac == pc->Pawn || ac == pc) continue;
+                            const std::string cn = ac->Class ? ac->Class->GetName() : "?";
+                            if (cn.find("Controller") != std::string::npos || cn.find("PlayerState") != std::string::npos) continue;
+                            {
+                                const std::string an = ac->GetName();          // placed objects (GUID names) and area slots only
+                                const bool placed = an.size() >= 36 && an[8] == '-' && an[13] == '-';
+                                if (!placed && cn.find("ModuleSlot") == std::string::npos && cn.find("GamemodeSlot") == std::string::npos) continue;
+                            }
+                            const SDK::FVector q = ac->K2_GetActorLocation();
+                            const double dx = q.X - p.X, dy = q.Y - p.Y, dz = q.Z - p.Z;
+                            const double dist = sqrt(dx * dx + dy * dy + dz * dz);
+                            if (dist > rad || (q.X == 0 && q.Y == 0 && q.Z == 0)) continue;
+                            int prims = 0, vis = 0, drawn = 0, hiddenInGame = 0;
+                            int imp = -9, inLoaded = -1; uintptr_t plgm = 0;
+                            {
+                                static SDK::UClass* prefabCls = SDK::UObject::FindClassFast("PrefabComponent");
+                                for (int32_t ci = 0; prefabCls && ci < num; ++ci)
+                                {
+                                    auto* c = SDK::UObject::GObjects->GetByIndex(ci);
+                                    if (!c || c->Outer != ac || !c->IsA(prefabCls)) continue;
+                                    imp = PrefabImportance(reinterpret_cast<uintptr_t>(c), &plgm, &inLoaded);
+                                    break;
+                                }
+                            }
+                            std::string lgmName = "-";
+                            if (plgm) lgmName = reinterpret_cast<SDK::UObject*>(plgm)->GetName();
+                            if (cn.find("ModuleSlot") != std::string::npos || cn.find("GamemodeSlot") != std::string::npos)
+                            {
+                                const uintptr_t sa = reinterpret_cast<uintptr_t>(ac);
+                                const uintptr_t sl = *reinterpret_cast<uintptr_t*>(sa + 0x440);
+                                const wchar_t* sid = *reinterpret_cast<const wchar_t**>(sa + 0x390);
+                                char sidn[80] = "?";
+                                if (sid) WideCharToMultiByte(CP_UTF8, 0, sid, -1, sidn, sizeof sidn, nullptr, nullptr);
+                                lgmName = std::string(sl ? reinterpret_cast<SDK::UObject*>(sl)->GetName() : "no-lgm") + " slotId=" + sidn +
+                                          " allVisible=" + std::to_string(*reinterpret_cast<uint8_t*>(sa + 0x2FC));
+                            }
+                            if (primCls)
+                                for (int32_t ci = 0; ci < num; ++ci)
+                                {
+                                    auto* c = SDK::UObject::GObjects->GetByIndex(ci);
+                                    if (!c || c->Outer != ac || !c->IsA(primCls)) continue;
+                                    auto* pcmp = static_cast<SDK::UPrimitiveComponent*>(c);
+                                    ++prims;
+                                    if (pcmp->IsVisible()) ++vis;
+                                    if (pcmp->WasRecentlyRendered(1.0f)) ++drawn;
+                                    if (*reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(c) + 0x2D7) & 0x40) ++hiddenInGame;
+                                }
+                            Log("[A2PlayerControl][NEAR] %-44s %-34s %5.0fcm prims=%d visible=%d drawn=%d actorDrawn=%d important=%d inLoaded=%d area=%s\n",
+                                ac->GetName().c_str(), cn.c_str(), dist, prims, vis, drawn, (int)ac->WasRecentlyRendered(1.0f),
+                                imp, inLoaded, lgmName.c_str());
+                            if (SDK::AActor* par = ac->GetAttachParentActor())
+                                Log("[A2PlayerControl][NEAR]     attached to %s\n", par->GetName().c_str());
+                            ++shown;
+                        }
+                        Log("[A2PlayerControl][NEAR] %d actor(s) within %.0f cm\n", shown, rad);
+                    }
                     else if (!strncmp(line, "balls", 5))
                     {
                         double d = 0.0;

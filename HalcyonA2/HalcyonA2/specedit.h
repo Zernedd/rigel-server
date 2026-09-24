@@ -3131,6 +3131,7 @@ static bool SbCreateEditorSlot(const double* at, const std::string& path)
     const std::wstring wp(path.begin(), path.end());
     wcsncpy_s(g_seEditorSlotPath, wp.c_str(), _TRUNCATE);
     SetSlotFString(slot, 0x418, g_seEditorSlotPath);                       // DefaultGamemodePath
+    SetSlotFString(slot, 0x390, L"RigelEditorArea_Full");                  // SlotID: "Full" = always visible (see SbCreateSlotWithId)
     const uintptr_t s = reinterpret_cast<uintptr_t>(slot);
     SDK::UObject* mgrPre = mgr;
     const int32_t gmBefore = *reinterpret_cast<int32_t*>(reinterpret_cast<uintptr_t>(mgrPre) + 0x368 + 8);
@@ -3165,7 +3166,13 @@ static SDK::AActor* SbCreateSlotWithId(const double* at, const std::string& path
                                                                               nullptr, SDK::ESpawnActorScaleMethod::MultiplyWithRoot);
     if (!slot) return nullptr;
     auto* wp = new std::wstring(path.begin(), path.end());
-    auto* wid = new std::wstring(slotId.begin(), slotId.end());
+    // "_Full": AModuleSlot::BeginPlay (native 0x46CBD00) sets bAllObjectsVisibleAtAllTimes (+0x2FC) on any slot whose
+    // SlotID contains "Full" -- that is why the station's TKB_*_Full slots always draw. The SlotID replicates when set
+    // before the spawn finishes, so every client (vanilla Quest included) runs it on its own copy. Without it, Quest
+    // draws a runtime slot's objects only if they existed when the player walked into its box: anything placed or
+    // moved while someone stands inside was collision-only (invisible) for them until they left and came back.
+    const std::string fullId = slotId.find("Full") == std::string::npos ? slotId + "_Full" : slotId;
+    auto* wid = new std::wstring(fullId.begin(), fullId.end());
     g_seSlotStrings.push_back(wp); g_seSlotStrings.push_back(wid);
     SetSlotFString(slot, 0x418, wp->c_str());                          // DefaultGamemodePath
     SetSlotFString(slot, 0x390, wid->c_str());                         // SlotID (replicated)
@@ -3351,7 +3358,12 @@ static SDK::UObject* SbHostGamemode(const std::string& uniqueId, const double* l
         {
             const double out = SbOutsideBox(box, loc);
             const SDK::FVector e = box->GetScaledBoxExtent();
-            if (out <= 1.0) { tier = slot->Class == exactCls ? 0 : 1; score = e.X * e.Y * e.Z; }   // smallest area wins
+            if (out <= 1.0)
+            {
+                tier = slot->Class == exactCls ? 0 : 1;
+                score = e.X * e.Y * e.Z;                                               // smallest area wins...
+                if (!*reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(slot) + 0x2FC)) score += 1.0e200;   // ...always-visible first
+            }
             else            { tier = 2; score = out; }
         }
         else if (slot)

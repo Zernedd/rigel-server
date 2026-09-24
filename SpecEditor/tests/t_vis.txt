@@ -1,0 +1,15 @@
+log VIS start
+enter
+wait 5
+scene saveas VisTest
+wait 3
+raw SE|SBADD|aa_se_LE_BP_LightSwitch|@P400,0,0
+raw SE|SBADD|BasicButton|@P-400,0,0
+raw SE|SBADD|PrimitiveCubeBlue|@P0,400,0
+raw SE|SBADD|TrapSpinner|@P0,-600,0
+raw SE|SBADD|ForceFieldA|@P600,600,0
+raw SE|SBADD|Timer|@P-600,-600,0
+wait 15
+log VIS NOW
+wait 25
+log VIS end
