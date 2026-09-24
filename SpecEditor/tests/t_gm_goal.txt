@@ -1,0 +1,35 @@
+log GMGOAL start
+enter
+wait 3
+wait 5
+raw SE|GMNEW|Arena|@P0,3000,0|2|3,3|Blue,Red
+wait 8
+raw SE|GMSET|RigelMode1|countdown|0
+raw SE|GMSET|RigelMode1|round_time|60
+raw SE|GMSET|RigelMode1|stop_when_empty|0
+raw SE|SBADD|JakeBallSpawner|@P-800,3000,100
+raw SE|SBADD|GoalJakeBall|@P-800,3000,200
+raw SE|SBADD|JakeBallSpawner|@P800,4500,100
+raw SE|SBADD|DiscTriggerC|@P800,4500,200
+wait 8
+gmpiece Arena Driftball goal
+wait 3
+gmpiece Arena Score box
+wait 3
+wait 5
+gmrole JakeBallSpawner Arena ball 0
+gmrole JakeBallSpawner Arena ball 1
+gmrole GoalJakeBall Arena goal:1 0
+gmrole DiscTriggerC Arena score_zone:2 1
+wait 6
+expectgm Arena idle 0,0
+gmapply Arena
+wait 10
+raw SE|GMCTL|RigelMode1|start
+wait 15
+expectgm Arena running
+log GOALCHECK
+wait 10
+raw SE|GMCTL|RigelMode1|stop
+wait 5
+log GMGOAL end

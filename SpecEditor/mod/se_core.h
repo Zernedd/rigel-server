@@ -96,7 +96,8 @@ struct SceneObject
 // Property kinds, mirroring sereflect::PType (se_reflect.h) so the UI need not include the SDK.
 // se_game.cpp static_asserts the two stay in step.
 enum PropType { PT_Unsupported, PT_Bool, PT_Float, PT_Double, PT_Int, PT_Int64, PT_Byte, PT_Enum, PT_Name,
-                PT_Str, PT_Vector, PT_Rotator, PT_Color, PT_Vector2D, PT_Object, PT_Text };
+                PT_Str, PT_Vector, PT_Rotator, PT_Color, PT_Vector2D, PT_Object, PT_Text,
+                PT_Composite };   // a replicated struct / array, shown read-only as a summary
 
 // One editable property of the inspected object, for the Details panel (see se_reflect.h).
 struct PropInfo

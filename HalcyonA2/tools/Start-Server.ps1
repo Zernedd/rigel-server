@@ -38,10 +38,18 @@ function Good($m)  { Write-Host "[server] $m" -ForegroundColor Green }
 function Warn2($m) { Write-Host "[server] $m" -ForegroundColor Yellow }
 
 $procName = 'A2-Win64-Shipping'
+# Only game processes started from this repo's builds (Nov15 servers, PlayerNovBuild, SpecEditorBuild ...) are ours to
+# report or stop. The same exe name is also the installed game (e.g. a Rigel editor session under Meta Horizon) --
+# never touch that one.
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+function Get-OurGameProcs {
+    @(Get-Process -Name $procName -ErrorAction SilentlyContinue | Where-Object {
+        $_.Path -and $_.Path.StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase) })
+}
 
 # --- status / stop ---------------------------------------------------------------------
 if ($Status) {
-    $running = @(Get-Process -Name $procName -ErrorAction SilentlyContinue)
+    $running = Get-OurGameProcs
     if ($running.Count -eq 0) { Info "no server processes running"; return }
     Info "$($running.Count) server process(es):"
     foreach ($p in $running) {
@@ -55,7 +63,7 @@ if ($Status) {
 }
 
 if ($Stop) {
-    $running = @(Get-Process -Name $procName -ErrorAction SilentlyContinue)
+    $running = Get-OurGameProcs
     if ($running.Count -eq 0) { Info "nothing to stop"; return }
     foreach ($p in $running) { Info "stopping pid $($p.Id)"; Stop-Process -Id $p.Id -Force }
     Good "stopped $($running.Count) server process(es)"

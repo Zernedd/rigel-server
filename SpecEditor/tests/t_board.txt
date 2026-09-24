@@ -1,0 +1,24 @@
+log BOARD start
+enter
+wait 8
+scene open FirstToTen
+wait 20
+raw SE|GMSET|RigelMode1|countdown|8
+raw SE|GMSET|RigelMode1|round_time|90
+gmapply FirstToTen
+wait 20
+log SHOT lobby
+wait 8
+raw SE|PRESS|start
+wait 4
+log SHOT countdown
+wait 12
+log SHOT running
+wait 4
+raw SE|PRESS|score:1
+wait 6
+log SHOT scored
+wait 8
+scene close
+wait 4
+log BOARD end

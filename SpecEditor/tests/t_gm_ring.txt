@@ -1,0 +1,25 @@
+log GMRING start
+enter
+wait 8
+raw SE|GMNEW|RingArena|@P0,3000,0|2|3,3|Blue,Red
+wait 8
+raw SE|GMSET|RigelMode1|countdown|0
+raw SE|GMSET|RigelMode1|round_time|60
+raw SE|GMSET|RigelMode1|stop_when_empty|0
+raw SE|SBADD|JakeBallSpawner|@P0,3000,100
+raw SE|SBADD|PrimitiveCylinderPurpleTrigger|@P0,3000,200
+gmpiece RingArena Ball start ring
+wait 8
+gmrole CylinderPrimitive_Trigger RingArena start_ring 0
+wait 4
+gmapply RingArena
+wait 8
+expectgm RingArena idle 0,0
+log RING: setting the ball role now - the lobby ball lands in the ring
+gmrole JakeBallSpawner RingArena ball 0
+wait 12
+expectgm RingArena running
+raw SE|GMCTL|RigelMode1|stop
+wait 8
+expectgm RingArena ended
+log GMRING end

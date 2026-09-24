@@ -38,7 +38,8 @@
 
 namespace sereflect {
 
-enum class PType { Unsupported, Bool, Float, Double, Int, Int64, Byte, Enum, Name, Str, Vector, Rotator, Color, Vector2D, Object, Text };
+enum class PType { Unsupported, Bool, Float, Double, Int, Int64, Byte, Enum, Name, Str, Vector, Rotator, Color, Vector2D, Object, Text,
+                   Composite };   // Composite: a replicated struct / array / map shown read-only as a summary
 
 constexpr uint64_t CPF_Edit = 0x1, CPF_BlueprintVisible = 0x4, CPF_Net = 0x20, CPF_RepNotify = 0x100000000ull;
 
@@ -84,7 +85,7 @@ inline PType TypeOf(SDK::FProperty* p)
 
 inline bool Writable(PType t)
 {
-    return t != PType::Unsupported && t != PType::Object;
+    return t != PType::Unsupported && t != PType::Object && t != PType::Composite;
 }
 
 // Engine base classes whose properties are internals, not things an author tunes.
@@ -97,7 +98,9 @@ inline bool IsEngineBase(const std::string& cls)
     return false;
 }
 
-// Every editable property on `obj`, most-derived class first.
+// Every editable property on `obj` -- and EVERY replicated one (CPF_Net), even when it isn't marked editable or is a
+// struct / array we can't edit: those are what other players (Quest included) actually receive, so they must be
+// visible. Most-derived class first.
 inline void List(SDK::UObject* obj, std::vector<Prop>& out)
 {
     if (!obj) return;
@@ -109,9 +112,10 @@ inline void List(SDK::UObject* obj, std::vector<Prop>& out)
         {
             auto* p = static_cast<SDK::FProperty*>(f);
             if (p->ArrayDim != 1) continue;
-            if (!(p->PropertyFlags & (CPF_Edit | CPF_BlueprintVisible))) continue;
-            const PType t = TypeOf(p);
-            if (t == PType::Unsupported) continue;
+            const bool net = (p->PropertyFlags & CPF_Net) != 0;
+            if (!net && !(p->PropertyFlags & (CPF_Edit | CPF_BlueprintVisible))) continue;
+            PType t = TypeOf(p);
+            if (t == PType::Unsupported) { if (!net) continue; t = PType::Composite; }
             out.push_back({ p, t, f->Name.ToString(), owner });
             if (out.size() >= 256) return;
         }
@@ -175,8 +179,70 @@ inline int64_t ReadInt(SDK::UObject* obj, SDK::FProperty* p)
                               case 4: return *reinterpret_cast<const int32_t*>(a); default: return *reinterpret_cast<const int64_t*>(a); }
 }
 
+// A read-only summary of a value at `a` (struct fields, array items, simple values) -- for replicated structs and arrays.
+inline std::string Summarize(const uint8_t* a, SDK::FProperty* p, int depth)
+{
+    char b[96];
+    const std::string c = FieldClassName(p);
+    if (c == "BoolProperty")   { const uint8_t off = At<uint8_t>(p, 0x71), mask = At<uint8_t>(p, 0x72); return (a[off] & mask) ? "1" : "0"; }
+    if (c == "FloatProperty")  { snprintf(b, sizeof(b), "%g", *reinterpret_cast<const float*>(a)); return b; }
+    if (c == "DoubleProperty") { snprintf(b, sizeof(b), "%g", *reinterpret_cast<const double*>(a)); return b; }
+    if (c == "IntProperty")    return std::to_string(*reinterpret_cast<const int32_t*>(a));
+    if (c == "Int64Property")  return std::to_string(*reinterpret_cast<const int64_t*>(a));
+    if (c == "ByteProperty" || c == "EnumProperty") return std::to_string(p->ElementSize == 1 ? *a : *reinterpret_cast<const int32_t*>(a));
+    if (c == "NameProperty")   return reinterpret_cast<const SDK::FName*>(a)->ToString();
+    if (c == "StrProperty")
+    {
+        const wchar_t* w = *reinterpret_cast<const wchar_t* const*>(a);
+        std::string s = "\"";
+        for (int i = 0; w && w[i] && i < 40; ++i) s.push_back(static_cast<char>(w[i] < 128 ? w[i] : '?'));
+        return s + "\"";
+    }
+    if (c == "ObjectProperty" || c == "ObjectPtrProperty")
+    {
+        auto* o = *reinterpret_cast<SDK::UObject* const*>(a);
+        return o ? o->GetName() : "None";
+    }
+    if (c == "StructProperty")
+    {
+        auto* st = At<SDK::UStruct*>(p, 0x70);
+        const std::string sn = st ? st->GetName() : "?";
+        if (sn == "Vector" || sn == "Rotator") { const double* d = reinterpret_cast<const double*>(a); snprintf(b, sizeof(b), "(%g,%g,%g)", d[0], d[1], d[2]); return b; }
+        if (sn == "Quat") { const double* d = reinterpret_cast<const double*>(a); snprintf(b, sizeof(b), "(%g,%g,%g,%g)", d[0], d[1], d[2], d[3]); return b; }
+        if (!st || depth >= 2) return "{" + sn + "}";
+        std::string s = "{";
+        int n = 0;
+        for (SDK::UStruct* ss = st; ss; ss = ss->SuperStruct)
+            for (SDK::FField* f = ss->ChildProperties; f && n < 12; f = f->Next, ++n)
+            {
+                auto* cp = static_cast<SDK::FProperty*>(f);
+                if (n) s += ", ";
+                s += f->Name.ToString() + "=" + Summarize(a + cp->Offset, cp, depth + 1);
+            }
+        return s + "}";
+    }
+    if (c == "ArrayProperty")
+    {
+        const uint8_t* data = *reinterpret_cast<const uint8_t* const*>(a);
+        const int32_t num = *reinterpret_cast<const int32_t*>(a + 8);
+        auto* inner = At<SDK::FProperty*>(p, 0x78);
+        std::string s = "[" + std::to_string(num) + "]";
+        if (depth >= 2 || !inner || !data) return s;
+        for (int i = 0; i < num && i < 4; ++i) s += (i ? ", " : " ") + Summarize(data + static_cast<size_t>(i) * inner->ElementSize, inner, depth + 1);
+        if (num > 4) s += ", ...";
+        return s;
+    }
+    return "<" + c + ">";
+}
+
 inline std::string Read(SDK::UObject* obj, SDK::FProperty* p, PType t)
 {
+    if (t == PType::Composite)
+    {
+        std::string s;
+        s = Summarize(Addr(obj, p), p, 0);
+        return s.size() > 400 ? s.substr(0, 400) + "..." : s;
+    }
     const uint8_t* a = Addr(obj, p);
     char b[160];
     switch (t)

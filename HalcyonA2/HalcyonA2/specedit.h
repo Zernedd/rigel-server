@@ -4570,11 +4570,13 @@ do
 	end
 	Rigel.settingNumber = function(key: string): number return tonumber(Rigel.setting(key)) or 0 end
 	Rigel.startRound = function() send("rgm:start", "") end
+	Rigel.ringStart = function() send("rgm:ringstart", "") end
 	Rigel.startNow = function() send("rgm:startnow", "") end
 	Rigel.endRound = function(winner: number?) send("rgm:end", tostring(winner or 0)) end
 	Rigel.resetGame = function() send("rgm:reset", "") end
 	Rigel.resetBalls = function() send("rgm:balls", "") end
 	Rigel.addScore = function(team: number, amount: number?) send("rgm:score", team .. "," .. (amount or 1)) end
+	Rigel.goal = function(team: number, amount: number?, key: string?) send("rgm:goal", team .. "," .. (amount or 1) .. "," .. (key or "")) end
 	Rigel.setScore = function(team: number, value: number) send("rgm:setscore", team .. "," .. value) end
 	Rigel.setCustom = function(key: string, value: string) send("rgm:set", key .. "=" .. value) end
 	Rigel.setText = function(name: string, value: string) send(name, value) end
@@ -5088,7 +5090,13 @@ static std::string SbComponentKey(SDK::AActor* t, const std::string& type, std::
             *have += (have->empty() ? "" : ", ") + cn;
         if (key.empty() && want && c->IsA(want))
         {
-            key = c->GetName();
+            // The key is the component's Luau name: its CLASS name without "Component", first letter lowered -- as the
+            // station's own wiring has it (ScoreComponent -> "score", GameTimeComponent -> "gameTime",
+            // GameStateManagerComponent -> "gameStateManager", PhysicalComponent -> "physical"). The component
+            // OBJECT name only matched by luck: the Game State Manager's timer object is "GameTimeManager" and its
+            // score object "ScoreComponent", so those slots came up nil on every machine.
+            key = cn;
+            if (key.size() > 9 && key.compare(key.size() - 9, 9, "Component") == 0) key.resize(key.size() - 9);
             if (!key.empty()) key[0] = static_cast<char>(tolower(static_cast<unsigned char>(key[0])));
         }
     }
@@ -5833,6 +5841,8 @@ struct SeGameMode
     bool deleted = false;
     std::unordered_map<std::string, std::string> pushed;   // config values already pushed
     std::string statSent;                                   // last status line sent to editors
+    std::map<std::string, ULONGLONG> goalAt;                // Rigel.goal key -> when it last counted (de-dupe)
+    bool hadPlayers = false;                                // this round has had someone on a team (stop_when_empty)
 };
 static std::vector<SeGameMode> g_seModes;
 static int g_seModeCounter = 0;
@@ -5845,6 +5855,7 @@ static const char* kSeModeDefaults[][2] = {
     { "end_delay", "10" },        // seconds the result shows before idle
     { "auto_restart", "0" },      // 1 = auto mode starts again after a round
     { "stop_when_empty", "1" },   // 1 = a running round ends when every team is empty
+    { "reset_after_goal", "1" },  // 1 = a goal / score box point sends the ball back to its spawner
 };
 static const double kSeModeHalf[3] = { 3881.0, 4733.0, 950.0 };   // the slot class's box (half-size, cm)
 
@@ -5988,11 +5999,36 @@ static int SeModeBalls(SeGameMode& m)
                 HxLog("[HalcyonA2][GAMEMODE] %s: ball spawned by %s -> %s\n", m.name.c_str(), a->GetName().c_str(),
                       after.ReturnValue ? after.ReturnValue->GetName().c_str() : "(none)");
             }
+            // A spawned / reset ball is FROZEN (it hangs at the spawner) until something unfreezes it -- the stock arena
+            // script does primaryBall:unFreeze(true) at kick-off and after every point. Without it the ball never
+            // plays ("it's like the round never starts"). The ball is the server's, so unfreeze it here.
+            {
+                struct { SDK::UObject* ReturnValue; } now{};
+                if (fGet) SafeProcessEvent(c, fGet, &now);
+                if (now.ReturnValue && SeAlive(now.ReturnValue))
+                    if (auto* fu = now.ReturnValue->Class->GetFunction("DiscEntity", "UnFreeze"))
+                    {
+                        struct { bool reenableSimulation; } up{ true };
+                        const bool ok = SafeProcessEvent(now.ReturnValue, fu, &up);
+                        HxLog("[HalcyonA2][GAMEMODE] %s: ball %s unfrozen (%s)\n", m.name.c_str(), now.ReturnValue->GetName().c_str(), ok ? "ok" : "FAULT");
+                    }
+            }
             ++n;
             break;
         }
     }
     return n;
+}
+// A "Ball start ring" mode waits for its ball to be carried into the ring, so it needs the ball between rounds.
+static bool SeModeHasStartRing(const SeGameMode& m)
+{
+    for (const auto& kv : m.settings)
+        if (kv.first.rfind("role.", 0) == 0 && kv.second.rfind("start_ring", 0) == 0) return true;
+    return false;
+}
+static void SeModeLobbyBall(SeGameMode& m)
+{
+    if ((m.state == "idle" || m.state == "ended") && SeModeHasStartRing(m)) SeModeBalls(m);
 }
 static void SeModeSetState(SeGameMode& m, const std::string& st)
 {
@@ -6002,9 +6038,11 @@ static void SeModeSetState(SeGameMode& m, const std::string& st)
     m.stateAt = GetTickCount64();
     if (st == "countdown" || (st == "running" && m.round == 0)) { for (int t = 0; t < 8; ++t) m.score[t] = 0; m.winner = 0; }
     if (st == "running") ++m.round;
+    if (st == "countdown" || st == "running") m.hadPlayers = false;   // re-learned from the next tick's team sizes
     if (st == "idle") { m.winner = 0; }
     SeModePushAll(m);
     if (st == "running") SeModeBalls(m);
+    else SeModeLobbyBall(m);                               // a "Ball start ring" needs a ball in the lobby to carry in
 }
 static void SeModeEnd(SeGameMode& m, int winner)   // winner: 1-based team, 0 = work it out from the scores (tie = 0)
 {
@@ -6022,6 +6060,26 @@ static void SeModeEnd(SeGameMode& m, int winner)   // winner: 1-based team, 0 = 
     m.winner = winner;
     if (winner >= 1 && winner <= m.nTeams) ++m.wins[winner - 1];
     SeModeSetState(m, "ended");
+}
+// The mode's SCRIPT HOST: an invisible object (a Timer prefab: no mesh) that carries the generated controller script.
+// The script references the Game State Manager (the "controller") -- its clock, state and score components drive the
+// arena monitors and the announcer. A script must never reference the object it sits on: a self-reference makes a
+// cycle in the netvar tree and every client crashed walking it (2026-09-24, both clients, +0x46645DD recursion). The
+// station's own arenas do the same: gamemode.luau sits on a Cube and references the Game State Manager.
+static void SeModeEnsureHost(SeGameMode& m, const std::string& level)
+{
+    auto it = m.settings.find("scripthost");
+    if (it != m.settings.end() && !it->second.empty())
+        if (SDK::AActor* a = SbActorForIdx(it->second)) if (SeAlive(a)) return;
+    double at[3] = { m.at[0], m.at[1], m.at[2] + 60.0 };
+    const double rot0[3] = { 0, 0, 0 }, scl1[3] = { 1, 1, 1 };
+    const std::string prevLoading = g_lvLoading;
+    g_lvLoading = level;
+    const std::string hidx = SeSandboxSpawn("Timer", at, rot0, scl1);
+    g_lvLoading = prevLoading;
+    if (SeGameMode* again = SeModeById(m.id))
+        if (!hidx.empty()) { again->settings["scripthost"] = hidx; SeModePushAll(*again); }
+    HxLog("[HalcyonA2][GAMEMODE] %s: script host %s\n", m.name.c_str(), hidx.empty() ? "COULD NOT BE PLACED" : hidx.c_str());
 }
 // Create: a slot of its own, teams sized as asked. Returns the mode (nullptr + a note when it can't).
 static SeGameMode* SeModeCreate(const std::string& rawName, const double* at, int nTeams, const int* maxes, const std::string* names,
@@ -6066,6 +6124,7 @@ static SeGameMode* SeModeCreate(const std::string& rawName, const double* at, in
         g_lvLoading = prevLoading;
         SeGameMode* again = SeModeById(id);                   // (the spawn cannot move g_seModes, but be safe)
         if (again && !cidx.empty()) again->settings["controller"] = cidx;
+        if (SeGameMode* m2 = SeModeById(id)) SeModeEnsureHost(*m2, level);
     }
     SeGameMode& rr = *SeModeById(id);
     SeModePushAll(rr);
@@ -6165,12 +6224,21 @@ static void SeModeReadTeams(SeGameMode& m)
 static void SeModeEvent(SeGameMode& m, const std::string& ev, const std::string& arg)
 {
     const std::string e = ev.substr(4);
+    HxLog("[HalcyonA2][GAMEMODE] %s: event %s(%s) received in state %s\n", m.name.c_str(), e.c_str(), arg.c_str(), m.state.c_str());
     auto teamArg = [&](int* team, int* val) {
         const size_t c = arg.find(',');
         *team = atoi(arg.c_str());
         *val = c == std::string::npos ? 1 : atoi(arg.c_str() + c + 1);
     };
     if (e == "start") { if (m.state == "idle" || m.state == "ended") SeModeSetState(m, SeModeSettingInt(m, "countdown") > 0 ? "countdown" : "running"); }
+    else if (e == "ringstart")                             // the ball carried into a "Ball start ring"
+    {
+        // Entering the lobby puts the ball back at its spawner; if that is inside the ring, the overlap is not a
+        // player carrying it in. Scripts only learn the new state by polling, so the server makes this call: the
+        // first 3 s of a lobby don't count.
+        if ((m.state == "idle" || m.state == "ended") && GetTickCount64() - m.stateAt >= 3000)
+            SeModeSetState(m, SeModeSettingInt(m, "countdown") > 0 ? "countdown" : "running");
+    }
     else if (e == "startnow") { if (m.state != "running") SeModeSetState(m, "running"); }
     else if (e == "end") SeModeEnd(m, atoi(arg.c_str()));
     else if (e == "reset") { for (int t = 0; t < 8; ++t) { m.score[t] = 0; m.wins[t] = 0; } m.winner = 0; m.round = 0; m.state = ""; SeModeSetState(m, "idle"); }
@@ -6184,6 +6252,26 @@ static void SeModeEvent(SeGameMode& m, const std::string& ev, const std::string&
         SeModePushAll(m);
         const int toWin = SeModeSettingInt(m, "score_to_win");
         if (m.state == "running" && toWin > 0 && m.score[team - 1] >= toWin) SeModeEnd(m, team);
+    }
+    else if (e == "goal")                                  // Rigel.goal(team, points, key): a goal / score box
+    {
+        // Every machine runs the controller script, so the same goal can be reported more than once: count a key
+        // once per 2.5 s. Then the ball goes back to its spawner (setting reset_after_goal).
+        int team = 0, val = 0;
+        teamArg(&team, &val);
+        const size_t c2 = arg.find(',', arg.find(',') + 1);
+        const std::string key = c2 == std::string::npos ? std::string() : arg.substr(c2 + 1, 64);
+        if (team < 1 || team > m.nTeams || m.state != "running") return;
+        const ULONGLONG now = GetTickCount64();
+        ULONGLONG& last = m.goalAt[key];
+        if (last && now - last < 2500) return;
+        last = now;
+        m.score[team - 1] += (std::max)(1, (std::min)(100, val));
+        SeModePushAll(m);
+        HxLog("[HalcyonA2][GAMEMODE] %s: goal '%s' -> %s +%d (%d)\n", m.name.c_str(), key.c_str(), m.teamName[team - 1].c_str(), val, m.score[team - 1]);
+        const int toWin = SeModeSettingInt(m, "score_to_win");
+        if (toWin > 0 && m.score[team - 1] >= toWin) { SeModeEnd(m, team); return; }
+        if (SeModeSettingInt(m, "reset_after_goal")) SeModeBalls(m);
     }
     else if (e == "balls") SeModeBalls(m);                 // Rigel.resetBalls(): spawn / reset every ball-role spawner
     else if (e == "set")                                   // "key=value": scripts can change a custom setting
@@ -6233,7 +6321,7 @@ static std::string SeModesForLevel(const std::string& name, bool tag, const std:
                 if (it == ownedIdx.end()) continue;                 // an object that isn't part of the level
                 k = "role.#" + std::to_string(it->second);
             }
-            if (k == "controller") { auto it = ownedIdx.find(v); if (it == ownedIdx.end()) continue; v = "#" + std::to_string(it->second); }
+            if (k == "controller" || k == "scripthost") { auto it = ownedIdx.find(v); if (it == ownedIdx.end()) continue; v = "#" + std::to_string(it->second); }
             sets += (sets.empty() ? "" : "\x1F") + k + "\x1E" + v;
         }
         for (int i = 0; i < m.nTeams; ++i) { names += (i ? "," : "") + m.teamName[i]; maxes += (i ? "," : "") + std::to_string(m.teamMax[i]); }
@@ -6273,11 +6361,13 @@ static void SeModesLoadFixup(const std::string& level, const std::unordered_map<
             if (e == std::string::npos) continue;
             std::string k = kvs.substr(0, e), v = kvs.substr(e + 1);
             if (k.rfind("role.#", 0) == 0) { auto it = objIdx.find(atoi(k.c_str() + 6)); if (it == objIdx.end()) continue; k = "role." + it->second; }
-            if (k == "controller" && !v.empty() && v[0] == '#') { auto it = objIdx.find(atoi(v.c_str() + 1)); if (it == objIdx.end()) continue; v = it->second; }
+            if ((k == "controller" || k == "scripthost") && !v.empty() && v[0] == '#') { auto it = objIdx.find(atoi(v.c_str() + 1)); if (it == objIdx.end()) continue; v = it->second; }
             m.settings[k] = v;
         }
         g_seModeLoadSets.erase(raw);
+        if (m.settings.count("controller")) SeModeEnsureHost(m, level);   // levels saved before script hosts existed get one
         SeModePushAll(m);
+        SeModeLobbyBall(m);
         HxLog("[HalcyonA2][GAMEMODE] '%s' loaded with level '%s' (%zu setting(s))\n", m.name.c_str(), level.c_str(), m.settings.size());
     }
     SeModeListTo(nullptr);
@@ -6336,7 +6426,11 @@ static void SeModeTick()
             const int rt = SeModeSettingInt(m, "round_time");
             m.timeLeft = rt > 0 ? (std::max)(0, static_cast<int>(ceil(rt - el))) : 0;
             if (rt > 0 && el >= rt) SeModeEnd(m, 0);
-            else if (SeModeSettingInt(m, "stop_when_empty") && players == 0 && el > 3.0) SeModeEnd(m, 0);
+            // "End a round when every team is empty" is for ABANDONED rounds: only once someone has been on a team this
+            // round. A round started with empty teams (a solo test, or people who haven't picked a side yet) kept
+            // ending the instant it began -- the ball never played and score buttons did nothing (2026-09-24).
+            if (players > 0) m.hadPlayers = true;
+            if (SeModeSettingInt(m, "stop_when_empty") && m.hadPlayers && players == 0 && el > 3.0) SeModeEnd(m, 0);
         }
         else if (m.state == "ended")
         {
@@ -6814,6 +6908,7 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
                 for (char c : p[4]) if (c != ';' && c != '~' && c != '=' && c != '|' && static_cast<unsigned char>(c) >= 0x20) val += c;
                 key = key.substr(0, 64);
                 if (!key.empty()) { if (val.empty() && key.rfind("role.", 0) == 0) m->settings.erase(key); else m->settings[key] = val.substr(0, 200); }
+                if (key.rfind("role.", 0) == 0 && (val.rfind("start_ring", 0) == 0 || val.rfind("ball", 0) == 0)) SeModeLobbyBall(*m);
             }
             SeModePushAll(*m);
             SeModeListTo(nullptr);
@@ -6868,6 +6963,30 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
         if (!slot) slot = SeMapSlotById(p[2]);
         const int r = SeModeConfigSet(slot, p[3], p[4]);
         HxLog("[HalcyonA2][SPECEDIT] CFGSET %s.%s = '%s': %d\n", p[2].c_str(), p[3].c_str(), p[4].c_str(), r);
+    }
+    else if (op == "PRESS" && p.size() >= 3 && g_seLocalTest)          // SE|PRESS|<idx>: a button press arriving at the server
+    {
+        // Exactly what a client's press sends (sub_1453A93A0): "<object idx>_ButtonComponent_OnPress_Server" through
+        // the world's sandbox message subsystem (0x46B2E20) -> post (0x53C9EE0), which on the server dispatches
+        // locally to whatever subscribed when the button started up (sub_1453913E0).
+        const uintptr_t base = GetBase();
+        SDK::UWorld* w = SDK::UWorld::GetWorld();
+        void* sub = w ? reinterpret_cast<void*(__fastcall*)(void*)>(base + 0x46B2E20)(w) : nullptr;
+        std::vector<std::string> ids;                        // an object idx, or a role name: every object with that role
+        for (const auto& m : g_seModes)
+            if (!m.deleted)
+                for (const auto& kv : m.settings)
+                    if (kv.first.rfind("role.", 0) == 0 && kv.second.rfind(p[2], 0) == 0) ids.push_back(kv.first.substr(5));
+        if (ids.empty()) ids.push_back(p[2]);
+        for (const auto& id : ids)
+        {
+            std::wstring msg(id.begin(), id.end());
+            msg += L"_ButtonComponent_OnPress_Server";
+            struct { const wchar_t* d; int32_t n; int32_t m; } fs{ msg.c_str(), static_cast<int32_t>(msg.size() + 1), static_cast<int32_t>(msg.size() + 1) };
+            if (sub) reinterpret_cast<void(__fastcall*)(void*, void*)>(base + 0x53C9EE0)(sub, &fs);
+            HxLog("[HalcyonA2][SPECEDIT] PRESS %s -> message subsystem %p (server %d)\n", id.c_str(), sub,
+                  sub ? static_cast<int>(*reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(sub) + 264)) : -1);
+        }
     }
     else if (op == "LODFORCE" && p.size() >= 3 && g_seLocalTest) { g_lodForceOff = p[2] == "0"; HxLog("[HalcyonA2][SPECEDIT] area LOD force %s\n", g_lodForceOff ? "OFF" : "on"); }
     else if (op == "MKSLOTID" && p.size() >= 5 && g_seLocalTest) { double at[3]; const int ts[2] = { 4, 4 }; if (SeVec(p[2], at)) SbCreateSlotWithId(at, p[3], p[4], ts, 2); }

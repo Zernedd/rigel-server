@@ -498,6 +498,12 @@ static void EnsureHandCollision(SDK::APawn* pawn, SDK::UPrimitiveComponent* l, S
 // So write the source instead and let the pawn's own leftHandMoveUtil / rightHandMoveUtil carry it
 // to the collision spheres - the same route a tracked controller takes, which is what generates
 // the swept hit and the OnLeft/RightHandBeginOverlap events the ball logic listens for.
+// [REACH] "reach x y z [seconds]": sweep the RIGHT hand to a world point (a button, a switch) and hold it there, so
+// the object gets the same hand overlap a real player's press makes. The hand position also goes to the server in
+// FrequentData, like tracked hands.
+static bool        g_reachActive = false;
+static SDK::FVector g_reachTarget{};
+static ULONGLONG   g_reachUntil = 0;
 static void DriveHands(SDK::APawn* pawn, const SDK::FVector& fwd, const SDK::FVector& right, double dt)
 {
     auto* rl = *reinterpret_cast<SDK::USceneComponent**>(reinterpret_cast<uintptr_t>(pawn) + kRightHandLocalOff);
@@ -511,7 +517,18 @@ static void DriveHands(SDK::APawn* pawn, const SDK::FVector& fwd, const SDK::FVe
     // Y right, Z up. Out in front and slightly apart, roughly where a player holds their hands.
     const double reach = 70.0, spread = 32.0, lift = -10.0;
     SDK::FHitResult h1{}, h2{};
-    rl->K2_SetRelativeLocation(SDK::FVector{ reach,  spread, lift }, true, &h1, false);
+    if (g_reachActive && GetTickCount64() > g_reachUntil) g_reachActive = false;
+    if (g_reachActive)
+    {
+        // step toward the target (a swept move per tick) so the overlap is a real sweep, not a teleport
+        const SDK::FVector cur = rl->K2_GetComponentLocation();
+        SDK::FVector d{ g_reachTarget.X - cur.X, g_reachTarget.Y - cur.Y, g_reachTarget.Z - cur.Z };
+        const double len = sqrt(d.X * d.X + d.Y * d.Y + d.Z * d.Z), step = 25.0;
+        const SDK::FVector to = len <= step ? g_reachTarget : SDK::FVector{ cur.X + d.X / len * step, cur.Y + d.Y / len * step, cur.Z + d.Z / len * step };
+        rl->K2_SetWorldLocation(to, false, &h1, false);   // no sweep: a swept hand stops at the first blocker in front of the pawn; overlaps still update
+    }
+    else
+        rl->K2_SetRelativeLocation(SDK::FVector{ reach,  spread, lift }, true, &h1, false);
     ll->K2_SetRelativeLocation(SDK::FVector{ reach, -spread, lift }, true, &h2, false);
 
     // Remember where they ended up in WORLD space for the FrequentData push - read it back from the
@@ -763,11 +780,102 @@ static void Tick()
                     if (sscanf_s(line, "move %lf %lf %lf", &x, &y, &z) == 3) { g_cmdTarget = { p.X + x, p.Y + y, p.Z + z }; g_cmdActive = true; }
                     else if (sscanf_s(line, "goto %lf %lf %lf", &x, &y, &z) == 3) { g_cmdTarget = { x, y, z }; g_cmdActive = true; }
                     else if (!strncmp(line, "throw", 5)) g_cmdThrow = true;
+                    else if (!strncmp(line, "press", 5))
+                    {
+                        // press x y z: the KeypadButton nearest the point gets exactly what a hand overlap gives it --
+                        // OnOverlapBegin(its mesh, this pawn, this pawn's right hand) -- on THIS client, so the game's
+                        // own press path runs (the button component then tells the server).
+                        double x = 0, y = 0, z = 0;
+                        if (sscanf_s(line, "press %lf %lf %lf", &x, &y, &z) == 3 && pc->Pawn)
+                        {
+                            auto* kcls = SDK::UObject::FindClassFast("KeypadButton");
+                            SDK::AActor* best = nullptr; double bd = 1e18;
+                            const int32_t num = SDK::UObject::GObjects->Num();
+                            for (int32_t i = 0; kcls && i < num; ++i)
+                            {
+                                auto* o = SDK::UObject::GObjects->GetByIndex(i);
+                                if (!o || o->IsDefaultObject() || !o->IsA(kcls)) continue;
+                                auto* ka = static_cast<SDK::AActor*>(o);
+                                const SDK::FVector q = ka->K2_GetActorLocation();
+                                const double d = (q.X - x) * (q.X - x) + (q.Y - y) * (q.Y - y) + (q.Z - z) * (q.Z - z);
+                                if (d < bd) { bd = d; best = ka; }
+                            }
+                            if (!best) Log("[A2PlayerControl][PRESS] no KeypadButton\n");
+                            else if (auto* fn = best->Class->GetFunction("KeypadButton", "OnOverlapBegin"))
+                            {
+                                struct {
+                                    SDK::UPrimitiveComponent* OverlappedComp; SDK::AActor* OtherActor; SDK::UPrimitiveComponent* OtherComp;
+                                    int32_t OtherBodyIndex; bool bFromSweep; uint8_t pad[3]; SDK::FHitResult SweepResult;
+                                } prm{};
+                                prm.OverlappedComp = *reinterpret_cast<SDK::UPrimitiveComponent**>(reinterpret_cast<uintptr_t>(best) + 0x298);   // buttonMesh
+                                prm.OtherActor = pc->Pawn;
+                                prm.OtherComp = *reinterpret_cast<SDK::UPrimitiveComponent**>(reinterpret_cast<uintptr_t>(pc->Pawn) + kRightHandCollOff);
+                                best->ProcessEvent(fn, &prm);
+                                Log("[A2PlayerControl][PRESS] %s (%.0f cm from the point): OnOverlapBegin sent (state now %d)\n", best->GetName().c_str(), sqrt(bd),
+                                    (int)*reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(best) + 0x2F0));
+                            }
+                        }
+                    }
+                    else if (!strncmp(line, "reach", 5))
+                    {
+                        double x = 0, y = 0, z = 0, sec = 4;
+                        if (sscanf_s(line, "reach %lf %lf %lf %lf", &x, &y, &z, &sec) >= 3)
+                        {
+                            g_reachTarget = SDK::FVector{ x, y, z };
+                            g_reachActive = true;
+                            g_reachUntil = GetTickCount64() + static_cast<ULONGLONG>(sec * 1000.0);
+                            Log("[A2PlayerControl][REACH] right hand -> (%.0f, %.0f, %.0f) for %.1fs (hand at %.0f, %.0f, %.0f)\n", x, y, z, sec,
+                                g_lastHandR.X, g_lastHandR.Y, g_lastHandR.Z);
+                        }
+                    }
+                    else if (!strncmp(line, "boards", 6) && pc->Pawn)
+                    {
+                        // every AScoreboard monitor within 60 m: which clock / score component it reads and what it shows.
+                        // AScoreboard: bPlayersInArena @0x2A0, GameTimeComponent @0x320, ScoreComponent @0x328,
+                        // StoredHomeScore @0x330, StoredAwayScore @0x334, StoredGameTime @0x348
+                        auto* scls = SDK::UObject::FindClassFast("Scoreboard");
+                        const SDK::FVector me = pc->Pawn->K2_GetActorLocation();
+                        const int32_t num = SDK::UObject::GObjects->Num();
+                        for (int32_t i = 0; scls && i < num; ++i)
+                        {
+                            auto* o = SDK::UObject::GObjects->GetByIndex(i);
+                            if (!o || o->IsDefaultObject() || !o->IsA(scls)) continue;
+                            auto* sa = static_cast<SDK::AActor*>(o);
+                            const SDK::FVector q = sa->K2_GetActorLocation();
+                            const double d = sqrt((q.X - me.X) * (q.X - me.X) + (q.Y - me.Y) * (q.Y - me.Y) + (q.Z - me.Z) * (q.Z - me.Z));
+                            if (d > 6000.0) continue;
+                            const uintptr_t b = reinterpret_cast<uintptr_t>(sa);
+                            auto owner = [](uintptr_t comp) -> std::string {
+                                if (!comp) return "null";
+                                auto* c = reinterpret_cast<SDK::UObject*>(comp);
+                                return c->GetName() + "@" + (c->Outer ? c->Outer->GetName() : "?");
+                            };
+                            Log("[A2PlayerControl][BOARDS] %s %.0fcm players=%d time=%s score=%s home=%d away=%d gametime=%.1f\n",
+                                sa->GetName().c_str(), d, *reinterpret_cast<uint8_t*>(b + 0x2A0),
+                                owner(*reinterpret_cast<uintptr_t*>(b + 0x320)).c_str(), owner(*reinterpret_cast<uintptr_t*>(b + 0x328)).c_str(),
+                                *reinterpret_cast<int32_t*>(b + 0x330), *reinterpret_cast<int32_t*>(b + 0x334), *reinterpret_cast<float*>(b + 0x348));
+                        }
+                    }
+                    else if (!strncmp(line, "grav", 4) && pc->Pawn)
+                    {
+                        // this client's view of its own gravity: AVRPawn.GravityComponent @0x930 -> TotalGravity @0x170
+                        // (FA2Gravity: GravityDir double3, gravityScale float @+0x18; replicated), defaultPlayerGravity @0xB4,
+                        // GravityModifiers TMap @0x120 (element count @+0x8)
+                        const uintptr_t gc = *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(pc->Pawn) + 0x930);
+                        if (gc)
+                        {
+                            const double* d = reinterpret_cast<const double*>(gc + 0x170);
+                            Log("[A2PlayerControl][GRAV] total dir=(%.2f,%.2f,%.2f) scale=%.3f  default=%.1f  modifiers=%d  pos=(%.0f,%.0f,%.0f)\n",
+                                d[0], d[1], d[2], *reinterpret_cast<const float*>(gc + 0x170 + 0x18), *reinterpret_cast<const float*>(gc + 0xB4),
+                                *reinterpret_cast<const int32_t*>(gc + 0x120 + 0x8), pc->Pawn->K2_GetActorLocation().X,
+                                pc->Pawn->K2_GetActorLocation().Y, pc->Pawn->K2_GetActorLocation().Z);
+                        }
+                    }
                     else if (!strncmp(line, "cullstats", 9))
                     {
                         // Every sandbox prefab this client has: culling-entry stats split by host area, plus a few samples.
                         static SDK::UClass* pcls = SDK::UObject::FindClassFast("PrefabComponent");
-                        struct St { int n = 0, vis = 0, imp = 0, hideOut = 0, always = 0, forceHid = 0, hidden = 0; std::string sample; };
+                        struct St { int dead = 0, n = 0, vis = 0, imp = 0, hideOut = 0, always = 0, forceHid = 0, hidden = 0; std::string sample; };
                         std::map<std::string, St> by;
                         const int32_t num = SDK::UObject::GObjects->Num();
                         for (int32_t i = 0; pcls && i < num; ++i)
@@ -797,11 +905,12 @@ static void Tick()
                             if (has("forceHid=1")) ++s.forceHid;
                             auto* owner = c->Outer;
                             if (owner && (*reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(owner) + 0x60) >> 7)) ++s.hidden;
+                            if (!owner || !SDK::UKismetSystemLibrary::IsValid(owner)) ++s.dead;   // destroyed, waiting for GC
                             if (s.sample.size() < 600 && owner) s.sample += "\n      " + owner->Class->GetName() + " " + cb;
                         }
                         for (auto& kv : by)
-                            Log("[A2PlayerControl][CULLSTATS] %-34s n=%d vis=%d imp=%d hideOutside=%d always=%d forceHid=%d bHidden=%d%s\n",
-                                kv.first.c_str(), kv.second.n, kv.second.vis, kv.second.imp, kv.second.hideOut, kv.second.always,
+                            Log("[A2PlayerControl][CULLSTATS] %-34s dead=%d n=%d vis=%d imp=%d hideOutside=%d always=%d forceHid=%d bHidden=%d%s\n",
+                                kv.first.c_str(), kv.second.dead, kv.second.n, kv.second.vis, kv.second.imp, kv.second.hideOut, kv.second.always,
                                 kv.second.forceHid, kv.second.hidden, kv.second.sample.c_str());
                     }
                     else if (!strncmp(line, "questcull", 9))
@@ -875,6 +984,19 @@ static void Tick()
                             Log("[A2PlayerControl][NEAR] %-44s %-34s %5.0fcm prims=%d visible=%d drawn=%d actorDrawn=%d important=%d inLoaded=%d area=%s\n",
                                 ac->GetName().c_str(), cn.c_str(), dist, prims, vis, drawn, (int)ac->WasRecentlyRendered(1.0f),
                                 imp, inLoaded, lgmName.c_str());
+                            {   // each Luau component's sandbox links: LuauComp +0x430, ObjectPrefabComponent +0x438 (the press
+                                // message is keyed by it), LoadedGameMode +0x440, ModuleSlot +0x448
+                                static SDK::UClass* lbCls = SDK::UObject::FindClassFast("LuauBehavior");
+                                for (int32_t ci = 0; lbCls && ci < num; ++ci)
+                                {
+                                    auto* c = SDK::UObject::GObjects->GetByIndex(ci);
+                                    if (!c || c->Outer != ac || !c->IsA(lbCls)) continue;
+                                    const uintptr_t cb = reinterpret_cast<uintptr_t>(c);
+                                    Log("[A2PlayerControl][NEAR]     %s: luau=%d prefab=%d lgm=%d slot=%d\n", c->Class->GetName().c_str(),
+                                        *reinterpret_cast<void**>(cb + 0x430) != nullptr, *reinterpret_cast<void**>(cb + 0x438) != nullptr,
+                                        *reinterpret_cast<void**>(cb + 0x440) != nullptr, *reinterpret_cast<void**>(cb + 0x448) != nullptr);
+                                }
+                            }
                             if (plgm)
                             {
                                 static SDK::UClass* prefabCls2 = SDK::UObject::FindClassFast("PrefabComponent");
@@ -920,6 +1042,15 @@ static void Tick()
             else { const double s = (std::min)(400.0, dist * 2.0) / dist; v = { d.X * s, d.Y * s, d.Z * s }; }
             SetPawnVelocity(pw, v, false);
             PushToServer(pw, p, v, g_cmdActive);
+            return;
+        }
+        // [REACH] a reach drives the right hand even while the pawn stands still (the movement path below only drives
+        // the hands while moving, and not at all without WASD control).
+        if (g_reachActive && pc->Pawn && g_handsEnabled)
+        {
+            SDK::APawn* pw = pc->Pawn;
+            DriveHands(pw, SDK::FVector{}, SDK::FVector{}, 0.0);
+            PushToServer(pw, pw->K2_GetActorLocation(), SDK::FVector{}, false);
             return;
         }
     }

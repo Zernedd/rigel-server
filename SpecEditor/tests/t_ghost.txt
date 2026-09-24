@@ -1,0 +1,18 @@
+log GHOST start
+enter
+wait 8
+scene open AutoStartLobby
+wait 15
+log CENSUS OPEN
+wait 8
+scene close
+wait 12
+log CENSUS CLOSED
+wait 8
+scene open BallBattle
+wait 15
+log CENSUS SECOND
+wait 8
+scene close
+wait 6
+log GHOST end

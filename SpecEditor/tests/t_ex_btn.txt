@@ -1,0 +1,18 @@
+log EXBTN start
+enter
+wait 8
+scene open FirstToTen
+wait 20
+expectgm FirstToTen idle 0,0
+raw SE|PRESS|start
+wait 8
+expectgm FirstToTen running
+raw SE|PRESS|score:1
+wait 5
+expectgm FirstToTen running 1,0
+raw SE|PRESS|score:2
+wait 5
+expectgm FirstToTen running 1,1
+scene close
+wait 5
+log EXBTN end

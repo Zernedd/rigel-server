@@ -1,0 +1,31 @@
+log GMBTN start
+enter
+wait 8
+raw SE|GMNEW|BtnArena|@P0,1500,0|2|3,3|Blue,Red
+wait 8
+raw SE|GMSET|RigelMode1|countdown|0
+raw SE|GMSET|RigelMode1|round_time|120
+raw SE|GMSET|RigelMode1|stop_when_empty|0
+raw SE|GMSET|RigelMode1|start_mode|button
+raw SE|SBADD|BasicButton|@P150,0,0
+raw SE|SBADD|BasicButton|@P-150,0,0
+wait 8
+gmrole BasicButton BtnArena score:1 0
+gmrole BasicButton BtnArena start 1
+wait 4
+gmapply BtnArena
+wait 10
+pick GameStateManager
+props
+expectgm BtnArena idle 0,0
+log PRESS START
+wait 16
+raw SE|PRESS|start
+wait 4
+expectgm BtnArena running
+log PRESS SCORE
+wait 16
+raw SE|PRESS|score
+wait 4
+expectgm BtnArena running 1,0
+log GMBTN end

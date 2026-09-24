@@ -34,8 +34,30 @@
 
 static_assert(static_cast<int>(sereflect::PType::Object) == se::PT_Object &&
               static_cast<int>(sereflect::PType::Enum) == se::PT_Enum &&
-              static_cast<int>(sereflect::PType::Vector) == se::PT_Vector,
+              static_cast<int>(sereflect::PType::Vector) == se::PT_Vector &&
+              static_cast<int>(sereflect::PType::Composite) == se::PT_Composite,
               "se::PropType must mirror sereflect::PType");
+
+// Replicated structs / arrays are summarised by following pointers inside a live object (array data, strings). That
+// runs on the game thread, outside the UI's crash fence -- so a bad pointer must cost one line of text, not the game.
+static int CompositeSummaryInto(SDK::UObject* obj, SDK::FProperty* p, char* out, int cap)
+{
+    const std::string s = sereflect::Read(obj, p, sereflect::PType::Composite);
+    const int n = static_cast<int>((std::min)(s.size(), static_cast<size_t>(cap - 1)));
+    memcpy(out, s.data(), n);
+    out[n] = 0;
+    return n;
+}
+static int CompositeSummarySeh(SDK::UObject* obj, SDK::FProperty* p, char* out, int cap)
+{
+    __try { return CompositeSummaryInto(obj, p, out, cap); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+}
+static std::string SafeCompositeSummary(SDK::UObject* obj, SDK::FProperty* p)
+{
+    char buf[512];
+    return CompositeSummarySeh(obj, p, buf, sizeof(buf)) >= 0 ? std::string(buf) : std::string("(unreadable)");
+}
 #include <cmath>
 #include <unordered_set>
 #include <unordered_map>
@@ -858,7 +880,7 @@ void FillProps(Snapshot& snap)
         pi.owner = pr.owner;
         pi.type  = static_cast<int>(pr.t);
         pi.path  = g_inspPath.empty() ? pr.name : g_inspPath + "." + pr.name;
-        pi.value = sereflect::Read(obj, pr.p, pr.t);
+        pi.value = pr.t == sereflect::PType::Composite ? SafeCompositeSummary(obj, pr.p) : sereflect::Read(obj, pr.p, pr.t);
         pi.writable = sereflect::Writable(pr.t);
         pi.net = sereflect::Replicated(pr.p);
         pi.inert = sereflect::IsA(obj, "LuauBehavior") && !sereflect::IsA(obj, "TextComponent");

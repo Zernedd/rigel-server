@@ -114,11 +114,13 @@ declare Rigel: {
 	setting: (key: string) -> string,
 	settingNumber: (key: string) -> number,
 	startRound: () -> (),
+	ringStart: () -> (),                -- like startRound, but ignored for the first 3 s of a lobby (start rings)
 	startNow: () -> (),
 	endRound: (winner: number?) -> (),
 	resetGame: () -> (),
 	resetBalls: () -> (),               -- the server spawns / resets every "Ball spawner" role ball
 	addScore: (team: number, amount: number?) -> (),
+	goal: (team: number, amount: number?, key: string?) -> (),   -- a goal: counted once per key per 2.5 s, then balls reset
 	setScore: (team: number, value: number) -> (),
 	setCustom: (key: string, value: string) -> (),
 	setText: (name: string, value: string) -> (),

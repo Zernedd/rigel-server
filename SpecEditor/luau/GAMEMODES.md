@@ -59,7 +59,8 @@ Walking into it puts a player on that team; the team's size and the max show in 
 | **Score to win** | a team reaching it wins at once; 0 = no limit |
 | **Result shown (s)** | how long the result stays before the lobby |
 | **Restart automatically** | start the next round after the result |
-| **End a round when every team is empty** | so an abandoned round doesn't run forever |
+| **End a round when every team is empty** | so an abandoned round doesn't run forever: once a round has had players on a team and they all leave. A round started with empty teams keeps running |
+| **Ball back to its spawner after a goal** | a Goal / Score box point resets every ball (a kick-off) |
 
 ![The rules. **1** how a round starts (Manual / Start button / Automatic). **2** players per team to start, countdown, round length, score to win, how long the result shows. **3** restart automatically, and end a round when every team is empty.](doc-images/gm-rules.png)
 
@@ -91,6 +92,9 @@ Force fields are switched on and off for the wall roles; any other piece is show
 switched) instead -- the editor picks the right one for the object.
 | Round timer | Timer | counts the countdown, then the round (or up, with no limit) |
 | Ball spawner | Jake ball / ball spawners | the server spawns or resets its ball when a round starts |
+| Goal (team N) | Driftball goal, Goal | the ball going in during a round gives team N the goal's points (1, more for long shots) |
+| Score box (team N, 0 = by side) | Score box (a disc trigger) | the ball flies *through* it; each pass during a round gives team N a point. 0 = by side: along the box's forward arrow scores for team 1, the other way for team 2 |
+| Ball start ring | Ball start ring | between rounds, carry the ball into it to start a round; hidden while a round is on |
 | Scoreboard (score + clock) | the classic Score board | shows team 1 / team 2 points |
 | Score table | the Score table | one row per team: name, score, players, rounds won |
 
@@ -106,12 +110,25 @@ After changing roles click **Apply script** (or keep **Auto-apply on save** on a
 
 ![In the arena: **1** a scoreboard monitor (its clock and the teams' scores), **2** the classic Score board (team 1 : team 2, rounds).](doc-images/gm-scoreboards.png)
 
-### Balls
+### Balls, goals and the start ring (driftball)
 
 Jake ball spawners (and the other ball spawners) spawn a real, networked ball on the server that every player
 sees. Give the spawner the **Ball spawner** role: the server spawns or resets the ball when each round starts, and
 `Rigel.resetBalls()` does it whenever your code asks (after a goal, say). Don't spawn balls from Luau: the script
 runs on every machine and each would make its own ball that only it can see.
+
+- **Goals.** Place a *Driftball goal* from the pieces (or give any goal the **Goal** role) and set the team that
+  scores there. The game's own goal detection fires, the mode adds the goal's points to that team, and -- with
+  *Ball back to its spawner after a goal* on (the default) -- every ball goes back to its spawner for a kick-off.
+  The goal takes the colour of the team defending it.
+- **Score boxes.** A *Score box* is a trigger the ball passes through (it doesn't bounce off). Give it a team, or
+  **0 = by side**: the direction the ball crosses decides the team (along the box's forward arrow = team 1, the
+  other way = team 2) -- rotate the box so its arrow points at team 2's end. Scale it to the gap you want to guard.
+- **Start ring.** With a *Ball start ring* the mode keeps its ball out between rounds; a player carries it into the
+  ring to start the round, like the station's arenas. The first 3 seconds after a round ends don't count (the ball
+  is being put back), so a ring next to the spawner is fine. The ring hides while a round runs.
+- A goal or box counts once even though every machine sees it (the server ignores repeats of the same goal within
+  2.5 s), and only while a round is running. In your own code, `Rigel.goal(team, points, key)` does the same.
 
 ## Text on signs
 
@@ -163,6 +180,7 @@ Objects with roles are available by their slot names (shown next to each object 
 | `Rigel.endRound(winner?)` | a team number, or nothing to decide by score |
 | `Rigel.resetGame()` | scores and rounds back to zero |
 | `Rigel.addScore(team, n?)`, `Rigel.setScore(team, n)` | points count only during a round |
+| `Rigel.goal(team, n?, key?)` | a goal: counted once per `key` per 2.5 s, then balls reset (rule *Ball back to its spawner*) |
 | `Rigel.setCustom(key, value)`, `Rigel.setText(name, value)`, `Rigel.resetBalls()` | |
 
 Scripts run on every machine; the Rigel actions only take effect on the server, so it's safe that every machine
@@ -188,7 +206,7 @@ traps, scoreboards, signs -- and as code (**Start from example...**):
 ## Troubleshooting
 
 - **"Team changers only work inside a game mode"**: place them inside the orange box.
-- **The round ends straight away**: *End a round when every team is empty* is on and nobody has joined a team.
+- **The round ends by itself**: *End a round when every team is empty* is on and everyone who was on a team left.
 - **A button does nothing**: check its role in *Objects and roles*, then **Apply script**. Score buttons only count
   during a round.
 - **My code doesn't run**: the Problems popup shows script errors; the game log shows `[GM_<mode>.luau]` lines.

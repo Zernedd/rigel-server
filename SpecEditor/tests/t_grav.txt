@@ -1,0 +1,16 @@
+log GRAV start
+enter
+wait 8
+log GRAV0
+wait 6
+raw SE|SBADD|GravityVolume|@P0,0,0
+wait 12
+pick GravityVolume
+props BP_GravityVolume
+log GRAV1
+wait 8
+sprop BP_GravityVolume.Gravity 3000
+wait 8
+log GRAV2
+wait 8
+log GRAV end

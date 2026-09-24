@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstring>
 #include <map>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <filesystem>
@@ -2023,14 +2024,21 @@ void DrawProperties(const Snapshot& snap, const SceneObject* sel)
         ImGui::PushID(pi.owner.c_str());                 // a name can repeat across the class hierarchy
         ImGui::PushID(pi.path.c_str());
         ImGui::AlignTextToFramePadding();
+        // Sync dot: green = the game sends this value to every player (Quest included); grey = it only exists on the
+        // machine it is set on, so other players never see a change to it.
+        ImGui::TextColored(pi.net ? ImVec4(0.35f, 0.85f, 0.45f, 1.0f) : ImVec4(0.45f, 0.45f, 0.5f, 1.0f), pi.net ? "*" : ".");
+        ImGui::SameLine(0, 4);
         if (pi.inert) ImGui::TextDisabled("%s", pi.name.c_str()); else ImGui::TextUnformatted(pi.name.c_str());
         if (ImGui::IsItemHovered())
         {
+            const char* sync = pi.net ? "\n\nSynced: the game sends this value to every player, Quest included."
+                                      : "\n\nNot synced: it only exists where it is set -- other players (Quest) keep their own copy,\n"
+                                        "so a change here is not seen by them.";
             if (pi.inert)
                 ImGui::SetTooltip("%s  (%s)\n\nNo effect: this is an input to the game's sandbox script, which doesn't run for\n"
-                                  "editor-placed objects. Changing it is saved but nothing reads it.", pi.name.c_str(), pi.owner.c_str());
+                                  "editor-placed objects. Changing it is saved but nothing reads it.%s", pi.name.c_str(), pi.owner.c_str(), sync);
             else
-                ImGui::SetTooltip("%s  (%s)\npath: %s", pi.name.c_str(), pi.owner.c_str(), pi.path.c_str());
+                ImGui::SetTooltip("%s  (%s)\npath: %s%s", pi.name.c_str(), pi.owner.c_str(), pi.path.c_str(), sync);
         }
         ImGui::SameLine(labelW);
         ImGui::SetNextItemWidth(-1);
@@ -2123,8 +2131,10 @@ void DrawProperties(const Snapshot& snap, const SceneObject* sel)
             if (ImGui::IsItemDeactivatedAfterEdit()) PushSetProperty(sel->handle, pi.path, buf);
             break;
         }
-        default:
-            ImGui::TextDisabled("%s", pi.value.empty() ? "(empty)" : pi.value.c_str());
+        default:   // read-only: replicated structs / arrays (PT_Composite) and anything else we don't edit
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            ImGui::TextWrapped("%s", pi.value.empty() ? "(empty)" : pi.value.c_str());
+            ImGui::PopStyleColor();
             break;
         }
         ImGui::PopID();
@@ -3841,6 +3851,9 @@ const GmRole kGmRoles[] = {
     { "", "(no role)", "", "Just part of the arena.", false, "" },
     { "start", "Start button", "BasicButtonComponent", "Pressing it starts a round (when no round is on).", false, "" },
     { "score", "Score button", "BasicButtonComponent", "Pressing it during a round gives the team points.", true, "team" },
+    { "goal", "Goal (ball in = points)", "GoalComponent", "When the ball goes into this goal during a round, the team gets the goal's points (1, or more for long shots) and the ball goes back to its spawner. Team = the team that SCORES here.", true, "team" },
+    { "score_zone", "Score box (ball passes through)", "PhysicalComponent", "The ball flies through it; each pass during a round gives the team a point and resets the ball. Team 0 = by side: crossing along the box's forward arrow scores for team 1, the other way for team 2.", true, "team" },
+    { "start_ring", "Ball start ring", "PhysicalComponent", "Like the driftball arenas: between rounds the ball waits, carry it into the ring to start a round. The ring hides while a round is on.", false, "" },
     { "trap_round", "Trap - on during rounds", "ToggleableComponent", "Switched on when a round starts, off when it ends.", false, "" },
     { "trap_pulse", "Trap - pulses during rounds", "ToggleableComponent", "Flips on/off every N seconds while a round is on.", true, "seconds" },
     { "trap_fired", "Trap - fired by trap buttons", "ToggleableComponent", "Switched on for a while when a trap button is pressed.", false, "" },
@@ -3868,6 +3881,7 @@ bool GmRoleFits(const GmRole& r, const std::string& cls)
     if (t == "BallSpawnerComponent") return cls.find("BallSpawner") != std::string::npos;
     if (t == "ScoreComponent") return cls == "BP_Score_C";
     if (t == "DataTableComponent") return cls.find("TableScoreboard") != std::string::npos;
+    if (t == "GoalComponent") return cls.find("Goal") != std::string::npos && cls.find("VFX") == std::string::npos;
     return true;   // PhysicalComponent: most placed pieces
 }
 
@@ -3923,6 +3937,27 @@ std::string GmUserCode(const GmInfo& g, bool create)
     return ReadFileUtf8(path);
 }
 struct GmSlot { std::string slot, type, targetHandle; };
+// The object the mode's script runs on: its script host (an invisible Timer the server makes with the mode) when it
+// is there, else the controller (modes from before script hosts). A script must never reference the object it sits
+// on -- that self-reference crashed every client -- so the arena slots below need a host.
+static const SceneObject* GmObjectBySetting(const Snapshot& snap, const GmInfo& g, const char* key)
+{
+    auto it = g.sets.find(key);
+    if (it == g.sets.end() || it->second.empty()) return nullptr;
+    for (const auto& o : snap.objects) if (o.handle.rfind(it->second, 0) == 0) return &o;
+    return nullptr;
+}
+static const SceneObject* GmScriptObject(const Snapshot& snap, const GmInfo& g)
+{
+    if (const SceneObject* h = GmObjectBySetting(snap, g, "scripthost")) return h;
+    return GmObjectBySetting(snap, g, "controller");
+}
+// An object's forward vector (X axis) from its rotation -- baked into the script for "by side" score boxes.
+static void GmForward(const Rot& r, double* f)
+{
+    const double p = r.pitch * 3.14159265358979 / 180.0, y = r.yaw * 3.14159265358979 / 180.0;
+    f[0] = cos(p) * cos(y); f[1] = cos(p) * sin(y); f[2] = sin(p);
+}
 // Build the controller script. Returns the source; fills the slots to wire.
 std::string GmBuildScript(const Snapshot& snap, const GmInfo& g, std::vector<GmSlot>& slots)
 {
@@ -3931,9 +3966,11 @@ std::string GmBuildScript(const Snapshot& snap, const GmInfo& g, std::vector<GmS
     std::string head, body;
     head += "-- [Rigel game mode] " + g.name + " -- generated by the Game Modes window. Don't edit this one: give objects roles in\n"
             "-- the window, and write your own code in RigelScripts\\GameModes\\" + GmFileStem(g.name) + ".luau (included below).\n";
+    const SceneObject* scriptObj = GmScriptObject(snap, g);
     for (const auto& o : snap.objects)
     {
         if (!GmInside(g, o.location)) continue;
+        if (scriptObj && o.handle == scriptObj->handle) continue;      // no self-references (see GmScriptObject)
         auto it = g.sets.find("role." + GmGuid(o.handle));
         if (it == g.sets.end() || it->second.empty()) continue;
         const std::string key = it->second.substr(0, it->second.find(':'));
@@ -3946,17 +3983,56 @@ std::string GmBuildScript(const Snapshot& snap, const GmInfo& g, std::vector<GmS
         if (key.rfind("wall_", 0) == 0 && GmIsToggleWall(o.className)) type = "ToggleableComponent";
         head += "local " + slot + ": " + type + " = nil\n";
         slots.push_back({ slot, type, o.handle });
+        if (key == "score_zone")
+        {
+            double f[3];
+            GmForward(o.rotation, f);
+            char b[160];
+            snprintf(b, sizeof(b), "local %s_fwd = { %.4f, %.4f, %.4f }\n", slot.c_str(), f[0], f[1], f[2]);
+            head += b;
+        }
         roleOf.push_back({ slot, it->second + (type == "ToggleableComponent" && key.rfind("wall_", 0) == 0 ? "|toggle" : "") });
     }
+    // The controller is a Game State Manager: its GameTimeComponent is the arena clock the scoreboard monitors show,
+    // its GameStateManagerComponent's state drives the monitors' screens and the announcer, its ScoreComponent the
+    // score -- exactly what the station's own arena script drives. Wire all three.
+    bool arena = false;
+    const SceneObject* ctlObj = GmObjectBySetting(snap, g, "controller");
+    if (ctlObj && scriptObj && scriptObj != ctlObj)
+        for (const auto& o : snap.objects)
+            if (o.handle == ctlObj->handle)
+            {
+                head += "local ModeTimer: GameTimeComponent = nil\nlocal ModeState: GameStateManagerComponent = nil\nlocal ModeScore: ScoreComponent = nil\n";
+                slots.push_back({ "ModeTimer", "GameTimeComponent", o.handle });
+                slots.push_back({ "ModeState", "GameStateManagerComponent", o.handle });
+                slots.push_back({ "ModeScore", "ScoreComponent", o.handle });
+                arena = true;
+                break;
+            }
     std::string user = GmUserCode(g, false);
     body += "\n-- ==== your code (GameModes\\" + GmFileStem(g.name) + ".luau) ====\n" + user + "\n-- ==== generated wiring ====\n";
     body += "local function __call(name: string, ...) local f = _G[name] or getfenv()[name]; if type(f) == \"function\" then local ok, err = pcall(f, ...); if not ok then warn(\"[RigelError] \" .. name .. \": \" .. tostring(err)) end end end\n";
     body += "local __trapFiredUntil = 0\n";
+    {
+        // Is this disc the mode's ball? (any ball when the mode has no "Ball spawner" role)
+        std::string balls;
+        for (const auto& sr : roleOf) if (sr.second.rfind("ball", 0) == 0) balls += (balls.empty() ? "" : ", ") + sr.first;
+        body += "local function __isModeBall(disc: any): boolean\n";
+        if (balls.empty()) body += "\treturn disc ~= nil\n";
+        else body += "\tfor _, sp in { " + balls + " } do local ok, b = pcall(function() return sp:getSpawnedBall() end); if ok and b == disc then return true end end\n\treturn false\n";
+        body += "end\n";
+    }
     // Scoreboards: the monitor boards show the game mode's own team scores / rounds won (Gamemode:setTeamScore,
     // as the stock TKB mode does); the classic Score board and the score table get theirs through their slots.
+    // (no function-type annotation on f: typed function locals are what the game's property system can't build)
+    body += "local function __arena(what: string, f)\n"
+            "\tlocal ok, err = pcall(f)\n"
+            "\tif ok then log(\"[RigelArena] \" .. what .. \" ok\") else warn(\"[RigelError] arena \" .. what .. \": \" .. tostring(err)) end\n"
+            "end\n";
     body += "local function __boards()\n\tfor t = 1, Rigel.teams() do\n"
             "\t\tpcall(function() Gamemode:setTeamScore(t - 1, Rigel.score(t)) end)\n"
             "\t\tpcall(function() Gamemode:setTeamRoundsWon(t - 1, Rigel.roundsWon(t)) end)\n";
+    if (arena) body += "\t\t__arena(\"points \" .. t, function() ModeScore:setTeamPoints(t - 1, Rigel.score(t)) end)\n";
     for (const auto& sr : roleOf)
         if (sr.second == "score_board") body += "\t\tpcall(function() " + sr.first + ":setTeamPoints(t - 1, Rigel.score(t)) end)\n";
     body += "\tend\n";
@@ -3975,7 +4051,27 @@ std::string GmBuildScript(const Snapshot& snap, const GmInfo& g, std::vector<GmS
         }
     body += "end\n";
     body += "function BeginPlay()\n";
+    body += "\tlocal __lastState = \"\"\n";
     body += "\tlocal function onState(st: string)\n";
+    if (arena)
+        body += "\t\t-- the arena's own game state (monitors + announcer) and clock, as the station's arenas do\n"
+                "\t\tlocal rt = Rigel.settingNumber(\"round_time\") * 1000\n"
+                "\t\tif st == \"idle\" then\n"
+                "\t\t\t__arena(\"state 1\", function() ModeState:updateGameState(1) end)\n"
+                "\t\t\t__arena(\"timer lobby\", function() ModeTimer:luaSetGameBegun(false); ModeTimer:resetTimer(); ModeTimer:setRoundTime(rt) end)\n"
+                "\t\t\t__arena(\"score reset\", function() ModeScore:resetScore() end)\n"
+                "\t\telseif st == \"countdown\" then\n"
+                "\t\t\t__arena(\"state 4\", function() ModeState:updateGameState(4) end)\n"
+                "\t\t\t__arena(\"timer countdown\", function() ModeTimer:resetTimer(); ModeTimer:setRoundTime(rt); ModeTimer:startTimerWithCountdown(Rigel.timeLeft() * 1000) end)\n"
+                "\t\telseif st == \"running\" then\n"
+                "\t\t\t__arena(\"state 5\", function() ModeState:updateGameState(5) end)\n"
+                "\t\t\t__arena(\"game begun\", function() ModeTimer:luaSetGameBegun(true) end)\n"
+                "\t\t\tif __lastState ~= \"countdown\" then __arena(\"timer start\", function() ModeTimer:resetTimer(); ModeTimer:setRoundTime(rt); ModeTimer:startTimer() end) end\n"
+                "\t\telseif st == \"ended\" then\n"
+                "\t\t\t__arena(\"state 10\", function() ModeState:updateGameState(10) end)\n"
+                "\t\t\t__arena(\"timer pause\", function() ModeTimer:pauseTimer(); ModeTimer:luaSetGameBegun(false) end)\n"
+                "\t\tend\n"
+                "\t\t__lastState = st\n";
     // state-driven roles
     for (const auto& sr : roleOf)
     {
@@ -3990,6 +4086,8 @@ std::string GmBuildScript(const Snapshot& snap, const GmInfo& g, std::vector<GmS
             if (toggle) body += "\t\tpcall(function() if " + up + " then " + s + ":luaEnable() else " + s + ":luaDisable() end end)\n";
             else body += "\t\tpcall(function() if " + up + " then " + s + ":showLua(); " + s + ":setDefaultCollision() else " + s + ":hideLua(); " + s + ":disableCollisionLua() end end)\n";
         }
+        else if (key == "start_ring")
+            body += "\t\tpcall(function() if st == \"idle\" or st == \"ended\" then " + s + ":showLua(); " + s + ":setTriggerCollision() else " + s + ":hideLua(); " + s + ":disableCollisionLua() end end)\n";
         else if (key == "timer") body += "\t\tpcall(function()\n\t\t\tif st == \"countdown\" then " + s + ":start(Rigel.timeLeft())\n\t\t\telseif st == \"running\" then if Rigel.settingNumber(\"round_time\") > 0 then " + s + ":start(Rigel.timeLeft()) else " + s + ":startCountUpFromZero() end\n\t\t\telse " + s + ":stopAndResetTimer() end\n\t\tend)\n";
         // "ball": the server spawns / resets the ball itself when a round starts (a Luau spawnBall on every machine made
         // client-only balls). The slot stays available to your code: Ball1:getSpawnedBall(), Rigel.resetBalls().
@@ -4018,6 +4116,42 @@ std::string GmBuildScript(const Snapshot& snap, const GmInfo& g, std::vector<GmS
             body += "\tif " + s + " then " + s + ".OnButtonPressEvent.Listen(function() local st = Rigel.state(); if st == \"idle\" or st == \"ended\" then Rigel.startRound() end end) end\n";
         else if (key == "score")
             body += "\tif " + s + " then " + s + ".OnButtonPressEvent.Listen(function() if Rigel.isRunning() then Rigel.addScore(" + std::to_string((std::max)(1, atoi(param.c_str()))) + ", 1) end end) end\n";
+        else if (key == "goal")
+        {
+            // The goal's own team is the side DEFENDING it (the game scores a ball in team N's goal for the other side):
+            // with two teams that is the other team, otherwise the scoring team's colour.
+            const std::string team = std::to_string((std::max)(1, atoi(param.c_str())));
+            body += "\tif " + s + " then\n"
+                    "\t\tlocal owner = Rigel.teams() == 2 and (" + team + " == 1 and 1 or 0) or (" + team + " - 1)\n"
+                    "\t\tpcall(function() " + s + ":updateCppTeam(owner) end)\n"
+                    "\t\tpcall(function() " + s + ":setColorByIndex(owner) end)\n"
+                    "\t\tpcall(function() " + s + ":enableGoal(true) end)\n"
+                    "\t\t" + s + ".onGoalScored.Listen(function(info: any)\n"
+                    "\t\t\tif not Rigel.isRunning() then return end\n"
+                    "\t\t\tlocal pts = 1\n"
+                    "\t\t\tpcall(function() if info and info.goalPoints and info.goalPoints > 0 then pts = info.goalPoints end end)\n"
+                    "\t\t\tRigel.goal(" + team + ", pts, \"" + s + "\")\n"
+                    "\t\tend)\n\tend\n";
+        }
+        else if (key == "score_zone")
+        {
+            const int team = (std::max)(0, atoi(param.c_str()));
+            body += "\tif " + s + " then " + s + ".onOverlapByDisc.Listen(function(disc: any)\n"
+                    "\t\tif not Rigel.isRunning() or not __isModeBall(disc) then return end\n"
+                    "\t\tlocal team = " + std::to_string(team) + "\n"
+                    "\t\tif team == 0 then\n"
+                    "\t\t\tlocal v = disc:getDiscVelocity()\n"
+                    "\t\t\tteam = (v.x * " + s + "_fwd[1] + v.y * " + s + "_fwd[2] + v.z * " + s + "_fwd[3]) >= 0 and 1 or 2\n"
+                    "\t\tend\n"
+                    "\t\tRigel.goal(team, 1, \"" + s + "\")\n"
+                    "\tend) end\n";
+        }
+        else if (key == "start_ring")
+            body += "\tif " + s + " then " + s + ".onOverlapByDisc.Listen(function(disc: any)\n"
+                    "\t\tlocal st = Rigel.state()\n"
+                    "\t\t-- the server ignores the first 3 s of a lobby (the ball being put back is not a player carrying it in)\n"
+                    "\t\tif (st == \"idle\" or st == \"ended\") and __isModeBall(disc) then Rigel.ringStart() end\n"
+                    "\tend) end\n";
         else if (key == "trap_pulse")
         {
             const double sec = (std::max)(0.5, atof(param.c_str()) > 0 ? atof(param.c_str()) : 3.0);
@@ -4047,12 +4181,17 @@ bool g_gmAutoApply = true;
 std::map<std::string, FILETIME> g_gmCodeWritten;   // per mode id: the custom code file's time when last applied
 std::string g_gmPreview;                 // "Show generated script"
 
+std::set<std::string> g_gmCtlCleaned;   // modes whose controller had its old script copy taken off (this session)
 void GmApply(const Snapshot& snap, const GmInfo& g)
 {
-    auto it = g.sets.find("controller");
-    const SceneObject* ctl = nullptr;
-    if (it != g.sets.end()) for (const auto& o : snap.objects) if (o.handle.rfind(it->second, 0) == 0) ctl = &o;
+    const SceneObject* ctl = GmScriptObject(snap, g);
     if (!ctl) { Notes().Set("The game mode's controller (its Game State Manager) isn't here any more - make the mode again."); return; }
+    // Modes from before script hosts ran the script on the controller: take that copy off once the host has it.
+    if (const SceneObject* oldCtl = GmObjectBySetting(snap, g, "controller"))
+        if (oldCtl != ctl && g_gmCtlCleaned.insert(g.id).second)
+        {
+            Command c{ CmdType::LuauRemove }; c.str = oldCtl->handle; c.str2 = "GM_" + GmFileStem(g.name) + ".luau"; State().Push(c);
+        }
     std::vector<GmSlot> slots;
     GmUserCode(g, true);
     const std::string src = GmBuildScript(snap, g, slots);
@@ -4091,7 +4230,10 @@ const GmPiece kGmPieces[] = {
     { "LE_BP_Text_C", "Text sign", "" },
     { "BP_BallSpawner_C", "Ball spawner", "ball" },
     { "BP_JakeBallSpawner_C", "Jake ball spawner", "ball" },
-    { "BP_Goal_C", "Goal", "" },
+    { "BP_GoalJakeBall_C", "Driftball goal", "goal:1" },
+    { "BP_Goal_C", "Goal", "goal:1" },
+    { "BP_DiscTriggerC_C", "Score box", "score_zone:0" },
+    { "Prefab_BP_CylinderPrimitive_Trigger_C", "Ball start ring", "start_ring" },
     { "BP_DeathrunResetTeleporter_C", "Reset teleporter", "" },
 };
 struct GmPendingRole { std::string mode, role, cls; std::vector<std::string> before; double at = 0; };
@@ -4337,6 +4479,9 @@ void DrawGameModeDetail(const Snapshot& snap, const GmInfo& g)
         ImGui::SameLine();
         bool se = GmSetting(g, "stop_when_empty", "1") == "1";
         if (ImGui::Checkbox("End a round when every team is empty", &se)) GmSend(pre + "stop_when_empty|" + (se ? "1" : "0"));
+        bool rg = GmSetting(g, "reset_after_goal", "1") == "1";
+        if (ImGui::Checkbox("Ball back to its spawner after a goal", &rg)) GmSend(pre + "reset_after_goal|" + (rg ? "1" : "0"));
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("After a Goal or Score box gives a point, every Ball spawner's ball is put back (a kick-off).");
     }
     // ---- pieces (icons)
     if (ImGui::CollapsingHeader("Place pieces", ImGuiTreeNodeFlags_DefaultOpen))
@@ -4410,8 +4555,10 @@ void DrawGameModeDetail(const Snapshot& snap, const GmInfo& g)
             const std::string key = val.substr(0, val.find(':'));
             const std::string param = val.find(':') == std::string::npos ? std::string() : val.substr(val.find(':') + 1);
             const bool isCtl = g.sets.count("controller") && o.handle.rfind(g.sets.at("controller"), 0) == 0;
+            const bool isHost = g.sets.count("scripthost") && !g.sets.at("scripthost").empty() && o.handle.rfind(g.sets.at("scripthost"), 0) == 0;
             ImGui::SameLine(210);
-            if (isCtl) { ImGui::TextDisabled("controller (runs the mode's script)"); ImGui::PopID(); continue; }
+            if (isHost) { ImGui::TextDisabled("script host (runs the mode's script)"); ImGui::PopID(); continue; }
+            if (isCtl) { ImGui::TextDisabled(g.sets.count("scripthost") ? "controller (arena clock, state, score)" : "controller (runs the mode's script)"); ImGui::PopID(); continue; }
             ImGui::SetNextItemWidth(190);
             if (ImGui::BeginCombo("##role", GmRoleOf(key)->label))
             {
@@ -4419,7 +4566,15 @@ void DrawGameModeDetail(const Snapshot& snap, const GmInfo& g)
                 {
                     if (!GmRoleFits(r, o.className)) continue;
                     if (ImGui::Selectable(r.label, key == r.key))
-                        GmSend(pre + "role." + GmGuid(o.handle) + "|" + std::string(r.key) + (r.param ? std::string(":") + (param.empty() ? (std::string(r.key) == "score" ? "1" : "5") : param) : std::string()));
+                    {
+                        // Keep the current number only when switching between roles that mean the same by it (a team,
+                        // or seconds); otherwise start from that role's default.
+                        const std::string rk = r.key;
+                        auto isTeam = [](const std::string& k) { return k == "score" || k == "goal" || k == "score_zone"; };
+                        const bool keep = !param.empty() && isTeam(rk) == isTeam(key);
+                        const std::string def = rk == "score_zone" ? "0" : isTeam(rk) ? "1" : "5";
+                        GmSend(pre + "role." + GmGuid(o.handle) + "|" + rk + (r.param ? ":" + (keep ? param : def) : std::string()));
+                    }
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", r.help);
                 }
                 ImGui::EndCombo();
@@ -4431,7 +4586,8 @@ void DrawGameModeDetail(const Snapshot& snap, const GmInfo& g)
                 int pv = atoi(param.c_str());
                 ImGui::SetNextItemWidth(70);
                 if (GmIntCommit(r->paramLabel, &pv, 1))
-                    GmSend(pre + "role." + GmGuid(o.handle) + "|" + key + ":" + std::to_string((std::max)(1, pv)));
+                    GmSend(pre + "role." + GmGuid(o.handle) + "|" + key + ":" + std::to_string((std::max)(key == "score_zone" ? 0 : 1, pv)));
+                if (key == "score_zone" && pv == 0) { ImGui::SameLine(); ImGui::TextDisabled("(by side)"); }
             }
             if (!key.empty()) { ImGui::SameLine(); ImGui::TextDisabled("%s", GmSlotName(key, ++counters[key]).c_str()); }
             ImGui::PopID();
