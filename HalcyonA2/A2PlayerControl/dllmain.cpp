@@ -787,6 +787,13 @@ static void Tick()
                                 imp, inLoaded, lgmName.c_str());
                             if (SDK::AActor* par = ac->GetAttachParentActor())
                                 Log("[A2PlayerControl][NEAR]     attached to %s\n", par->GetName().c_str());
+                            {   // SpawnPrefab's always-visible branch calls vtable+0x360 on the new actor: which function is it?
+                                const uintptr_t vt = *reinterpret_cast<uintptr_t*>(ac);
+                                const uintptr_t fn = *reinterpret_cast<uintptr_t*>(vt + 0x360);
+                                Log("[A2PlayerControl][NEAR]     vfn+0x360 = RVA 0x%llX (SetHidden)  bHidden=%d\n",
+                                    (unsigned long long)(fn - reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr))),
+                                    (int)(*reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(ac) + 0x60) >> 7));
+                            }
                             ++shown;
                         }
                         Log("[A2PlayerControl][NEAR] %d actor(s) within %.0f cm\n", shown, rad);

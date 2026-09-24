@@ -1,0 +1,13 @@
+log VIS5 start
+enter
+wait 5
+raw SE|SBADD|PrimitiveCubeBlue|325.0,-2750.0,-27650.0
+raw SE|SBADD|aa_se_LE_BP_LightSwitch|600.0,-2750.0,-27700.0
+wait 12
+log VIS NOW
+wait 45
+raw SE|SBADD|PrimitiveCubeBlue|0.0,1700.0,-28525.0
+wait 10
+log VIS LATE
+wait 20
+log VIS end

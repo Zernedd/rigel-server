@@ -3320,6 +3320,26 @@ static SDK::UObject* SbEditorSlotLgm()   // the editor area's gamemode once it i
 static const char kSeEditorProject[] = "Testing/TestingProject20";
 
 
+// Always-visible areas made for spots no "Full" slot covers (see the end of SbHostGamemode).
+static std::vector<SDK::AActor*> g_seAreaSlots;
+static SDK::UObject* SbFullAreaFor(const double* loc)
+{
+    for (SDK::AActor* a : g_seAreaSlots)
+    {
+        if (!a || !SeAlive(a)) continue;
+        SDK::UObject* lgm = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(a) + 0x440);
+        SDK::UBoxComponent* box = SbImportanceBox(a);
+        if (lgm && box && SbOutsideBox(box, loc) <= 1.0) return lgm;
+    }
+    if (g_seAreaSlots.size() >= 32) return nullptr;
+    const std::string id = "RigelArea" + std::to_string(g_seAreaSlots.size() + 1);
+    SDK::AActor* slot = SbCreateSlotWithId(loc, kSeEditorProject, id, nullptr, 0);   // SlotID gets "_Full"
+    if (!slot) return nullptr;
+    g_seFabSlots.erase(std::remove(g_seFabSlots.begin(), g_seFabSlots.end(), slot), g_seFabSlots.end());   // not a game mode
+    g_seAreaSlots.push_back(slot);
+    return *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(slot) + 0x440);
+}
+
 static SDK::UObject* SbHostGamemode(const std::string& uniqueId, const double* loc)
 {
     static SDK::UClass* exactCls = nullptr;
@@ -3386,6 +3406,20 @@ static SDK::UObject* SbHostGamemode(const std::string& uniqueId, const double* l
             best = ed; bestTier = 0; bestScore = 0;
             bestWhy = "editor area, created for this spot";
         }
+    // Quest draws a sandbox object only if its host slot is always-visible ("Full" SlotID -> SpawnPrefab calls
+    // SetHidden(false) on it) or the player walked into that slot's box AFTER it spawned. Any other host leaves it
+    // collision-only on Quest (the PC spec builds draw it anyway). So never settle for such a host: use -- or make --
+    // an always-visible area around the spot.
+    {
+        SDK::AActor* bs = best ? *reinterpret_cast<SDK::AActor**>(reinterpret_cast<uintptr_t>(best) + 0x320) : nullptr;
+        const bool full = bs && SeAlive(bs) && *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(bs) + 0x2FC);
+        if (g_specEdit && !(full && bestTier <= 1))
+            if (SDK::UObject* area = SbFullAreaFor(loc))
+            {
+                best = area; bestTier = 0; bestScore = 0;
+                bestWhy = "always-visible area";
+            }
+    }
     g_sbHostOutsideCm = bestTier == 2 ? bestScore : (bestTier == 3 ? -1.0 : 0.0);
     static const char* kTier[] = { "inside its importance volume", "inside its importance volume (subclass slot)",
                                    "OUTSIDE every importance volume -- nearest one", "no importance volume anywhere -- nearest slot" };
