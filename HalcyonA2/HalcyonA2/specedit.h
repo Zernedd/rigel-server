@@ -6869,6 +6869,7 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
         const int r = SeModeConfigSet(slot, p[3], p[4]);
         HxLog("[HalcyonA2][SPECEDIT] CFGSET %s.%s = '%s': %d\n", p[2].c_str(), p[3].c_str(), p[4].c_str(), r);
     }
+    else if (op == "LODFORCE" && p.size() >= 3 && g_seLocalTest) { g_lodForceOff = p[2] == "0"; HxLog("[HalcyonA2][SPECEDIT] area LOD force %s\n", g_lodForceOff ? "OFF" : "on"); }
     else if (op == "MKSLOTID" && p.size() >= 5 && g_seLocalTest) { double at[3]; const int ts[2] = { 4, 4 }; if (SeVec(p[2], at)) SbCreateSlotWithId(at, p[3], p[4], ts, 2); }
     else if (op == "TEAMCHK" && g_seLocalTest)            // every TeamChangeComponent: arena / team / ticket manager
     {

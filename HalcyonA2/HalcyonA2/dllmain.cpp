@@ -8937,6 +8937,7 @@ static int g_lodNetvarPatched = 0;
 // last two to 1). While one of our slots loads its project (g_lodForceVisible), rewrite the blob to
 // VisibleAlways=1 + HideOutsideImportanceVolume=0 -- the rule's always-visible branch -- before it replicates.
 static int g_lodForceVisible = 0;
+static bool g_lodForceOff = false;   // SE|LODFORCE|0 (local test): A/B screenshots without the fix
 static int g_lodForcedCount = 0;
 static const uint8_t kLodAlwaysVisible[45] = {
     0x01,
@@ -8960,7 +8961,7 @@ static bool LodBlobShape(const uint8_t* d, int n)   // a version byte + 9 well-f
 static void NetVarRegFilter(void* netvar)
 {
     int didPatch = 0, forced = 0, forcedFrom = 0;
-    if (g_lodForceVisible > 0 && netvar)
+    if (g_lodForceVisible > 0 && !g_lodForceOff && netvar)
     {
         __try
         {

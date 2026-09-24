@@ -1,0 +1,22 @@
+log SHOT start
+enter
+wait 8
+raw SE|LODFORCE|0
+raw SE|GMNEW|ShotTest|325.0,-1000.0,-27700.0|2
+wait 10
+raw SE|SBADD|PrimitiveCubeBlue|675.0,-3250.0,-27620.0
+raw SE|SBADD|BasicButton|628.1,-3075.0,-27620.0
+raw SE|SBADD|PrimitiveCubeBlue|500.0,-2946.9,-27620.0
+raw SE|SBADD|Scoreboard|325.0,-2900.0,-27620.0
+raw SE|SBADD|PrimitiveCubeBlue|150.0,-2946.9,-27620.0
+raw SE|SBADD|BasicButton|21.9,-3075.0,-27620.0
+raw SE|SBADD|PrimitiveCubeBlue|-25.0,-3250.0,-27620.0
+raw SE|SBADD|Scoreboard|21.9,-3425.0,-27620.0
+raw SE|SBADD|PrimitiveCubeBlue|150.0,-3553.1,-27620.0
+raw SE|SBADD|BasicButton|325.0,-3600.0,-27620.0
+raw SE|SBADD|PrimitiveCubeBlue|500.0,-3553.1,-27620.0
+raw SE|SBADD|Scoreboard|628.1,-3425.0,-27620.0
+wait 15
+log SHOTS
+wait 60
+log SHOT end
