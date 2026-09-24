@@ -1,0 +1,29 @@
+log BOARD start
+enter
+wait 8
+scene open BallBattle
+wait 20
+raw SE|GMSET|RigelMode1|countdown|20
+gmapply BallBattle
+wait 20
+log SHOT lobby
+wait 14
+raw SE|PRESS|start
+wait 3
+log SHOT countdown
+wait 6
+log SHOT countdown2
+wait 18
+log SHOT running
+wait 4
+raw SE|XFORM|BP_JakeBallSpawner_C@0,2700,-28525|0,2200,-28525|0,0,0|1,1,1
+wait 6
+log SHOT ballmoved
+wait 4
+raw SE|XFORM|BP_JakeBall_C@0,2200,-28600|600,2200,-28400|0,0,0|1.5,1.5,1.5
+wait 8
+log SHOT balledited
+wait 6
+scene close
+wait 4
+log BOARD end

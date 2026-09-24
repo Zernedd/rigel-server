@@ -560,12 +560,14 @@ std::unordered_map<SDK::UObject*, BoundsEntry> g_boundsCache;   // BuildObjects:
 // by the pump: nothing lands on a single frame, and the list is fresher than before (~8 cycles a second).
 bool Alive(SDK::UObject* o);                    // below
 std::vector<SceneObject> g_builtObjects;       // the last complete walk
+static std::unordered_set<SDK::UClass*> g_ballClasses;   // DiscEntity classes: listed as "Ball", edits go to the spawner
 bool g_builtOnce = false;
 // One slice of the walk (budget objects). Returns true when a full cycle completed (g_builtObjects updated).
 bool BuildObjectsStep(int32_t budget)
 {
     static int32_t s_cursor = 0;
     static std::vector<SceneObject> s_objs;
+    static std::vector<SceneObject> s_ballObjs;      // balls seen this walk, sorted into s_objs at its end
     static std::vector<std::pair<SDK::UObject*, TriggerShape>> s_shapes;
     static std::unordered_map<SDK::UObject*, BoundsEntry> s_boundsNext;
     static int s_boundsBudget = 150, s_markers = 0;
@@ -684,8 +686,13 @@ bool BuildObjectsStep(int32_t budget)
         if (cv == s_clsVerdict.end())
         {
             std::string name = c->GetName();
+            // Balls (DiscEntity) are listed too, so they can be picked and dragged: the server turns an edit of a ball
+            // into an edit of its spawner (the ball follows it, and takes its scale).
+            static SDK::UClass* s_discCls = SDK::UObject::FindClassFast("DiscEntity");
             uint8_t v = name == "BP_LevelEditor_Pawn_C" ? 2
-                      : (name.rfind("LE_", 0) == 0 || IsSandboxClass(name) || name == "BP_BoostPad_Omnidirectional_C" || name == "BP_BoostTank_World_C") ? 1 : 0;
+                      : (name.rfind("LE_", 0) == 0 || IsSandboxClass(name) || name == "BP_BoostPad_Omnidirectional_C" || name == "BP_BoostTank_World_C" ||
+                         (s_discCls && o->IsA(s_discCls))) ? 1 : 0;
+            if (v == 1 && s_discCls && o->IsA(s_discCls)) g_ballClasses.insert(c);
             // A sandbox class may only be recognised once the sandbox registry has loaded: don't cache a "no" before.
             if (!v && !regReady) continue;                 // decided (and cached) once the registry is in
             cv = s_clsVerdict.emplace(c, std::make_pair(v, v == 1 ? name : std::string())).first;
@@ -707,7 +714,7 @@ bool BuildObjectsStep(int32_t budget)
         SceneObject so;
         so.ptr = o;
         so.handle = o->GetName();
-        so.label = so.handle;
+        so.label = g_ballClasses.count(c) ? "Ball (edits its spawner)" : so.handle;
         so.className = cn;
         if (!g_ownLockMap.empty())
             if (auto ol = g_ownLockMap.find(HandleGuid(so.handle)); ol != g_ownLockMap.end())
@@ -755,11 +762,26 @@ bool BuildObjectsStep(int32_t budget)
             so.boundsOff = be.off;
             so.boundsExt = be.ext;
         }
+        if (g_ballClasses.count(c)) { s_ballObjs.push_back(std::move(so)); continue; }   // kept only near a placed spawner (below)
         s_objs.push_back(std::move(so));
     }
     s_cursor = i;
     if (s_cursor < n && s_objs.size() < 4096) return false;       // more slices to go
     s_cursor = 0;
+    // The station is full of its own balls (pooled training balls, death balls...): list only the balls of placed ball
+    // spawners -- those within 60 m of one.
+    for (auto& b : s_ballObjs)
+    {
+        bool byOne = false;
+        for (const auto& sp : s_objs)
+        {
+            if (sp.className.find("BallSpawner") == std::string::npos) continue;
+            const double dx = sp.location.x - b.location.x, dy = sp.location.y - b.location.y, dz = sp.location.z - b.location.z;
+            if (dx * dx + dy * dy + dz * dz < 6000.0 * 6000.0) { byOne = true; break; }
+        }
+        if (byOne && s_objs.size() < 4096) s_objs.push_back(std::move(b));
+    }
+    s_ballObjs.clear();
     if (g_editorMode) g_boundsCache.swap(boundsNext);
     else g_boundsCache.clear();
     // Attach the trigger shapes to their placed objects.

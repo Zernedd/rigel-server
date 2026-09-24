@@ -67,13 +67,43 @@ def at(off):
     return (C[0] + off[0], C[1] + off[1], C[2] + off[2])
 
 
+# Team doors: the team changers stand on the floor facing the spawn hub (players arrive from -Y and walk through
+# along +Y: yaw 90), each framed like a doorway -- two posts outside the 3.5 m opening and a beam over the top, in
+# the team's colour -- with the team's name on a sign above. Nothing crosses the opening.
+DOORS = [(1, (-700, -1300), "PrimitiveCubeBlue", "Prefab_BP_CubePrimitive_Blue_C"),
+         (2, (700, -1300), "PrimitiveCubeYellow", "Prefab_BP_CubePrimitive_Yellow_C")]
+POST_X, POST_H, BEAM_Z = 200.0, 300.0, 320.0      # cm: post centre off the door's middle, post height, beam height
+
+
+def door_lines(name):
+    L = []
+    for team, (dx, dy), cube, cube_cls in DOORS:
+        x, y, z = at((dx, dy, 0))
+        L.append(f"raw SE|GMTEAM|{MODE}|{team}|{x:.0f},{y:.0f},{z:.0f}|90")
+        parts = [((x - POST_X, y, z + POST_H / 2), (0.4, 0.4, POST_H / 100.0)),
+                 ((x + POST_X, y, z + POST_H / 2), (0.4, 0.4, POST_H / 100.0)),
+                 ((x, y, z + BEAM_Z), (2 * POST_X / 100.0 + 0.4, 0.4, 0.4))]
+        for (px, py, pz), _ in parts:
+            L.append(f"raw SE|SBADD|{cube}|{px:.1f},{py:.1f},{pz:.1f}")
+        L.append("wait 4")
+        for (px, py, pz), (sx, sy, sz) in parts:
+            L.append(f"raw SE|XFORM|{cube_cls}@{px:.3f},{py:.3f},{pz:.3f}|{px:.1f},{py:.1f},{pz:.1f}|0,0,0|{sx:.2f},{sy:.2f},{sz:.2f}")
+        sx, sy, sz = x, y, z + BEAM_Z + 70
+        L.append(f"raw SE|SBADD|aa_se_LE_BP_Text|{sx:.1f},{sy:.1f},{sz:.1f}")
+        L.append("wait 3")
+        L.append(f"pickat LE_BP_Text_C {sx:.0f} {sy:.0f} {sz:.0f}")
+        L.append("rotate 180")
+        L.append("wait 2")
+        L.append(f"raw SE|SBSET|LE_BP_Text_C@{sx:.3f},{sy:.3f},{sz:.3f}|props/Text|text|{{{name}.team{team}.name}} team")
+    return L
+
+
 for name, ex in EX.items():
     L = [f"log EXLEVEL {name} start", "enter", "wait 3",
          f"raw SE|GMNEW|{name}|{C[0]:.0f},{C[1]:.0f},{C[2]:.0f}|2|4,4|Blue,Red", "wait 10"]
     for k, v in ex["rules"].items():
         L.append(f"raw SE|GMSET|{MODE}|{k}|{v}")
-    L.append(f"raw SE|GMTEAM|{MODE}|1|{at((-700, -1300, 0))[0]:.0f},{at((-700, -1300, 0))[1]:.0f},{C[2]:.0f}")
-    L.append(f"raw SE|GMTEAM|{MODE}|2|{at((700, -1300, 0))[0]:.0f},{at((700, -1300, 0))[1]:.0f},{C[2]:.0f}")
+    L += door_lines(name)
     for uid, off, role, text in ex["objs"]:
         x, y, z = at(off)
         L.append(f"raw SE|SBADD|{uid}|{x:.1f},{y:.1f},{z:.1f}")

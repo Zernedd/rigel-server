@@ -681,9 +681,49 @@ static std::string SeResolveIdent(const std::string& name)
     const std::string own = SeLvIdent(a);
     return own.empty() ? base : own;
 }
+static void SeBallFollow(SDK::AActor* spawner, const double* at, const double* scl);   // (below, with the game modes)
+static void SeBallScale(SDK::AActor* ball, const double* scl);
+static bool SeAlive(SDK::UObject* o);
+static SDK::AActor* SeBallAt(const std::string& ident);
 static void SeTransform(const std::string& name, const std::string& locs, const std::string& rots,
                         const std::string& scls)
 {
+    // A ball is not a placed object -- its SPAWNER is (the ball is made at run time, and remade every round). So
+    // editing a ball edits its spawner: the spawner goes to where the ball was put (the ball sits 1 m above it) and
+    // takes its scale, and the ball follows. A ball whose spawner is not a sandbox object just moves.
+    if (SDK::AActor* ball = SeBallAt(name))
+    {
+        auto* sp = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(ball) + 0x328);   // ADiscEntity::Spawner
+        SDK::AActor* owner = sp && SeAlive(sp) && sp->Outer ? static_cast<SDK::AActor*>(sp->Outer) : nullptr;
+        double l[3], sc[3];
+        const SDK::FVector bl = ball->K2_GetActorLocation(), bs = ball->GetActorScale3D();
+        if (!SeVec(locs, l)) { l[0] = bl.X; l[1] = bl.Y; l[2] = bl.Z; }
+        if (!SeVec(scls, sc)) { sc[0] = bs.X; sc[1] = bs.Y; sc[2] = bs.Z; }
+        if (owner && SbPrefabOf(owner))
+        {
+            // a ball can't be resized (see SeBallScale): the spawner keeps its own scale
+            { const SDK::FVector os = owner->GetActorScale3D(); sc[0] = os.X; sc[1] = os.Y; sc[2] = os.Z; }
+            // The spawner moves BY what the ball moved: a ball resting on the floor is ~18 cm up, not the 1 m over
+            // its spawner it was made at, so "1 m under the ball" sank spawners into the floor (and the rebuild
+            // took the ball with it).
+            const SDK::FRotator cr = owner->K2_GetActorRotation();
+            const SDK::FVector ol = owner->K2_GetActorLocation();
+            double sl[3] = { ol.X + (l[0] - bl.X), ol.Y + (l[1] - bl.Y), ol.Z + (l[2] - bl.Z) }, r[3] = { cr.Pitch, cr.Yaw, cr.Roll };
+            SeSandboxXform(owner, sl, r, sc);
+            SeMarkProxyDirty(owner);
+            SeBallFollow(owner, sl, sc);
+            HxLog("[HalcyonA2][SPECEDIT] ball %s edited -> its spawner %s moved/scaled\n", ball->GetName().c_str(), owner->GetName().c_str());
+        }
+        else
+        {
+            double sl[3] = { l[0], l[1], l[2] - 100.0 };   // ResetBallTo puts the ball 1 m over this: exactly at l
+            if (owner) SeBallFollow(owner, sl, sc);
+            else { SDK::FHitResult hit{}; ball->K2_SetActorLocation(SDK::FVector{ l[0], l[1], l[2] }, false, &hit, true); }
+            HxLog("[HalcyonA2][SPECEDIT] ball %s moved (spawner %s is not a placed object: not saved)\n", ball->GetName().c_str(),
+                  owner ? owner->GetName().c_str() : "none");
+        }
+        return;
+    }
     SDK::AActor* a = SeFindEditorActor(name);
     if (!a) { SbOwnedXform(name, locs, rots, scls); return; }   // a node the server never built an actor for
     if (SbPrefabOf(a))                                   // a sandbox object: every machine owns its own copy
@@ -696,6 +736,7 @@ static void SeTransform(const std::string& name, const std::string& locs, const 
         if (!SeVec(scls, sc)) { sc[0] = cs.X; sc[1] = cs.Y; sc[2] = cs.Z; }
         SeSandboxXform(a, l, r, sc);
         SeMarkProxyDirty(a);                             // its collision stand-in follows once it settles
+        SeBallFollow(a, l, sc);                          // a ball spawner: its ball comes along (no-op otherwise)
         return;
     }
     SeReplicateTransform(a);
@@ -6012,12 +6053,152 @@ static int SeModeBalls(SeGameMode& m)
                         const bool ok = SafeProcessEvent(now.ReturnValue, fu, &up);
                         HxLog("[HalcyonA2][GAMEMODE] %s: ball %s unfrozen (%s)\n", m.name.c_str(), now.ReturnValue->GetName().c_str(), ok ? "ok" : "FAULT");
                     }
+                if (now.ReturnValue && SeAlive(now.ReturnValue))   // a ball is its spawner's size
+                {
+                    const SDK::FVector s = a->GetActorScale3D();
+                    const double sc[3] = { s.X, s.Y, s.Z };
+                    SeBallScale(static_cast<SDK::AActor*>(now.ReturnValue), sc);
+                }
             }
             ++n;
             break;
         }
     }
     return n;
+}
+// The ball an editor means by "<ball class>@x,y,z" (the editor lists balls so they can be picked): the nearest
+// DiscEntity of that class within 3 m (a ball keeps moving while it is being dragged). Null for anything else.
+static SDK::AActor* SeBallAt(const std::string& ident)
+{
+    const size_t at = ident.find('@');
+    if (at == std::string::npos) return nullptr;
+    static SDK::UClass* disc = nullptr;
+    if (!disc) disc = SDK::UObject::FindClassFast("DiscEntity");
+    SDK::UClass* cls = SDK::UObject::FindClassFast(ident.substr(0, at));
+    double want[3];
+    if (!disc || !cls || !SeVec(ident.substr(at + 1), want)) return nullptr;
+    SDK::AActor* best = nullptr;
+    double bestD2 = 300.0 * 300.0;
+    for (SDK::UObject* o : ClassObjects(disc))
+    {
+        if (!o || o->Class != cls || !SeAlive(o) || (*(reinterpret_cast<const uint8_t*>(o) + 0x65) & 0x01)) continue;
+        const SDK::FVector p = static_cast<SDK::AActor*>(o)->K2_GetActorLocation();
+        const double d2 = (p.X - want[0]) * (p.X - want[0]) + (p.Y - want[1]) * (p.Y - want[1]) + (p.Z - want[2]) * (p.Z - want[2]);
+        if (d2 < bestD2) { bestD2 = d2; best = static_cast<SDK::AActor*>(o); }
+    }
+    return best;
+}
+// A ball's size can NOT be set: every machine sizes its own copy of the ball (1 / spawner scale, measured 2026-09-24),
+// the actor scale never replicates, and a server-side scale then makes the server's ball simulate at a different size
+// than every player's -- measured: the client's ball fell 290 m through the floor. So this is off (kept for a test).
+static bool g_seBallScaleOn = false;
+static void SeBallScale(SDK::AActor* ball, const double* scl)
+{
+    if (!g_seBallScaleOn || !ball || !scl) return;
+    const double s = (std::max)(0.05, (scl[0] + scl[1] + scl[2]) / 3.0);
+    const SDK::FVector cur = ball->GetActorScale3D();
+    if (fabs(cur.X - s) < 1e-3 && fabs(cur.Y - s) < 1e-3 && fabs(cur.Z - s) < 1e-3) return;
+    ball->SetActorScale3D(SDK::FVector{ s, s, s });
+    ball->ForceNetUpdate();
+    HxLog("[HalcyonA2][SPECEDIT] ball %s scale -> %.2f\n", ball->GetName().c_str(), s);
+}
+// After a ball spawner moves or is scaled, its ball goes with it: back to 1 m above the spawner (the game's own
+// ResetBallTo -- a real physics reset every machine sees), at the spawner's scale, and playing again (a reset ball
+// is frozen). `at`/`scl` are the spawner's NEW transform (a sandbox move lands on the server a moment later).
+// A sandbox move REBUILDS the spawner: the old one (and its ball) goes, the new one spawns a fresh ball a moment later
+// -- sized 1/spawner-scale by the game. So the follow is also queued by the spawner's idx and applied again to the
+// rebuilt spawner's new ball when it turns up.
+struct SeBallPending { std::string idx; double at[3], scl[3]; SDK::UObject* oldBall; ULONGLONG until; };
+static std::vector<SeBallPending> g_seBallPending;
+static SDK::AActor* SeSpawnerBall(SDK::AActor* spawner, SDK::UObject** compOut)
+{
+    static SDK::UClass* bsc = nullptr;
+    if (!bsc) bsc = SDK::UObject::FindClassFast("BallSpawnerComponent");
+    if (!spawner || !bsc) return nullptr;
+    for (SDK::UObject* c : ClassObjects(bsc))
+    {
+        if (!c || c->Outer != spawner) continue;
+        if (compOut) *compOut = c;
+        struct { SDK::UObject* ReturnValue; } gb{};
+        if (auto* fGet = c->Class->GetFunction("BallSpawnerComponent", "GetSpawnedBall")) SafeProcessEvent(c, fGet, &gb);
+        return gb.ReturnValue && SeAlive(gb.ReturnValue) ? static_cast<SDK::AActor*>(gb.ReturnValue) : nullptr;
+    }
+    return nullptr;
+}
+static void SeBallFollowNow(SDK::UObject* c, SDK::AActor* ball, const double* at, const double* scl);
+static void SeBallFollow(SDK::AActor* spawner, const double* at, const double* scl)
+{
+    SDK::UObject* c = nullptr;
+    SDK::AActor* ball = SeSpawnerBall(spawner, &c);
+    if (!c) return;                                        // not a ball spawner
+    if (SDK::UObject* pc = SbPrefabOf(spawner))
+    {
+        SeBallPending p{ FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(pc) + 0x248)), {}, {}, ball, GetTickCount64() + 15000 };
+        for (int k = 0; k < 3; ++k) { p.at[k] = at ? at[k] : 0.0; p.scl[k] = scl ? scl[k] : 1.0; }
+        if (!p.idx.empty())
+        {
+            g_seBallPending.erase(std::remove_if(g_seBallPending.begin(), g_seBallPending.end(),
+                                                 [&](const SeBallPending& q) { return q.idx == p.idx; }), g_seBallPending.end());
+            g_seBallPending.push_back(p);
+        }
+        return;   // a placed spawner is rebuilt by the move and makes its own ball there: nothing to push around
+    }
+    if (ball) SeBallFollowNow(c, ball, at, scl);   // a station spawner (not rebuilt): reset its ball to the new spot
+}
+static void SeBallPendingTick()
+{
+    const ULONGLONG now = GetTickCount64();
+    for (size_t i = 0; i < g_seBallPending.size(); )
+    {
+        SeBallPending& p = g_seBallPending[i];
+        SDK::AActor* sp = SbActorForIdx(p.idx, true);
+        SDK::UObject* c = nullptr;
+        SDK::AActor* ball = sp && SeAlive(sp) ? SeSpawnerBall(sp, &c) : nullptr;
+        // The rebuilt spawner's new ball: it was made at the new spot -- leave it be. Resetting / unfreezing a ball
+        // this young (measured 2026-09-24) sent every player's copy 290 m under the floor while the server's sat on it.
+        if (ball && ball != p.oldBall)
+        {
+            HxLog("[HalcyonA2][SPECEDIT] spawner %s rebuilt with its ball %s\n", p.idx.c_str(), ball->GetName().c_str());
+            g_seBallPending.erase(g_seBallPending.begin() + i);
+            continue;
+        }
+        // The rebuilt spawner made no ball of its own (the old one went with the old spawner): make it one, so an
+        // edit never loses the ball. Given the rebuild ~2.5 s to settle first.
+        if (p.oldBall && c && sp != nullptr && (!ball || !SeAlive(ball)) && now + 15000 - p.until > 2500)
+            if (auto* f = c->Class->GetFunction("BallSpawnerComponent", "SpawnBall"))
+            {
+                struct { bool CanSpawnMany; uint8_t pad[7]; SDK::FVector OverrideSpawnLocation; } spn{};
+                spn.OverrideSpawnLocation = SDK::FVector{ p.at[0], p.at[1], p.at[2] + 100.0 };
+                SafeProcessEvent(c, f, &spn);
+                SDK::AActor* nb = SeSpawnerBall(sp, nullptr);
+                HxLog("[HalcyonA2][SPECEDIT] spawner %s had no ball after its rebuild -> spawned %s\n", p.idx.c_str(),
+                      nb ? nb->GetName().c_str() : "(none)");
+                if (nb) { g_seBallPending.erase(g_seBallPending.begin() + i); continue; }
+            }
+        if (now > p.until) { g_seBallPending.erase(g_seBallPending.begin() + i); continue; }
+        ++i;
+    }
+}
+static void SeBallFollowNow(SDK::UObject* c, SDK::AActor* ball, const double* at, const double* scl)
+{
+    {
+        SDK::AActor* spawner = static_cast<SDK::AActor*>(c->Outer);
+        if (at)
+            if (auto* f = c->Class->GetFunction("BallSpawnerComponent", "ResetBallTo"))
+            {
+                struct { SDK::FVector position; } rp{ SDK::FVector{ at[0], at[1], at[2] + 100.0 } };
+                SafeProcessEvent(c, f, &rp);
+                if (auto* fu = ball->Class->GetFunction("DiscEntity", "UnFreeze"))
+                {
+                    struct { bool reenableSimulation; } up{ true };
+                    SafeProcessEvent(ball, fu, &up);
+                }
+            }
+        SeBallScale(ball, scl);
+        HxLog("[HalcyonA2][SPECEDIT] ball %s follows its spawner %s to (%.0f,%.0f,%.0f)\n", ball->GetName().c_str(),
+              spawner->GetName().c_str(), at ? at[0] : 0.0, at ? at[1] : 0.0, at ? at[2] + 100.0 : 0.0);
+        return;
+    }
 }
 // A "Ball start ring" mode waits for its ball to be carried into the ring, so it needs the ball between rounds.
 static bool SeModeHasStartRing(const SeGameMode& m)
@@ -6391,6 +6572,7 @@ static void SeModeTick()
         if (SeGameMode* m = SeModeByApi(ev.first)) SeModeEvent(*m, ev.second.first, ev.second.second);
     if (now - s_last < 250) return;
     s_last = now;
+    if (!g_seBallPending.empty()) SeBallPendingTick();
     for (auto& m : g_seModes)
     {
         if (m.deleted || !m.slot || !SeAlive(m.slot)) continue;
@@ -6928,7 +7110,7 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
     }
     else if (op == "GMDEL" && p.size() >= 3) { if (SeGameMode* m = SeModeById(p[2])) { SeModeDelete(*m); SeModeListTo(nullptr); } }
     else if (op == "GMLIST") SeModeListTo(SeCallerPC(pawn));
-    else if (op == "GMTEAM" && p.size() >= 5)             // SE|GMTEAM|id|team (1-based)|x,y,z : a team changer for that team
+    else if (op == "GMTEAM" && p.size() >= 5)             // SE|GMTEAM|id|team (1-based)|x,y,z[|yaw] : a team changer for that team
     {
         SeGameMode* m = SeModeById(p[2]);
         double at[3];
@@ -6939,10 +7121,24 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
             if (here != m) { if (SDK::UObject* pc = SeCallerPC(pawn)) SeBroadcast("SE|NOTE|Team changers for '" + m->name + "' go inside its area.", pc); }
             else
             {
-                const double rot[3] = { 0, 0, 0 }, scl[3] = { 1, 1, 1 };
+                // A team changer's origin is the middle of its door, ~1.5 m above the floor (the station's arena doors
+                // sit 150 cm over the floor; the door's collision reaches 151 cm below the origin). Placed with the
+                // origin ON the floor -- as game modes did -- the door was sunk into the ground and all but vanished.
+                // So: find the floor under the spot and stand the door on it. Yaw = the way players walk through it.
+                double door[3] = { at[0], at[1], at[2] };
+                {
+                    SDK::FHitResult hit{};
+                    SDK::TArray<SDK::AActor*> ignore{};
+                    const bool ok = SDK::UKismetSystemLibrary::LineTraceSingle(SDK::UWorld::GetWorld(), SDK::FVector{ at[0], at[1], at[2] + 100.0 },
+                        SDK::FVector{ at[0], at[1], at[2] - 3000.0 }, SDK::ETraceTypeQuery::TraceTypeQuery1, false, ignore,
+                        SDK::EDrawDebugTrace::None, &hit, true, SDK::FLinearColor{}, SDK::FLinearColor{}, 0.0f);
+                    if (ok && hit.bBlockingHit) door[2] = hit.Location.Z;
+                    door[2] += 150.0;
+                }
+                const double rot[3] = { 0, p.size() >= 6 ? atof(p[5].c_str()) : 0.0, 0 }, scl[3] = { 1, 1, 1 };
                 const std::string prevLoading = g_lvLoading;
                 g_lvLoading = SeCallerScene();
-                const std::string idx = SeSandboxSpawn("teamChange", at, rot, scl);
+                const std::string idx = SeSandboxSpawn("teamChange", door, rot, scl);
                 g_lvLoading = prevLoading;
                 if (!idx.empty())
                     if (SDK::AActor* a = SbActorForIdx(idx))

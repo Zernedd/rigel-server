@@ -43,6 +43,12 @@ Two modes can't overlap. **Delete...** removes a mode and everything in it.
 For each team, **Place team changer** puts a team changer in front of the camera (the spot must be inside the box).
 Walking into it puts a player on that team; the team's size and the max show in the window and on scoreboards.
 
+- A team changer is a **door**: its middle is 1.5 m up, so the server stands it on the floor under the spot you
+  pick, facing the way the camera looks (players walk through it in that direction).
+- Mark the doors so players can find them. The examples frame each door in its team's colour (two cube posts
+  just outside the 3.5 m opening and a beam over the top; nothing crosses the doorway) with a sign above it:
+  `{<mode>.team1.name} team`.
+
 - Rename a team or change its max right in the window (press Enter / click away to apply).
 - Team changers only work inside a game mode. Placed anywhere else the server refuses them.
 - If a player is standing exactly where you place (or move) a team changer, it appears next to them and moves into
@@ -103,7 +109,10 @@ After changing roles click **Apply script** (or keep **Auto-apply on save** on a
 ### Scoreboards
 
 - **Scoreboard monitors** (and the side / half-court versions) need no role: the mode keeps its team scores and
-  rounds won on them.
+  rounds won on them, and drives their clock and the arena state. During the **countdown** the monitor shows the
+  seconds counting down while the round clock waits at the full round length;
+  when the round starts it switches to the clock and the scores.
+- A monitor shows its game page only once someone is on a team; with every team empty it shows the empty-arena page.
 - The classic **Score board** shows team 1 and team 2 points (role *Scoreboard*).
 - The **Score table** shows a row per team (role *Score table*).
 - A **Text sign** can show anything the mode knows through templates (below).
@@ -116,6 +125,14 @@ Jake ball spawners (and the other ball spawners) spawn a real, networked ball on
 sees. Give the spawner the **Ball spawner** role: the server spawns or resets the ball when each round starts, and
 `Rigel.resetBalls()` does it whenever your code asks (after a goal, say). Don't spawn balls from Luau: the script
 runs on every machine and each would make its own ball that only it can see.
+
+**Moving and sizing a ball.** A ball is made at run time, so what you really place is its spawner. The editor lists
+the balls of your spawners (*Ball (edits its spawner)*) and you can pick and drag them like anything else: the
+spawner moves to where you put the ball (1 m under it) and the ball follows. Moving the spawner itself does the same.
+Balls the station owns (training balls, death balls) are not listed.
+
+A ball **can't be resized**: every player's game sizes its own copy of the ball, and nothing the server does reaches
+it. Keep ball spawners at scale 1 -- the game draws the ball of a scaled spawner *smaller* (1 / the spawner's scale).
 
 - **Goals.** Place a *Driftball goal* from the pieces (or give any goal the **Goal** role) and set the team that
   scores there. The game's own goal detection fires, the mode adds the goal's points to that team, and -- with
@@ -212,6 +229,9 @@ traps, scoreboards, signs -- and as code (**Start from example...**):
 - **My code doesn't run**: the Problems popup shows script errors; the game log shows `[GM_<mode>.luau]` lines.
   Use the checker in VS Code (the kit's *Rigel checks*), and never write `BeginPlay` in mode code.
 - **The ball doesn't come back**: give the spawner the *Ball spawner* role and call `Rigel.resetBalls()`.
+- **The monitor shows no countdown**: set *Countdown (s)* above 0 and put someone on a team (an empty arena shows
+  its empty page). Levels saved before 2026-09-24 need **Apply script** once to pick up the countdown fix.
+- **The ball got smaller**: the spawner is scaled. Set it back to 1 -- balls can't be resized.
 
 ## Building game modes with an AI agent
 

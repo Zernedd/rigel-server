@@ -262,6 +262,18 @@ Text templates for a mode named `Arena`: `{Arena.state}`, `{Arena.time}`, `{Aren
 server builds it beside the player and moves it in when they step away. Deleting the station's own team changers
 is refused for the same reason.
 
+**Team doors.** A team changer's middle is 1.5 m up: the server stands it on the floor under the spot and turns it
+to the given yaw (players walk through along it). Frame it so players find it -- two cube posts just outside the
+3.5 m opening and a beam over the top, in the team's colour, never across the doorway -- and put a Text sign above
+reading `{<mode>.team1.name} team`. The example levels do exactly this.
+
+**Balls.** A ball is made at run time; its spawner is what's placed. Moving a ball (transform tool on the ball)
+moves its spawner by the same amount and the ball comes along; moving the spawner does too. Balls can't be
+resized: keep ball spawners at scale 1 (the game draws a scaled spawner's ball smaller).
+
+**Monitor countdown.** Scoreboard monitors show the countdown seconds (round clock waiting) once someone is on a
+team, then the clock and scores. Keep `countdown` above 0 for a visible count.
+
 ### Building a game mode, step by step
 
 ```

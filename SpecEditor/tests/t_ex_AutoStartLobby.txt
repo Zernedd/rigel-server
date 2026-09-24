@@ -8,8 +8,34 @@ raw SE|GMSET|RigelMode1|countdown|5
 raw SE|GMSET|RigelMode1|round_time|90
 raw SE|GMSET|RigelMode1|auto_restart|1
 raw SE|GMSET|RigelMode1|custom.min_each|1
-raw SE|GMTEAM|RigelMode1|1|-700,1200,-28625
-raw SE|GMTEAM|RigelMode1|2|700,1200,-28625
+raw SE|GMTEAM|RigelMode1|1|-700,1200,-28625|90
+raw SE|SBADD|PrimitiveCubeBlue|-900.0,1200.0,-28475.0
+raw SE|SBADD|PrimitiveCubeBlue|-500.0,1200.0,-28475.0
+raw SE|SBADD|PrimitiveCubeBlue|-700.0,1200.0,-28305.0
+wait 4
+raw SE|XFORM|Prefab_BP_CubePrimitive_Blue_C@-900.000,1200.000,-28475.000|-900.0,1200.0,-28475.0|0,0,0|0.40,0.40,3.00
+raw SE|XFORM|Prefab_BP_CubePrimitive_Blue_C@-500.000,1200.000,-28475.000|-500.0,1200.0,-28475.0|0,0,0|0.40,0.40,3.00
+raw SE|XFORM|Prefab_BP_CubePrimitive_Blue_C@-700.000,1200.000,-28305.000|-700.0,1200.0,-28305.0|0,0,0|4.40,0.40,0.40
+raw SE|SBADD|aa_se_LE_BP_Text|-700.0,1200.0,-28235.0
+wait 3
+pickat LE_BP_Text_C -700 1200 -28235
+rotate 180
+wait 2
+raw SE|SBSET|LE_BP_Text_C@-700.000,1200.000,-28235.000|props/Text|text|{AutoStartLobby.team1.name} team
+raw SE|GMTEAM|RigelMode1|2|700,1200,-28625|90
+raw SE|SBADD|PrimitiveCubeYellow|500.0,1200.0,-28475.0
+raw SE|SBADD|PrimitiveCubeYellow|900.0,1200.0,-28475.0
+raw SE|SBADD|PrimitiveCubeYellow|700.0,1200.0,-28305.0
+wait 4
+raw SE|XFORM|Prefab_BP_CubePrimitive_Yellow_C@500.000,1200.000,-28475.000|500.0,1200.0,-28475.0|0,0,0|0.40,0.40,3.00
+raw SE|XFORM|Prefab_BP_CubePrimitive_Yellow_C@900.000,1200.000,-28475.000|900.0,1200.0,-28475.0|0,0,0|0.40,0.40,3.00
+raw SE|XFORM|Prefab_BP_CubePrimitive_Yellow_C@700.000,1200.000,-28305.000|700.0,1200.0,-28305.0|0,0,0|4.40,0.40,0.40
+raw SE|SBADD|aa_se_LE_BP_Text|700.0,1200.0,-28235.0
+wait 3
+pickat LE_BP_Text_C 700 1200 -28235
+rotate 180
+wait 2
+raw SE|SBSET|LE_BP_Text_C@700.000,1200.000,-28235.000|props/Text|text|{AutoStartLobby.team2.name} team
 raw SE|SBADD|ForceFieldA|0.0,2000.0,-28625.0
 raw SE|SBADD|Timer|700.0,1600.0,-28625.0
 raw SE|SBADD|TimerDisplay|1300.0,1600.0,-28475.0

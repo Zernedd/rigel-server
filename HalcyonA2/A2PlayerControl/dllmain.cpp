@@ -90,6 +90,23 @@ static void QuestCull(int mode)   // -1 = report only, 0 = restore, 1 = clear (c
         if (mode == 0 && saved[0] != 0xFF) { memcpy(b, saved, 3); Log("[A2PlayerControl][QCULL] restored\n"); }
     }
 }
+// A monitor's team-size source (what flips it between its pages): PrefabComponent(+0x2E8) +0x440 -> +0x320 -> +0x438,
+// int array @+0x3E0. Raw reads, fenced.
+static void BoardSizeChain(uintptr_t board, uintptr_t hops[3], int32_t sizes[8], int* n)
+{
+    __try
+    {
+        uintptr_t p = *reinterpret_cast<uintptr_t*>(board + 0x2E8);
+        const int offs[3] = { 0x440, 0x320, 0x438 };
+        for (int k = 0; k < 3 && p; ++k) hops[k] = p = *reinterpret_cast<uintptr_t*>(p + offs[k]);
+        if (!p) return;
+        const int32_t* d = *reinterpret_cast<int32_t**>(p + 0x3E0);
+        const int32_t cnt = *reinterpret_cast<int32_t*>(p + 0x3E8);
+        *n = 0;
+        for (int32_t k = 0; d && k < cnt && k < 8; ++k) sizes[(*n)++] = d[k];
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
 static int PrefabImportance(uintptr_t prefab, uintptr_t* lgmOut, int* inLoaded)
 {
     __try
@@ -828,6 +845,32 @@ static void Tick()
                                 g_lastHandR.X, g_lastHandR.Y, g_lastHandR.Z);
                         }
                     }
+                    else if (!strncmp(line, "tcs", 3) && pc->Pawn)
+                    {
+                        // every team changer this client has: where, whether its door mesh is visible, and whether its
+                        // TeamChangeComponent found a TicketManager (+0x508) -- Arena @0x4D8, TeamIndex @0x524
+                        auto* tcc = SDK::UObject::FindClassFast("TeamChangeComponent");
+                        const int32_t num = SDK::UObject::GObjects->Num();
+                        for (int32_t i = 0; tcc && i < num; ++i)
+                        {
+                            auto* c = SDK::UObject::GObjects->GetByIndex(i);
+                            if (!c || c->IsDefaultObject() || !c->IsA(tcc) || !c->Outer) continue;
+                            auto* owner = static_cast<SDK::AActor*>(c->Outer);
+                            if (!SDK::UKismetSystemLibrary::IsValid(owner)) continue;
+                            const uintptr_t cb = reinterpret_cast<uintptr_t>(c);
+                            int meshVis = -1;
+                            for (int32_t j = 0; j < num; ++j)
+                            {
+                                auto* m = SDK::UObject::GObjects->GetByIndex(j);
+                                if (m && m->Outer == owner && m->GetName() == "TeamSwitcherMesh")
+                                { meshVis = static_cast<SDK::UPrimitiveComponent*>(m)->IsVisible() ? 1 : 0; break; }
+                            }
+                            const SDK::FVector q = owner->K2_GetActorLocation();
+                            Log("[A2PlayerControl][TCS] %-40s at (%.0f,%.0f,%.0f) meshVisible=%d ticketManager=%d arena=%d team=%d\n",
+                                owner->GetName().c_str(), q.X, q.Y, q.Z, meshVis, *reinterpret_cast<void**>(cb + 0x508) != nullptr,
+                                *reinterpret_cast<int32_t*>(cb + 0x4D8), *reinterpret_cast<int32_t*>(cb + 0x524));
+                        }
+                    }
                     else if (!strncmp(line, "boards", 6) && pc->Pawn)
                     {
                         // every AScoreboard monitor within 60 m: which clock / score component it reads and what it shows.
@@ -854,6 +897,50 @@ static void Tick()
                                 sa->GetName().c_str(), d, *reinterpret_cast<uint8_t*>(b + 0x2A0),
                                 owner(*reinterpret_cast<uintptr_t*>(b + 0x320)).c_str(), owner(*reinterpret_cast<uintptr_t*>(b + 0x328)).c_str(),
                                 *reinterpret_cast<int32_t*>(b + 0x330), *reinterpret_cast<int32_t*>(b + 0x334), *reinterpret_cast<float*>(b + 0x348));
+                            // the clock it reads: GameTimeComponent netvars (ms) -- ClockStartedAt 0x478, SecondaryStartedAt 0x480,
+                            // ClockEndLength 0x490, SecondaryEndLength 0x498, ClockPunishment 0x4B0, HasGameBegunTemp 0x4B8,
+                            // StoredSecondaryTimerSecond 0x4D0. The countdown's per-second event only fires from this client's tick.
+                            if (auto* gt = *reinterpret_cast<SDK::UActorComponent**>(b + 0x320))
+                            {
+                                const uintptr_t g = reinterpret_cast<uintptr_t>(gt);
+                                auto* gtc = static_cast<SDK::UGameTimeComponent*>(gt);
+                                Log("[A2PlayerControl][BOARDS]   clock start=%.0f 2nd=%.0f end=%.0f 2ndEnd=%.0f punish=%.0f begun=%d stored2nd=%d tick=%d cdRunning=%d text=%s cd=%s:%s\n",
+                                    *reinterpret_cast<double*>(g + 0x478), *reinterpret_cast<double*>(g + 0x480), *reinterpret_cast<double*>(g + 0x490),
+                                    *reinterpret_cast<double*>(g + 0x498), *reinterpret_cast<double*>(g + 0x4B0), *reinterpret_cast<uint8_t*>(g + 0x4B8),
+                                    *reinterpret_cast<int32_t*>(g + 0x4D0), gt->IsComponentTickEnabled() ? 1 : 0, gtc->IsCountdownRunning() ? 1 : 0,
+                                    gtc->GetGameTime().ToString().c_str(), gtc->GetCountdownMinutes().ToString().c_str(), gtc->GetCountdownSeconds().ToString().c_str());
+                            }
+                            // the page it shows (widget +0x300 -> ScoreboardSwitcher +0x328) and whether its countdown text is up;
+                            // the page follows the team sizes it reads: PrefabComponent(+0x2E8) +0x440 -> +0x320 -> +0x438 -> int array @+0x3E0
+                            if (auto* w = *reinterpret_cast<SDK::UTackleballScoreboardWidget**>(b + 0x300))
+                            {
+                                const int page = w->ScoreboardSwitcher ? w->ScoreboardSwitcher->GetActiveWidgetIndex() : -1;
+                                std::string sizes, chain;
+                                uintptr_t hops[3]{}; int32_t sz[8]{}; int nsz = -1;
+                                BoardSizeChain(b, hops, sz, &nsz);
+                                for (int k = 0; k < 3; ++k)
+                                    chain += (k ? " > " : "") + (hops[k] ? reinterpret_cast<SDK::UObject*>(hops[k])->GetName() : std::string("null"));
+                                if (nsz < 0) sizes = "?";
+                                for (int k = 0; k < nsz; ++k) sizes += std::to_string(sz[k]) + " ";
+                                Log("[A2PlayerControl][BOARDS]   page=%d countdownVisible=%d sizes=[%s] from %s\n", page,
+                                    w->IsCountdownTextVisible() ? 1 : 0, sizes.c_str(), chain.c_str());
+                            }
+                        }
+                    }
+                    else if (!strncmp(line, "balls", 5) && pc->Pawn)
+                    {
+                        // every ball this client has: where, how big (actor scale + its collision sphere's scaled radius)
+                        auto* dcls = SDK::UObject::FindClassFast("DiscEntity");
+                        const int32_t num = SDK::UObject::GObjects->Num();
+                        for (int32_t i = 0; dcls && i < num; ++i)
+                        {
+                            auto* o = SDK::UObject::GObjects->GetByIndex(i);
+                            if (!o || o->IsDefaultObject() || !o->IsA(dcls)) continue;
+                            auto* d = static_cast<SDK::ADiscEntity*>(o);
+                            const SDK::FVector q = d->K2_GetActorLocation(), s = d->GetActorScale3D();
+                            const float r = d->SphereComponent ? d->SphereComponent->GetScaledSphereRadius() : -1.0f;
+                            Log("[A2PlayerControl][BALLS] %s (%s) at (%.0f,%.0f,%.0f) scale=(%.2f,%.2f,%.2f) radius=%.1f hidden=%d\n",
+                                d->GetName().c_str(), d->Class->GetName().c_str(), q.X, q.Y, q.Z, s.X, s.Y, s.Z, r, d->bHidden ? 1 : 0);
                         }
                     }
                     else if (!strncmp(line, "grav", 4) && pc->Pawn)
@@ -976,6 +1063,10 @@ static void Tick()
                                     auto* c = SDK::UObject::GObjects->GetByIndex(ci);
                                     if (!c || c->Outer != ac || !c->IsA(primCls)) continue;
                                     auto* pcmp = static_cast<SDK::UPrimitiveComponent*>(c);
+                                    if (cn.find("TeamChange") != std::string::npos)   // team changers: every part, to see what's hidden
+                                        Log("[A2PlayerControl][NEAR]       part %-34s %-26s visible=%d hiddenInGame=%d\n", c->GetName().c_str(),
+                                            c->Class->GetName().c_str(), (int)pcmp->IsVisible(),
+                                            (int)((*reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(c) + 0x2D7) & 0x40) != 0));
                                     ++prims;
                                     if (pcmp->IsVisible()) ++vis;
                                     if (pcmp->WasRecentlyRendered(1.0f)) ++drawn;

@@ -4062,11 +4062,15 @@ std::string GmBuildScript(const Snapshot& snap, const GmInfo& g, std::vector<GmS
                 "\t\t\t__arena(\"score reset\", function() ModeScore:resetScore() end)\n"
                 "\t\telseif st == \"countdown\" then\n"
                 "\t\t\t__arena(\"state 4\", function() ModeState:updateGameState(4) end)\n"
-                "\t\t\t__arena(\"timer countdown\", function() ModeTimer:resetTimer(); ModeTimer:setRoundTime(rt); ModeTimer:startTimerWithCountdown(Rigel.timeLeft() * 1000) end)\n"
+                // The countdown length comes from the SETTING: Rigel.timeLeft() can still be 0 the moment the state flips,
+                // and a 0 ms countdown leaves the clock "counting down" forever (the monitor then shows its countdown
+                // page all round and never ticks). Always startTimerWithCountdown, as the stock arenas do: plain
+                // startTimer leaves the same stuck countdown. >= 1 ms = no countdown.
+                "\t\t\t__arena(\"timer countdown\", function() ModeTimer:resetTimer(); ModeTimer:setRoundTime(rt); ModeTimer:startTimerWithCountdown(math.max(1, Rigel.settingNumber(\"countdown\") * 1000)) end)\n"
                 "\t\telseif st == \"running\" then\n"
                 "\t\t\t__arena(\"state 5\", function() ModeState:updateGameState(5) end)\n"
                 "\t\t\t__arena(\"game begun\", function() ModeTimer:luaSetGameBegun(true) end)\n"
-                "\t\t\tif __lastState ~= \"countdown\" then __arena(\"timer start\", function() ModeTimer:resetTimer(); ModeTimer:setRoundTime(rt); ModeTimer:startTimer() end) end\n"
+                "\t\t\tif __lastState ~= \"countdown\" then __arena(\"timer start\", function() ModeTimer:resetTimer(); ModeTimer:setRoundTime(rt); ModeTimer:startTimerWithCountdown(1) end) end\n"
                 "\t\telseif st == \"ended\" then\n"
                 "\t\t\t__arena(\"state 10\", function() ModeState:updateGameState(10) end)\n"
                 "\t\t\t__arena(\"timer pause\", function() ModeTimer:pauseTimer(); ModeTimer:luaSetGameBegun(false) end)\n"
@@ -4088,7 +4092,7 @@ std::string GmBuildScript(const Snapshot& snap, const GmInfo& g, std::vector<GmS
         }
         else if (key == "start_ring")
             body += "\t\tpcall(function() if st == \"idle\" or st == \"ended\" then " + s + ":showLua(); " + s + ":setTriggerCollision() else " + s + ":hideLua(); " + s + ":disableCollisionLua() end end)\n";
-        else if (key == "timer") body += "\t\tpcall(function()\n\t\t\tif st == \"countdown\" then " + s + ":start(Rigel.timeLeft())\n\t\t\telseif st == \"running\" then if Rigel.settingNumber(\"round_time\") > 0 then " + s + ":start(Rigel.timeLeft()) else " + s + ":startCountUpFromZero() end\n\t\t\telse " + s + ":stopAndResetTimer() end\n\t\tend)\n";
+        else if (key == "timer") body += "\t\tpcall(function()\n\t\t\tif st == \"countdown\" then " + s + ":start(math.max(1, Rigel.settingNumber(\"countdown\")))\n\t\t\telseif st == \"running\" then if Rigel.settingNumber(\"round_time\") > 0 then " + s + ":start(Rigel.settingNumber(\"round_time\")) else " + s + ":startCountUpFromZero() end\n\t\t\telse " + s + ":stopAndResetTimer() end\n\t\tend)\n";
         // "ball": the server spawns / resets the ball itself when a round starts (a Luau spawnBall on every machine made
         // client-only balls). The slot stays available to your code: Ball1:getSpawnedBall(), Rigel.resetBalls().
     }
@@ -4448,7 +4452,12 @@ void DrawGameModeDetail(const Snapshot& snap, const GmInfo& g)
             {
                 const Vec3 at = InFront(snap, 300.0);
                 if (!GmInside(g, at)) Notes().Set("Look at a spot inside '" + g.name + "' (the orange box) to place its team changers.");
-                else { char b[160]; snprintf(b, sizeof(b), "SE|GMTEAM|%s|%d|%.0f,%.0f,%.0f", g.id.c_str(), t + 1, at.x, at.y, at.z); GmSend(b); }
+                else   // the server stands the door on the floor under that spot, walk-through direction = the camera's
+                {
+                    char b[180];
+                    snprintf(b, sizeof(b), "SE|GMTEAM|%s|%d|%.0f,%.0f,%.0f|%.0f", g.id.c_str(), t + 1, at.x, at.y, at.z, snap.cameraRot.yaw);
+                    GmSend(b);
+                }
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Walking into it puts a player on %s.", g.names[t].c_str());
             ImGui::PopID();

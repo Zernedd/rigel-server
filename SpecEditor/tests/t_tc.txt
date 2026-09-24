@@ -1,0 +1,10 @@
+log TC start
+enter
+wait 8
+scene open BallBattle
+wait 20
+log TC NOW
+wait 40
+scene close
+wait 4
+log TC end
