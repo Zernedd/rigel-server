@@ -8926,9 +8926,69 @@ static void SafeForceTrapLOD() { __try { ForceTrapLOD(); } __except (EXCEPTION_E
 using NetVarReg_t = __int64(__fastcall*)(void*);
 static NetVarReg_t g_NetVarReg_Orig = nullptr;
 static int g_lodNetvarPatched = 0;
+// [2026-09-24] QUEST: sandbox objects in the areas WE create (game modes, the editor area) were collision-only.
+// Each object's culling entry (sub_1446F3690) takes its LOD settings from the prefab definition, overridden per
+// area by the loaded gamemode (LGM+0x260..0x28B) -- which is the project's replicated DefaultLODSettings. Quest
+// (no PC shortcut: USandboxEngine+0x303/0x304/0x305) then hides an object whose type has HideOutsideImportance-
+// Volume unless its area's EnterImportanceVolume ran AFTER the object spawned -- never true for anything placed
+// or moved while a player stands there. The blob is a version byte + 9 TOptionals {u32 IsSet[, u32 Value]} in the
+// order VisibleNever, VisibleAlways, MaxDraw, MinDraw, VisibleWhenPlaying, ShowDist, HideDist,
+// ShowImportanceVolume, HideOutsideImportanceVolume (37 bytes = all unset; the stock 45-byte hide profile sets the
+// last two to 1). While one of our slots loads its project (g_lodForceVisible), rewrite the blob to
+// VisibleAlways=1 + HideOutsideImportanceVolume=0 -- the rule's always-visible branch -- before it replicates.
+static int g_lodForceVisible = 0;
+static int g_lodForcedCount = 0;
+static const uint8_t kLodAlwaysVisible[45] = {
+    0x01,
+    0,0,0,0,                    // VisibleNever: unset
+    1,0,0,0, 1,0,0,0,           // VisibleAlways: set, true
+    0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,   // MaxDraw..ShowImportanceVolume: unset
+    1,0,0,0, 0,0,0,0 };         // HideOutsideImportanceVolume: set, false
+static bool LodBlobShape(const uint8_t* d, int n)   // a version byte + 9 well-formed TOptionals, nothing left over
+{
+    if (!d || n < 37 || n > 1 + 9 * 8 || d[0] != 0x01) return false;
+    int o = 1;
+    for (int f = 0; f < 9; ++f)
+    {
+        if (o + 4 > n) return false;
+        const uint32_t set = *reinterpret_cast<const uint32_t*>(d + o); o += 4;
+        if (set > 1) return false;
+        if (set) { if (o + 4 > n) return false; o += 4; }
+    }
+    return o == n;
+}
 static void NetVarRegFilter(void* netvar)
 {
-    int didPatch = 0;
+    int didPatch = 0, forced = 0, forcedFrom = 0;
+    if (g_lodForceVisible > 0 && netvar)
+    {
+        __try
+        {
+            if (*reinterpret_cast<uintptr_t*>(netvar) == GetBase() + 0x804BDA0)
+            {
+                uint8_t* nv = reinterpret_cast<uint8_t*>(netvar);
+                const int num = *reinterpret_cast<int*>(nv + 0x40);
+                const int max = *reinterpret_cast<int*>(nv + 0x44);
+                auto* data = *reinterpret_cast<uint8_t**>(nv + 0x38);
+                if (LodBlobShape(data, num))
+                {
+                    if (max < 45)
+                    {
+                        auto* nd = reinterpret_cast<uint8_t*(__fastcall*)(size_t)>(GetBase() + 0x5361530)(45);   // the game's allocator
+                        if (nd) { *reinterpret_cast<uint8_t**>(nv + 0x38) = nd; *reinterpret_cast<int*>(nv + 0x44) = 45; data = nd; }
+                    }
+                    if (*reinterpret_cast<int*>(nv + 0x44) >= 45)
+                    {
+                        memcpy(data, kLodAlwaysVisible, 45);
+                        *reinterpret_cast<int*>(nv + 0x40) = 45;
+                        forced = 1; forcedFrom = num;
+                    }
+                }
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) { forced = 0; }
+    }
+    if (forced) { ++g_lodForcedCount; printf("[HalcyonA2][LOD] our area's DefaultLODSettings (%d bytes) -> VisibleAlways (#%d)\n", forcedFrom, g_lodForcedCount); return; }
     if (g_fixLod && netvar)
     {
         __try

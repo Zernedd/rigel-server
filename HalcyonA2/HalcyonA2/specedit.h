@@ -3135,7 +3135,9 @@ static bool SbCreateEditorSlot(const double* at, const std::string& path)
     const uintptr_t s = reinterpret_cast<uintptr_t>(slot);
     SDK::UObject* mgrPre = mgr;
     const int32_t gmBefore = *reinterpret_cast<int32_t*>(reinterpret_cast<uintptr_t>(mgrPre) + 0x368 + 8);
+    ++g_lodForceVisible;                                                   // its project's DefaultLODSettings -> VisibleAlways
     SDK::UGameplayStatics::FinishSpawningActor(slot, xf, SDK::ESpawnActorScaleMethod::MultiplyWithRoot);
+    --g_lodForceVisible;
     HxLog("[HalcyonA2][SPECEDIT] editor slot: after spawn, loaded game areas %d -> %d, LoadedGameMode=%p\n", gmBefore,
           *reinterpret_cast<int32_t*>(reinterpret_cast<uintptr_t>(mgrPre) + 0x368 + 8), *reinterpret_cast<void**>(s + 0x440));
     if (auto* fn = slot->Class->GetFunction("Actor", "SetReplicates")) { struct { bool b; } rp{ true }; SafeProcessEvent(slot, fn, &rp); }
@@ -3184,7 +3186,9 @@ static SDK::AActor* SbCreateSlotWithId(const double* at, const std::string& path
         if (arr && max >= nTeams) { for (int k = 0; k < nTeams; ++k) arr[k] = teamSizes[k]; *reinterpret_cast<int32_t*>(reinterpret_cast<uintptr_t>(slot) + 0x430) = nTeams; }
         else if (arr && num > 0) for (int k = 0; k < num && k < nTeams; ++k) arr[k] = teamSizes[k];
     }
+    ++g_lodForceVisible;                                               // its project's DefaultLODSettings -> VisibleAlways
     SDK::UGameplayStatics::FinishSpawningActor(slot, xf, SDK::ESpawnActorScaleMethod::MultiplyWithRoot);
+    --g_lodForceVisible;
     const uintptr_t sp = reinterpret_cast<uintptr_t>(slot);
     if (auto* f = slot->Class->GetFunction("Actor", "SetReplicates")) { struct { bool b; } rp{ true }; SafeProcessEvent(slot, f, &rp); }
     *reinterpret_cast<uint8_t*>(sp + 0x60) |= 0x08 | 0x10;               // bAlwaysRelevant | bReplicateMovement

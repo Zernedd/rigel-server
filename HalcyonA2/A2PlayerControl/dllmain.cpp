@@ -35,6 +35,7 @@
 
 #include "pch.h"
 #include <MinHook.h>
+#include <map>
 
 // ---------------------------------------------------------------------------------------------
 // Build-specific offsets (22284 / Nov15).
@@ -47,6 +48,48 @@
 // byte +0x19 of entry [prefab+0x394] in the table at *(*(lgm+0x120)+0xD8)+0x28 (56-byte entries) for every prefab in
 // lgm.loadedPrefabs (+0x2C0). A prefab whose flag is 0 while the player stands among them is hidden on Quest
 // (HideOutsideImportanceVolume); the PC spec build ignores it. -1 = unreadable.
+// The sandbox's per-prefab culling entry (56 bytes) in the manager at *(USandboxEngine+0xD8): entries @+0x28,
+// count @+0x30, index = prefab+0x394. Rule (sub_1446CCF00): visible if engine+0x305 || (engine+0x303 && +0x304)
+// [the PC shortcut]; else per entry: +26 forced hidden, +29 always, +28 ?, +32/+36 draw distances,
+// then visible iff +25 (inside the importance volume) || !+53 (HideOutsideImportanceVolume off). +24 = last result.
+static bool PrefabCullEntry(uintptr_t prefab, char* out, size_t n)
+{
+    __try
+    {
+        const uintptr_t lgm = *reinterpret_cast<uintptr_t*>(prefab + 0x440);
+        if (!lgm) return false;
+        const uintptr_t se = *reinterpret_cast<uintptr_t*>(lgm + 0x120);
+        const uintptr_t mgr = se ? *reinterpret_cast<uintptr_t*>(se + 0xD8) : 0;
+        if (!mgr) return false;
+        const int idx = *reinterpret_cast<int*>(prefab + 0x394);
+        const int cnt = *reinterpret_cast<int*>(mgr + 0x30);
+        if (idx < 0 || idx >= cnt) { snprintf(out, n, "idx=%d/%d", idx, cnt); return true; }
+        const uint8_t* e = *reinterpret_cast<uint8_t**>(mgr + 0x28) + 56 * static_cast<size_t>(idx);
+        snprintf(out, n, "cull[vis=%d imp=%d forceHid=%d b28=%d always=%d maxD=%.0f showD=%.0f hideOutside=%d]",
+                 e[24], e[25], e[26], e[28], e[29], *reinterpret_cast<const float*>(e + 32),
+                 *reinterpret_cast<const float*>(e + 36), e[53]);
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+static void Log(const char* fmt, ...);   // below
+// questcull: the USandboxEngine's "PC shortcut" flags (+0x303/+0x304/+0x305) that make every sandbox object visible.
+static void QuestCull(int mode)   // -1 = report only, 0 = restore, 1 = clear (cull like Quest)
+{
+    static uint8_t saved[3] = { 0xFF, 0xFF, 0xFF };
+    auto* cls = SDK::UObject::FindClassFast("SandboxEngine");
+    const int32_t num = SDK::UObject::GObjects->Num();
+    for (int32_t i = 0; cls && i < num; ++i)
+    {
+        auto* o = SDK::UObject::GObjects->GetByIndex(i);
+        if (!o || o->IsDefaultObject() || !o->IsA(cls)) continue;
+        uint8_t* b = reinterpret_cast<uint8_t*>(o) + 0x303;
+        Log("[A2PlayerControl][QCULL] %s +0x303=%d +0x304=%d +0x305=%d (auth=%d)\n", o->GetName().c_str(), b[0], b[1], b[2],
+            *(reinterpret_cast<uint8_t*>(o) + 0x300));
+        if (mode == 1) { if (saved[0] == 0xFF) memcpy(saved, b, 3); b[0] = b[1] = b[2] = 0; Log("[A2PlayerControl][QCULL] cleared -> Quest culling\n"); }
+        if (mode == 0 && saved[0] != 0xFF) { memcpy(b, saved, 3); Log("[A2PlayerControl][QCULL] restored\n"); }
+    }
+}
 static int PrefabImportance(uintptr_t prefab, uintptr_t* lgmOut, int* inLoaded)
 {
     __try
@@ -720,6 +763,53 @@ static void Tick()
                     if (sscanf_s(line, "move %lf %lf %lf", &x, &y, &z) == 3) { g_cmdTarget = { p.X + x, p.Y + y, p.Z + z }; g_cmdActive = true; }
                     else if (sscanf_s(line, "goto %lf %lf %lf", &x, &y, &z) == 3) { g_cmdTarget = { x, y, z }; g_cmdActive = true; }
                     else if (!strncmp(line, "throw", 5)) g_cmdThrow = true;
+                    else if (!strncmp(line, "cullstats", 9))
+                    {
+                        // Every sandbox prefab this client has: culling-entry stats split by host area, plus a few samples.
+                        static SDK::UClass* pcls = SDK::UObject::FindClassFast("PrefabComponent");
+                        struct St { int n = 0, vis = 0, imp = 0, hideOut = 0, always = 0, forceHid = 0, hidden = 0; std::string sample; };
+                        std::map<std::string, St> by;
+                        const int32_t num = SDK::UObject::GObjects->Num();
+                        for (int32_t i = 0; pcls && i < num; ++i)
+                        {
+                            auto* c = SDK::UObject::GObjects->GetByIndex(i);
+                            if (!c || c->IsDefaultObject() || !c->IsA(pcls)) continue;
+                            const uintptr_t pc2 = reinterpret_cast<uintptr_t>(c);
+                            uintptr_t lgm = 0; int inl = 0;
+                            PrefabImportance(pc2, &lgm, &inl);
+                            std::string area = "-";
+                            if (lgm)
+                                if (auto* slot = *reinterpret_cast<SDK::UObject**>(lgm + 0x320))
+                                {
+                                    const wchar_t* sid = *reinterpret_cast<const wchar_t**>(reinterpret_cast<uintptr_t>(slot) + 0x390);
+                                    char b[80] = "?"; if (sid) WideCharToMultiByte(CP_UTF8, 0, sid, -1, b, sizeof b, nullptr, nullptr);
+                                    area = std::string(b) + (*reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(slot) + 0x2FC) ? "[full]" : "");
+                                }
+                            char cb[200] = "";
+                            if (!PrefabCullEntry(pc2, cb, sizeof cb)) continue;
+                            St& s = by[area];
+                            ++s.n;
+                            auto has = [&](const char* k) { return strstr(cb, k) != nullptr; };
+                            if (has("vis=1")) ++s.vis;
+                            if (has("imp=1")) ++s.imp;
+                            if (has("hideOutside=1")) ++s.hideOut;
+                            if (has("always=1")) ++s.always;
+                            if (has("forceHid=1")) ++s.forceHid;
+                            auto* owner = c->Outer;
+                            if (owner && (*reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(owner) + 0x60) >> 7)) ++s.hidden;
+                            if (s.sample.size() < 600 && owner) s.sample += "\n      " + owner->Class->GetName() + " " + cb;
+                        }
+                        for (auto& kv : by)
+                            Log("[A2PlayerControl][CULLSTATS] %-34s n=%d vis=%d imp=%d hideOutside=%d always=%d forceHid=%d bHidden=%d%s\n",
+                                kv.first.c_str(), kv.second.n, kv.second.vis, kv.second.imp, kv.second.hideOut, kv.second.always,
+                                kv.second.forceHid, kv.second.hidden, kv.second.sample.c_str());
+                    }
+                    else if (!strncmp(line, "questcull", 9))
+                    {
+                        int mode = -1;
+                        sscanf_s(line, "questcull %d", &mode);
+                        QuestCull(mode);
+                    }
                     else if (!strncmp(line, "near", 4))
                     {
                         // near [radius cm]: what this player's game has around it and whether it is DRAWN: per actor,
@@ -785,15 +875,22 @@ static void Tick()
                             Log("[A2PlayerControl][NEAR] %-44s %-34s %5.0fcm prims=%d visible=%d drawn=%d actorDrawn=%d important=%d inLoaded=%d area=%s\n",
                                 ac->GetName().c_str(), cn.c_str(), dist, prims, vis, drawn, (int)ac->WasRecentlyRendered(1.0f),
                                 imp, inLoaded, lgmName.c_str());
+                            if (plgm)
+                            {
+                                static SDK::UClass* prefabCls2 = SDK::UObject::FindClassFast("PrefabComponent");
+                                for (int32_t ci = 0; prefabCls2 && ci < num; ++ci)
+                                {
+                                    auto* c = SDK::UObject::GObjects->GetByIndex(ci);
+                                    if (!c || c->Outer != ac || !c->IsA(prefabCls2)) continue;
+                                    char cb[200];
+                                    if (PrefabCullEntry(reinterpret_cast<uintptr_t>(c), cb, sizeof cb))
+                                        Log("[A2PlayerControl][NEAR]     %s bHidden=%d\n", cb,
+                                            (int)(*reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(ac) + 0x60) >> 7));
+                                    break;
+                                }
+                            }
                             if (SDK::AActor* par = ac->GetAttachParentActor())
                                 Log("[A2PlayerControl][NEAR]     attached to %s\n", par->GetName().c_str());
-                            {   // SpawnPrefab's always-visible branch calls vtable+0x360 on the new actor: which function is it?
-                                const uintptr_t vt = *reinterpret_cast<uintptr_t*>(ac);
-                                const uintptr_t fn = *reinterpret_cast<uintptr_t*>(vt + 0x360);
-                                Log("[A2PlayerControl][NEAR]     vfn+0x360 = RVA 0x%llX (SetHidden)  bHidden=%d\n",
-                                    (unsigned long long)(fn - reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr))),
-                                    (int)(*reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(ac) + 0x60) >> 7));
-                            }
                             ++shown;
                         }
                         Log("[A2PlayerControl][NEAR] %d actor(s) within %.0f cm\n", shown, rad);
