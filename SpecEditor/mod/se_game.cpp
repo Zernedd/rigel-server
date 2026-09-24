@@ -45,6 +45,7 @@ static_assert(static_cast<int>(sereflect::PType::Object) == se::PT_Object &&
 #include <cstdlib>
 
 namespace se {
+void McpPumpEntry(const struct Snapshot& snap);   // the MCP bridge (end of this file)
 std::atomic<bool> g_sceneDirty{ false };   // se_core.h
 namespace {
 
@@ -60,6 +61,7 @@ SDK::UFunction* g_setQuestsFn = nullptr;   // A2PlayerQuestComponent::Client_Set
 std::vector<Snapshot::GameScript> g_gameScripts;   // ScanScripts result
 std::string g_dumpScriptsTo;                       // test op: also write the scan to this folder
 std::vector<Snapshot::LevelInfo> g_levels;       // saved levels (SE|LVLIST), for the Levels tab
+std::vector<std::string> g_gameModes;   // game mode records from the server (Game Modes tab)
 // Where this editor's camera is, for the marker everyone else sees (SE|CAMPOS): ~8/s while it moves or
 // turns, a heartbeat every 5 s while it sits still (the server drops a marker 20 s after the last report).
 struct CamReport { double x, y, z, p, yw, r; };
@@ -272,8 +274,8 @@ void ClassifyPrefab(PaletteItem& it)
     std::string lo = it.name;
     for (char& ch : lo) ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
     if (lo.find("teamchange") != std::string::npos || lo.find("teamswitch") != std::string::npos)
-        it.blocked = "Team changers only work inside a game mode's arena. Placed with the editor they have no arena, "
-                     "block players, and crashed players' games when walked into - so the server refuses them.";
+        it.limited = "Team changers only work inside a game mode (Details > Game Modes). Placed anywhere else the "
+                     "server refuses them - outside a game mode they crashed players' games.";
 }
 
 const std::vector<PaletteItem>& Catalogue()
@@ -1256,6 +1258,7 @@ void HandleCommands()
             // log shows who is editing, but nothing there depends on it.
             g_editorMode = (c.type == CmdType::EnterEditor);
             SendToServer(g_editorMode ? "SE|ENTER" : "SE|EXIT");
+            if (g_editorMode) SendToServer("SE|GMLIST");
             Log("[game] editor mode %s", g_editorMode ? "ON" : "OFF");
             break;
         }
@@ -2111,6 +2114,7 @@ int CountQuestDefs(const wchar_t* needle, int* total)
     __try { return CountQuestDefsImpl(needle, total); } __except (EXCEPTION_EXECUTE_HANDLER) { return -3; }
 }
 
+void ScriptOp(const Snapshot& snap, const std::string& line);   // below
 void RunScript(const Snapshot& snap)
 {
     LoadScriptOnce();
@@ -2132,7 +2136,14 @@ void RunScript(const Snapshot& snap)
     }
     if (now < g_scriptNext) return;
 
-    const std::string line = g_script[g_scriptPc++];
+    ScriptOp(snap, g_script[g_scriptPc++]);
+}
+
+// One editor op (a test-script line), run now. The script runner above feeds it one line per frame; the MCP
+// bridge (se_mcp) runs single ops through it too, capturing what they log.
+void ScriptOp(const Snapshot& snap, const std::string& line)
+{
+    const ULONGLONG now = GetTickCount64();
     char op[32] = {};
     sscanf_s(line.c_str(), "%31s", op, (unsigned)sizeof(op));
     const std::string rest = line.size() > strlen(op) ? line.substr(strlen(op) + 1) : "";
@@ -2255,6 +2266,22 @@ void RunScript(const Snapshot& snap)
         return;
     }
     if (!strcmp(op, "sbtypes")) { SendToServer("SE|SBTYPES"); return; }   // LOCAL TEST: server lists every prefab type
+    if (!strcmp(op, "tcnodes"))               // tcnodes -- every team changer component: its netvar node handle (+0x260/+0x268)
+    {
+        SDK::UClass* c = SDK::UObject::FindClassFast("TeamChangeComponent");
+        const int32_t n = c ? SDK::UObject::GObjects->Num() : 0;
+        for (int32_t i = 0; i < n; ++i)
+        {
+            auto* o = SDK::UObject::GObjects->GetByIndex(i);
+            if (!o || o->IsDefaultObject() || !o->IsA(c)) continue;
+            const uintptr_t b = reinterpret_cast<uintptr_t>(o);
+            SDK::UObject* outer = o->Outer;
+            Log("[tcnodes] %s (%s) +0x260=%08X +0x268=%p tm=%p team=%d", o->GetName().c_str(), outer ? outer->GetName().c_str() : "?",
+                *reinterpret_cast<uint32_t*>(b + 0x260), *reinterpret_cast<void**>(b + 0x268), *reinterpret_cast<void**>(b + 0x508),
+                *reinterpret_cast<int32_t*>(b + 0x524));
+        }
+        return;
+    }
     if (!strcmp(op, "raw")) { SendToServer(rest); Log("[script] raw %s", rest.c_str()); return; }   // raw <SE|...>
     if (!strcmp(op, "traceat"))               // traceat x y z -- what does THIS client's world block, straight down
     {                                         // through a point (6 m above to 6 m below)?
@@ -2515,6 +2542,28 @@ void RunScript(const Snapshot& snap)
     if (!strcmp(op, "favclick")) { RequestUiSelect("!favclick " + rest); return; }               // favclick fav|<category>: click row 1's star
     if (!strcmp(op, "undo") || !strcmp(op, "redo")) { RequestUiSelect(std::string("!") + op); return; }   // Ctrl+Z / Ctrl+Y
     if (!strcmp(op, "delsel")) { RequestUiSelect("!del"); return; }                              // Delete key
+    if (!strcmp(op, "slots"))                 // slots -- every module slot as THIS client sees it (replication check)
+    {
+        auto* slotCls = SDK::UObject::FindClassFast("ModuleSlot");
+        const int32_t n = SDK::UObject::GObjects->Num();
+        for (int32_t i = 0; slotCls && i < n; ++i)
+        {
+            SDK::UObject* s = SDK::UObject::GObjects->GetByIndex(i);
+            if (!s || s->IsDefaultObject() || !s->IsA(slotCls)) continue;
+            const uintptr_t b = reinterpret_cast<uintptr_t>(s);
+            const wchar_t* sid = *reinterpret_cast<const wchar_t**>(b + 0x390);
+            std::string id;
+            if (sid) for (const wchar_t* w = sid; *w; ++w) id += static_cast<char>(*w);
+            SDK::UObject* lgm = *reinterpret_cast<SDK::UObject**>(b + 0x440);
+            SDK::UObject* tm = *reinterpret_cast<SDK::UObject**>(b + 0x438);
+            double l[3] = { 0, 0, 0 };
+            if (void* root = *reinterpret_cast<void**>(b + 0x1A8))
+            { const double* t = reinterpret_cast<const double*>(reinterpret_cast<uintptr_t>(root) + 0x1D0 + 0x20); l[0] = t[0]; l[1] = t[1]; l[2] = t[2]; }
+            Log("[script] SLOT '%s' %s at (%.0f,%.0f,%.0f) gm=%s tm=%s", id.c_str(), s->GetName().c_str(), l[0], l[1], l[2],
+                lgm ? lgm->GetName().c_str() : "-", tm ? tm->GetName().c_str() : "-");
+        }
+        return;
+    }
     if (!strcmp(op, "camfly"))                // camfly <vx> <vy> <vz> <seconds> -- as if a move key were held
     {
         double sec = 0;
@@ -2522,6 +2571,39 @@ void RunScript(const Snapshot& snap)
         g_camFly.until = GetTickCount64() + static_cast<ULONGLONG>(sec * 1000.0);
         return;
     }
+    if (!strcmp(op, "gmrole") || !strcmp(op, "gmapply") || !strcmp(op, "gmpiece") || !strcmp(op, "expectgm") || !strcmp(op, "gmwin") ||
+        !strcmp(op, "gmscroll") || !strcmp(op, "gmpopup") || !strcmp(op, "gmtab"))   // game modes window
+    { RequestUiSelect(std::string("!") + op + " " + rest); return; }
+    if (!strcmp(op, "setres") || !strcmp(op, "console"))   // setres 1600x900w | console <any console command>
+    {
+        static SDK::UObject* ksl = nullptr;
+        if (!ksl) if (SDK::UClass* k = SDK::UObject::FindClassFast("KismetSystemLibrary")) ksl = k->ClassDefaultObject;
+        const std::string cmd = !strcmp(op, "setres") ? "r.SetRes " + rest : rest;
+        const std::wstring w(cmd.begin(), cmd.end());
+        SDK::Params::KismetSystemLibrary_ExecuteConsoleCommand p{};
+        p.WorldContextObject = g_pc;
+        p.Command = SDK::FString(w.c_str());
+        p.SpecificPlayer = static_cast<SDK::APlayerController*>(g_pc);
+        const bool ok = ksl && g_pc && CallNative(ksl, "KismetSystemLibrary", "ExecuteConsoleCommand", p);
+        memset(&p.Command, 0, sizeof(p.Command));   // the FString points at our buffer: not the engine's to free
+        Log("[script] console '%s': %s", cmd.c_str(), ok ? "sent" : "FAILED");
+        return;
+    }
+    if (!strcmp(op, "mousepark")) { g_uiMouseParked = rest != "0"; Log("[script] mouse %s", g_uiMouseParked ? "parked" : "back"); return; }
+    if (!strcmp(op, "shot"))                  // shot <name|full path.bmp> -- the next frame, editor UI included (docs, tests)
+    {
+        std::string path = rest;
+        if (path.find(':') == std::string::npos)
+        {
+            char tp[MAX_PATH]; GetTempPathA(MAX_PATH, tp);
+            CreateDirectoryA((std::string(tp) + "rigel_shots").c_str(), nullptr);
+            path = std::string(tp) + "rigel_shots\\" + rest + ".bmp";
+        }
+        RequestScreenshot(path);
+        Log("[script] shot -> %s", path.c_str());
+        return;
+    }
+    if (!strcmp(op, "uitour")) { RequestUiSelect("!uitour"); return; }                                // open every tab and popup in turn (crash sweep)
     if (!strcmp(op, "placeui")) { RequestUiSelect("!placeui " + rest); return; }                 // placeui <palette name>
     if (!strcmp(op, "scene")) { RequestUiSelect("!scene " + rest); return; }                     // scene save|saveas|open|new|upload|autosave [name]
     if (!strcmp(op, "expectscene")) { RequestUiSelect("!expectscene " + rest); return; }         // expectscene <name|-> <dirty 0|1>
@@ -3164,6 +3246,16 @@ void RunScript(const Snapshot& snap)
                     auto* mesh = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(c) + 0x560);
                     extra += " mesh=" + (mesh ? mesh->GetName() : std::string("None"));
                 }
+                static SDK::UClass* trCls = SDK::UObject::FindClassFast("TextRenderComponent");
+                static SDK::UObject* ktl = nullptr;
+                if (!ktl) if (SDK::UClass* k = SDK::UObject::FindClassFast("KismetTextLibrary")) ktl = k->ClassDefaultObject;
+                if (trCls && ktl && c->IsA(trCls))         // what the text says (UTextRenderComponent::Text @0x518)
+                {
+                    SDK::Params::KismetTextLibrary_Conv_TextToString tp{};
+                    memcpy(&tp.InText, reinterpret_cast<uint8_t*>(c) + 0x518, sizeof(tp.InText));
+                    if (CallNative(ktl, "KismetTextLibrary", "Conv_TextToString", tp)) extra += " text='" + tp.ReturnValue.ToString() + "'";
+                    memset(&tp.InText, 0, sizeof(tp.InText));   // borrowed, not ours to release
+                }
             }
             Log("[script]   %-40s %-32s%s", c->GetName().c_str(), c->Class ? c->Class->GetName().c_str() : "?", extra.c_str());
         }
@@ -3709,6 +3801,7 @@ void PumpImpl()
     snap.glyphs = g_glyphs;
     snap.quests = g_knownQuests;
     snap.levels = g_levels;
+    snap.gameModes = g_gameModes;
     snap.gameScripts = g_gameScripts;
     snap.levelsSerial = g_levelsSerial;
     snap.dataHandle = g_dataHandle;
@@ -3717,6 +3810,7 @@ void PumpImpl()
     snap.slotCandType = g_slotCandType;
     snap.clickPlaced = g_clickPlaced;
     snap.slotCands = g_slotCands;
+    McpPumpEntry(snap);                              // the MCP bridge (AI agents drive the editor): sees the full snapshot
     State().Publish(std::move(snap));
     HandleCommands();
     PumpMark(7);
@@ -3831,6 +3925,25 @@ void HandleServerMessage(const wchar_t* w)
         it.text = bar == std::string::npos ? rest : rest.substr(bar + 1);
         Problems().Push(it);
         Log("[error] %s: %s", it.title.c_str(), it.text.c_str());
+    }
+    else if (msg.rfind("SE|GMLIST|", 0) == 0 || msg.rfind("SE|GMSTAT|", 0) == 0)
+    {
+        // Game modes: GMLIST replaces the list, GMSTAT updates (or adds) one record. Record = id~name~...
+        const bool full = msg[5] == 'L';
+        const std::string body = msg.substr(10);
+        if (full) g_gameModes.clear();
+        for (size_t b = 0; b < body.size();)
+        {
+            size_t e = body.find('\x1E', b);
+            if (e == std::string::npos) e = body.size();
+            const std::string rec = body.substr(b, e - b);
+            b = e + 1;
+            if (rec.empty()) continue;
+            const std::string id = rec.substr(0, rec.find('~'));
+            bool found = false;
+            for (auto& r : g_gameModes) if (r.substr(0, r.find('~')) == id) { r = rec; found = true; }
+            if (!found) g_gameModes.push_back(rec);
+        }
     }
     else if (msg.rfind("SE|LVLIST|", 0) == 0)
     {
@@ -4100,4 +4213,11 @@ bool InstallGameHook()
     return true;
 }
 
+}  // namespace se
+
+namespace se {
+namespace {
+#include "se_mcp_bridge.inc"
+}  // namespace
+void McpPumpEntry(const Snapshot& snap) { McpPump(snap); }
 }  // namespace se

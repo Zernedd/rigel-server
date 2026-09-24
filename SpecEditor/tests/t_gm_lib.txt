@@ -1,0 +1,24 @@
+log GM start
+enter
+wait 3
+raw SE|GMNEW|Arena Test|0,-2600,-27000|2|3,3|Blue,Red
+wait 6
+raw SE|GMLIST
+raw SE|GMSET|RigelMode1|countdown|3
+raw SE|GMSET|RigelMode1|round_time|20
+raw SE|GMSET|RigelMode1|score_to_win|5
+raw SE|GMTEAM|RigelMode1|1|-400,-2600,-27000
+raw SE|GMTEAM|RigelMode1|2|400,-2600,-27000
+raw SE|SBADD|GameStateManager|0.0,-2800.0,-27000.0
+wait 6
+raw SE|TEAMCHK
+pickat BP_GameStateManager_C 0 -2800 -27000
+luaufile ZRig
+wait 8
+
+wait 14
+
+wait 4
+raw SE|SBADD|teamChange|20000.0,-2600.0,-27000.0
+wait 3
+log GM done

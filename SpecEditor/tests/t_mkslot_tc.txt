@@ -1,0 +1,13 @@
+log MK start
+enter
+wait 3
+raw SE|ALLOWTEAM|1
+raw SE|MKSLOT|0,-2600,-27000|tag/teamchanger
+wait 6
+raw SE|TEAMCHK
+raw SE|SBADD|teamChange|400.0,-2600.0,-27000.0
+wait 6
+raw SE|TEAMCHK
+raw SE|SLOTS
+wait 4
+log MK done

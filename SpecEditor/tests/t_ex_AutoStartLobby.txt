@@ -1,0 +1,47 @@
+log EXLEVEL AutoStartLobby start
+enter
+wait 3
+raw SE|GMNEW|AutoStartLobby|0,2500,-28625|2|4,4|Blue,Red
+wait 10
+raw SE|GMSET|RigelMode1|start_mode|manual
+raw SE|GMSET|RigelMode1|countdown|5
+raw SE|GMSET|RigelMode1|round_time|90
+raw SE|GMSET|RigelMode1|auto_restart|1
+raw SE|GMSET|RigelMode1|custom.min_each|1
+raw SE|GMTEAM|RigelMode1|1|-700,1200,-28625
+raw SE|GMTEAM|RigelMode1|2|700,1200,-28625
+raw SE|SBADD|ForceFieldA|0.0,2000.0,-28625.0
+raw SE|SBADD|Timer|700.0,1600.0,-28625.0
+raw SE|SBADD|TimerDisplay|1300.0,1600.0,-28475.0
+raw SE|SBADD|aa_se_LE_BP_Text|-700.0,1600.0,-28375.0
+raw SE|SBADD|BasicButton|-1300.0,3100.0,-28625.0
+raw SE|SBADD|BasicButton|1300.0,3100.0,-28625.0
+raw SE|SBADD|Scoreboard|0.0,3800.0,-28375.0
+wait 10
+gmrole BP_ForceFieldA_C AutoStartLobby wall_lobby 0
+gmrole BP_Timer_C AutoStartLobby timer 0
+gmrole BP_BasicButton_C AutoStartLobby score:1 0
+gmrole BP_BasicButton_C AutoStartLobby score:2 1
+pickat BP_TimerDisplay_C 1300 1600 -28475
+rotate 180
+wait 2
+pickat LE_BP_Text_C -700 1600 -28375
+rotate 180
+wait 2
+pickat BP_ScoreboardA_C 0 3800 -28375
+rotate 180
+wait 2
+raw SE|SBSET|LE_BP_Text_C@-700.000,1600.000,-28375.000|props/Text|text|{Lobby}
+wait 6
+gmapply AutoStartLobby
+wait 10
+raw SE|GMCTL|RigelMode1|start
+wait 8
+expectgm AutoStartLobby running
+raw SE|GMCTL|RigelMode1|reset
+wait 4
+expectgm AutoStartLobby idle
+scene saveas AutoStartLobby
+wait 10
+expectlvfile AutoStartLobby 1
+log EXLEVEL AutoStartLobby done

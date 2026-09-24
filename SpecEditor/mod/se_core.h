@@ -27,11 +27,23 @@
 namespace se {
 
 void Log(const char* fmt, ...);          // %TEMP%\spec_editor.log
+void LogRingPush(const char* line);      // dllmain.cpp: recent log lines, numbered (the MCP bridge reads them)
+unsigned long long LogRingSeq();
+std::vector<std::pair<unsigned long long, std::string>> LogRingSince(unsigned long long seq, size_t max);
+struct McpRawReq { unsigned long long conn; std::string line; };   // se_mcp_net.cpp: the MCP bridge's sockets
+void McpNetStart();
+int McpNetPort();
+void McpNetPop(std::vector<McpRawReq>& out);
+void McpNetSend(unsigned long long conn, const std::string& line);
+std::string CurrentSceneName();          // se_ui.cpp: the open level ("" = none)
+bool CurrentSceneDirty();
 void RequestUiSelect(const std::string& handle);   // se_ui.cpp: the UI selects this next frame (test scripts)
 std::wstring LevelsDir();                          // se_ui.cpp: Documents\RigelLevels (local .a2level projects)
 extern std::atomic<bool> g_sceneDirty;
 extern std::atomic<unsigned> g_presentCount;             // se_render.cpp: frames presented (camera diagnostics)             // se_game.cpp: an edit was sent since the open level was last saved
 unsigned long long IconTexture(const std::string& itemName);   // se_render.cpp: the game's own item icon (0 = none)
+extern std::atomic<bool> g_uiMouseParked;          // se_render.cpp: docs/tests park ImGui's mouse (no hover)
+void RequestScreenshot(const std::string& path);   // se_render.cpp: the next presented frame -> a BMP (UI included)
 void StartSyntheticDrag(int sx, int sy, int ex, int ey);        // se_render.cpp: tests -- a mouse drag fed to ImGui (screen px)
 
 // ── what the render thread is allowed to know about the world ────────────────────────────────
@@ -125,6 +137,7 @@ struct Snapshot
     struct LevelInfo { std::string name, updated; bool autoload = false, wanted = false, here = false; int size = 0; };
     std::vector<LevelInfo>    levels;       // saved levels on the backend (Levels tab)
     int                       levelsSerial = 0;
+    std::vector<std::string>  gameModes;    // game modes on this server: raw records (SE|GMLIST / SE|GMSTAT)
     struct GameScript { std::string where, name, source; };
     std::vector<GameScript>   gameScripts;  // the station's Luau (read-only examples of the API)
     // Objects that can fill a script slot of type slotCandType: each has a component of that type.

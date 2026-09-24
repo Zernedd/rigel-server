@@ -1,0 +1,14 @@
+log LS start
+enter
+wait 3
+raw SE|ALLOWTEAM|1
+raw SE|LOADSLOT|Default_1243874143|tag/teamchanger
+wait 6
+raw SE|SBADD|teamChange|-21915.0,8705.0,19000.0
+wait 6
+raw SE|TEAMCHK
+camto -21915 8305 19300
+wait 8
+pickat BP_TeamChangeActor_C -21915 8705 19000
+wait 2
+log LS done

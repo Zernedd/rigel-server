@@ -94,6 +94,40 @@ declare Logging: {
 	warn: (category: string, ...any) -> (),
 }
 
+-- Rigel game modes (Spec Editor > Details > Game Modes). Works in any script inside a game mode's area, on every
+-- machine; use it from BeginPlay or later (not at the top of the file). See Rigel-GameModes-Guide.pdf.
+declare Rigel: {
+	isGameMode: () -> boolean,
+	name: () -> string,
+	state: () -> string,            -- "idle" | "countdown" | "running" | "ended" | "none"
+	isRunning: () -> boolean,
+	round: () -> number,
+	timeLeft: () -> number,         -- seconds left in the countdown / round (0 = no limit)
+	teams: () -> number,
+	teamName: (team: number) -> string,
+	teamSize: (team: number) -> number,
+	teamMax: (team: number) -> number,
+	score: (team: number) -> number,
+	roundsWon: (team: number) -> number,
+	players: () -> number,
+	winner: () -> number,           -- 0 = draw / none
+	setting: (key: string) -> string,
+	settingNumber: (key: string) -> number,
+	startRound: () -> (),
+	startNow: () -> (),
+	endRound: (winner: number?) -> (),
+	resetGame: () -> (),
+	resetBalls: () -> (),               -- the server spawns / resets every "Ball spawner" role ball
+	addScore: (team: number, amount: number?) -> (),
+	setScore: (team: number, value: number) -> (),
+	setCustom: (key: string, value: string) -> (),
+	setText: (name: string, value: string) -> (),
+	onStateChanged: (f: (state: string, old: string) -> ()) -> (),
+	onTeamChanged: (f: (team: number, size: number, old: number) -> ()) -> (),
+	onScoreChanged: (f: (team: number, score: number, old: number) -> ()) -> (),
+	onTimeChanged: (f: (secondsLeft: number) -> ()) -> (),
+}
+
 declare Enum: {
 	TextJustify: {
 		Left: number,

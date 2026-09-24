@@ -1,0 +1,24 @@
+log TCN start
+enter
+wait 3
+raw SE|GMNEW|Arena|0,-2600,-27000|2|3,3|Blue,Red
+wait 14
+log TCN after-park
+tcnodes
+raw SE|GMTEAM|RigelMode1|1|-600,-2600,-27000
+wait 6
+log TCN after-gmteam
+tcnodes
+camto -600 -2900 -26900
+wait 3
+pickat BP_TeamChangeActor_C -600 -2600 -27000
+move 0 300 0
+wait 6
+log TCN after-move
+tcnodes
+pickat BP_TeamChangeActor_C -600 -2300 -27000
+delete
+wait 6
+log TCN after-delete
+tcnodes
+log TCN done

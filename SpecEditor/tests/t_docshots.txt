@@ -1,0 +1,61 @@
+log DOCSHOTS start
+enter
+setres 1600x900w
+mousepark 1
+wait 4
+scene open ScoreboardRace
+wait 20
+camto 0 -1400 -27700
+camlook -14 90
+wait 3
+shot gm_overview
+gmwin ScoreboardRace
+wait 2
+shot gmw_0
+gmscroll 350
+wait 2
+shot gmw_1
+gmscroll 700
+wait 2
+shot gmw_2
+gmscroll 1050
+wait 2
+shot gmw_3
+gmscroll 1400
+wait 2
+shot gmw_4
+gmscroll 1750
+wait 2
+shot gmw_5
+gmscroll 2100
+wait 2
+shot gmw_6
+gmscroll 0
+gmpopup popup:gm_new
+wait 2
+shot gm_new_popup
+gmpopup popup:gm_example
+wait 2
+shot gm_example_popup
+gmwin off
+wait 1
+camto 0 600 -28150
+camlook -2 90
+wait 3
+shot gm_scoreboards
+camto 0 -200 -28150
+camlook -18 90
+wait 3
+shot gm_teamchangers
+pickat BP_GameStateManager_C 0 2500 -28625
+select
+gmtab Details
+wait 3
+shot details_script
+gmtab Levels
+wait 2
+shot levels_tab
+gmtab Game Modes
+wait 2
+shot gm_tab
+log DOCSHOTS done

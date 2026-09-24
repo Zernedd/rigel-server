@@ -1,0 +1,15 @@
+log CF start
+enter
+wait 3
+raw SE|MKSLOTID|0,-2600,-27000|tag/teamchanger|FabModeA
+wait 4
+raw SE|SBADD|GameStateManager|0.0,-2600.0,-27000.0
+wait 6
+pickat BP_GameStateManager_C 0 -2600 -27000
+luaufile ZCfg
+wait 8
+raw SE|CFGSET|FabModeA|rigelTest|hello
+wait 6
+raw SE|CFGSET|FabModeA|rigelTest|second
+wait 6
+log CF done

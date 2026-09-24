@@ -17,7 +17,7 @@ end
 
 -- Racing a timeout against something that may happen first (TKBGolf uses this to hide an
 -- arrow after 45 seconds OR as soon as the player starts another hole).
-local cancel: () -> () = function() end
+local cancel = (function() end) :: () -> ()   -- a cast: a typed top-level local would be an editor property
 
 local function waitForSignalOrTimeout(seconds: number)
 	local signalled = Promise.new(function(resolve: (number) -> (), _reject: (any) -> ())

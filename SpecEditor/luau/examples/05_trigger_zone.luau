@@ -3,14 +3,14 @@
 -- A PhysicalComponent used as a trigger volume: greet players who walk into it,
 -- and hand out a quest event.
 --
--- As in 04, `Zone` comes from the object's references wiring, which the editor
--- cannot set up yet.
+-- As in 04, `Zone` comes from the object's references wiring: Details > Game data > the script's
+-- slots (click Zone, then click the object) -- or the MCP tool set_script_reference.
 
 -- External Dependencies
 local Zone: PhysicalComponent = nil
 -- End External Dependencies
 
-local visits: { [number]: number } = {}
+local visits = {} :: { [number]: number }   -- a cast, not a typed local: typed top-level locals are editor properties
 
 function BeginPlay()
 	if (Zone :: PhysicalComponent?) == nil then

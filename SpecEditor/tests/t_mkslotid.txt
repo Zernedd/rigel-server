@@ -1,0 +1,19 @@
+log MI start
+enter
+wait 3
+raw SE|ALLOWTEAM|1
+raw SE|MKSLOTID|0,-2600,-27000|tag/teamchanger|FabModeA
+wait 4
+raw SE|MKSLOTID|-21915,8705,19000|tag/teamchanger|FabModeB
+wait 6
+raw SE|SBADD|teamChange|400.0,-2600.0,-27000.0
+raw SE|SBADD|teamChange|-21915.0,8705.0,19100.0
+wait 6
+raw SE|TEAMCHK
+slots
+pickat BP_TeamChangeActor_C 400 -2600 -27000
+camto -21915 8305 19300
+wait 8
+pickat BP_TeamChangeActor_C -21915 8705 19100
+wait 2
+log MI done

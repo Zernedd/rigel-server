@@ -477,7 +477,7 @@ you place. Examples 4&ndash;6 need their slots wired (chapter 4).</p>
 
 <span class="c">-- Racing a timeout against something that may happen first (TKBGolf uses this to hide an</span>
 <span class="c">-- arrow after 45 seconds OR as soon as the player starts another hole).</span>
-<span class="k">local</span> cancel: () -&gt; () = <span class="k">function</span>() <span class="k">end</span>
+<span class="k">local</span> cancel = (<span class="k">function</span>() <span class="k">end</span>) :: () -&gt; ()   <span class="c">-- a cast: a typed top-level local would be an editor property</span>
 
 <span class="k">local</span> <span class="k">function</span> waitForSignalOrTimeout(seconds: number)
 	<span class="k">local</span> signalled = Promise.new(<span class="k">function</span>(resolve: (number) -&gt; (), _reject: (any) -&gt; ())
@@ -520,6 +520,8 @@ objects onto its slots.</p>
 <span class="c">--   3. In Details &gt; Game data, under &quot;Script LightSwitch.luau&quot;, drag the switch itself from the Outliner onto</span>
 <span class="c">--      the Switch slot, and the object onto the Target slot.</span>
 <span class="c">-- Flip the switch: the target shows when it&#x27;s on and hides (and stops blocking players) when it&#x27;s off.</span>
+<span class="c">-- Good targets are things whose look IS their physical part: walls, platforms, cubes, ramps, meshes.</span>
+<span class="c">-- A few gameplay objects keep their visible model separate (a golf tee, for one) and won&#x27;t disappear.</span>
 
 <span class="c">-- External Dependencies (slots: drag objects onto these in the editor)</span>
 <span class="k">local</span> Switch: ToggleableComponent = <span class="k">nil</span>
@@ -654,9 +656,9 @@ objects onto its slots.</p>
 <span class="c">-- React to an event from a referenced component and drive another one.</span>
 <span class="c">--</span>
 <span class="c">-- IMPORTANT: the two locals in the External Dependencies block are filled in by the game from</span>
-<span class="c">-- the object&#x27;s `references` wiring, matching by name. The Spec Editor does not configure</span>
-<span class="c">-- references yet, so on a plain sandbox object they stay nil. The nil checks below keep the</span>
-<span class="c">-- script from erroring in that case.</span>
+<span class="c">-- the object&#x27;s `references` wiring, matching by name: in the editor, Details &gt; Game data &gt; the</span>
+<span class="c">-- script&#x27;s slots (click a slot, then click the object). Until wired they are nil; the nil checks</span>
+<span class="c">-- below keep the script from erroring in that case.</span>
 
 <span class="c">-- External Dependencies</span>
 <span class="k">local</span> Button: BasicButtonComponent = <span class="k">nil</span>
@@ -703,14 +705,14 @@ objects onto its slots.</p>
 <span class="c">-- A PhysicalComponent used as a trigger volume: greet players who walk into it,</span>
 <span class="c">-- and hand out a quest event.</span>
 <span class="c">--</span>
-<span class="c">-- As in 04, `Zone` comes from the object&#x27;s references wiring, which the editor</span>
-<span class="c">-- cannot set up yet.</span>
+<span class="c">-- As in 04, `Zone` comes from the object&#x27;s references wiring: Details &gt; Game data &gt; the script&#x27;s</span>
+<span class="c">-- slots (click Zone, then click the object) -- or the MCP tool set_script_reference.</span>
 
 <span class="c">-- External Dependencies</span>
 <span class="k">local</span> Zone: PhysicalComponent = <span class="k">nil</span>
 <span class="c">-- End External Dependencies</span>
 
-<span class="k">local</span> visits: { [number]: number } = {}
+<span class="k">local</span> visits = {} :: { [number]: number }   <span class="c">-- a cast, not a typed local: typed top-level locals are editor properties</span>
 
 <span class="k">function</span> BeginPlay()
 	<span class="k">if</span> (Zone :: PhysicalComponent?) == <span class="k">nil</span> <span class="k">then</span>

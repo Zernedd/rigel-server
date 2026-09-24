@@ -1,0 +1,41 @@
+log EXLEVEL BallBattle start
+enter
+wait 3
+raw SE|GMNEW|BallBattle|0,-2600,-27000|2|4,4|Blue,Red
+wait 10
+raw SE|GMSET|RigelMode1|start_mode|button
+raw SE|GMSET|RigelMode1|score_to_win|5
+raw SE|GMSET|RigelMode1|round_time|300
+raw SE|GMSET|RigelMode1|countdown|3
+raw SE|GMTEAM|RigelMode1|1|-800,-6500,-27000
+raw SE|GMTEAM|RigelMode1|2|800,-6500,-27000
+raw SE|SBADD|BasicButton|-1500.0,400.0,-27000.0
+raw SE|SBADD|BasicButton|0.0,-5600.0,-27000.0
+raw SE|SBADD|BasicButton|1500.0,400.0,-27000.0
+raw SE|SBADD|JakeBallSpawner|0.0,-2600.0,-26900.0
+raw SE|SBADD|Scoreboard|0.0,1000.0,-26750.0
+raw SE|SBADD|Scoreboard_OLD|0.0,-6200.0,-27000.0
+raw SE|SBADD|aa_se_LE_BP_Text|0.0,-4600.0,-26750.0
+wait 10
+gmrole BP_BasicButton_C BallBattle score:1 0
+gmrole BP_BasicButton_C BallBattle start 1
+gmrole BP_BasicButton_C BallBattle score:2 2
+gmrole BP_JakeBallSpawner_C BallBattle ball 0
+gmrole BP_Score_C BallBattle score_board 0
+raw SE|SBSET|LE_BP_Text_C@0.000,-4600.000,-26750.000|props/Text|text|{Match}
+wait 6
+gmapply BallBattle
+wait 10
+raw SE|GMCTL|RigelMode1|start
+wait 8
+expectgm BallBattle running
+raw SE|GMCTL|RigelMode1|reset
+wait 4
+expectgm BallBattle idle
+log UITOUR begin
+uitour
+wait 30
+log UITOUR after
+uitour
+wait 30
+log UITOUR end

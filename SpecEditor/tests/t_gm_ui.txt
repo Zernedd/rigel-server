@@ -1,0 +1,53 @@
+log GMUI start
+enter
+wait 3
+log waiting for the real player to spawn
+wait 5
+raw SE|GMNEW|Arena|@P0,3000,0|2|3,3|Blue,Red
+wait 8
+raw SE|GMSET|RigelMode1|countdown|3
+raw SE|GMSET|RigelMode1|round_time|20
+raw SE|GMSET|RigelMode1|start_mode|manual
+raw SE|GMSET|RigelMode1|stop_when_empty|0
+raw SE|SBADD|BasicButton|@P-500,1500,0
+raw SE|SBADD|BasicButton|@P500,1500,0
+raw SE|SBADD|Timer|@P0,2000,0
+raw SE|SBADD|TrapSpinner|@P0,4500,0
+raw SE|SBADD|JakeBallSpawner|@P-600,-600,100
+raw SE|SBADD|Scoreboard|@P700,0,100
+raw SE|SBADD|Scoreboard|@P-700,0,100
+raw SE|SBADD|Scoreboard|@P0,700,100
+raw SE|SBADD|Scoreboard|@P0,-700,100
+raw SE|SBADD|Scoreboard_OLD|@P600,600,100
+raw SE|SBADD|DataTable|@P-600,600,100
+wait 8
+gmrole BasicButton Arena start 0
+gmrole BasicButton Arena score:1 1
+gmrole Timer Arena timer
+gmrole Spinner Arena trap_round
+gmrole JakeBallSpawner Arena ball
+gmrole BP_Score_C Arena score_board
+gmrole TableScoreboard Arena score_table
+gmpiece Arena Force field
+wait 8
+expectgm Arena idle
+gmapply Arena
+wait 10
+raw SE|GMTEAM|RigelMode1|2|@P0,6000,0
+raw SE|GMTEAM|RigelMode1|1|@P0,0,0
+log WALK NOW
+wait 62
+expectgm Arena idle
+raw SE|GMCTL|RigelMode1|start
+wait 8
+expectgm Arena running 2,0
+log BALLTEST
+pick BP_Score_C
+comps
+wait 4
+wait 18
+expectgm Arena ended
+log SHOT ended
+wait 4
+wait 5
+log GMUI done

@@ -31,6 +31,8 @@ if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
 $out = Join-Path $here $(if ($Rift) { 'build-rift' } else { 'build' })
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 $eos  = (Resolve-Path (Join-Path $here '..\..\RigelRift\eosredirect')).Path
+# ImGui's config lives in the (untracked) ThirdParty folder; ours -- a non-fatal IM_ASSERT -- is kept here and copied in.
+Copy-Item -Force (Join-Path $here 'imconfig_rigel.h') (Join-Path $imgui 'imconfig.h')
 $defs = if ($Rift) { '/DRIGEL_EOS /DRIGEL_EMBEDDED /DRIGEL_SHARED_PE ' } else { '' }
 $eosCl = if ($Rift) {
   "cl /nologo /c /O2 /MT /EHsc /GS- $defs/I`"$mh\include`" /Fo:eos_dllmain.obj `"$eos\dllmain.cpp`" && " +
@@ -46,12 +48,12 @@ $cmds = @(
   "call `"$vcvars`"",
   "cd /d `"$out`"",
   "ml64 /nologo /c /Fo thunks.obj `"$here\thunks.asm`"",
-  "$cl `"$here\dllmain.cpp`" `"$here\se_render.cpp`" `"$here\se_ui.cpp`" `"$here\se_game.cpp`" `"$here\se_sdk_glue.cpp`"",
+  "$cl `"$here\dllmain.cpp`" `"$here\se_render.cpp`" `"$here\se_ui.cpp`" `"$here\se_game.cpp`" `"$here\se_sdk_glue.cpp`" `"$here\se_mcp_net.cpp`"",
   "$cl `"$sdk\SDK\Basic.cpp`" `"$sdk\SDK\CoreUObject_functions.cpp`"",
   "$cl `"$imgui\imgui.cpp`" `"$imgui\imgui_draw.cpp`" `"$imgui\imgui_tables.cpp`" `"$imgui\imgui_widgets.cpp`" `"$imgui\backends\imgui_impl_dx12.cpp`" `"$imgui\backends\imgui_impl_win32.cpp`"",
   $eosCl,
   "cl /nologo /c /O2 /MT `"$mh\src\buffer.c`" `"$mh\src\hook.c`" `"$mh\src\trampoline.c`" `"$mh\src\hde\hde64.c`"",
-  "cl /nologo /LD /Fe:dsound.dll *.obj /link /DEF:`"$here\exports.def`" kernel32.lib user32.lib d3d12.lib dxgi.lib psapi.lib",
+  "cl /nologo /LD /Fe:dsound.dll *.obj /link /DEF:`"$here\exports.def`" kernel32.lib user32.lib d3d12.lib dxgi.lib psapi.lib ws2_32.lib /MAP:dsound.map",
   "echo BUILD_OK"
 ) -join ' && '
 

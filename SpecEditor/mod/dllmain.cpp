@@ -69,15 +69,48 @@ void Log(const char* fmt, ...)
     // _fsopen with _SH_DENYNO, NOT fopen_s: fopen_s opens the file non-shareable, so while anything else
     // held it open -- a `tail -f`, an editor, a log viewer -- every later line was silently dropped. The
     // first live test lost its whole log that way after line one and looked exactly like a hang.
+    SYSTEMTIME st; GetLocalTime(&st);
+    char msg[4096];
+    va_list ap; va_start(ap, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+    LogRingPush(msg);                                  // the MCP bridge reads recent lines from here
     FILE* f = _fsopen(path, "a", _SH_DENYNO);
     if (!f) return;
-    SYSTEMTIME st; GetLocalTime(&st);
-    fprintf(f, "[%02d:%02d:%02d] ", st.wHour, st.wMinute, st.wSecond);
-    va_list ap; va_start(ap, fmt);
-    vfprintf(f, fmt, ap);
-    va_end(ap);
-    fputc('\n', f);
+    fprintf(f, "[%02d:%02d:%02d] %s\n", st.wHour, st.wMinute, st.wSecond, msg);
     fclose(f);
+}
+
+// IM_ASSERT (imconfig.h): log each failing spot once, never abort.
+void UiAssertFailed(const char* expr, const char* file, int line)
+{
+    static std::mutex mx;
+    static std::vector<std::pair<const char*, int>> seen;
+    {
+        std::lock_guard<std::mutex> lk(mx);
+        for (const auto& s : seen) if (s.first == file && s.second == line) return;
+        if (seen.size() < 200) seen.push_back({ file, line });
+    }
+    const char* f = strrchr(file, '\\');
+    Log("[ui-assert] %s  (%s:%d) -- ignored, the UI carries on", expr, f ? f + 1 : file, line);
+}
+
+// The last 4000 log lines, numbered, for the MCP bridge ("what did that do?", script errors, notes).
+namespace { std::mutex g_ringMx; std::vector<std::pair<unsigned long long, std::string>> g_ring; unsigned long long g_ringSeq = 0; }
+void LogRingPush(const char* line)
+{
+    std::lock_guard<std::mutex> lk(g_ringMx);
+    g_ring.emplace_back(++g_ringSeq, line);
+    if (g_ring.size() > 4000) g_ring.erase(g_ring.begin(), g_ring.begin() + 1000);
+}
+unsigned long long LogRingSeq() { std::lock_guard<std::mutex> lk(g_ringMx); return g_ringSeq; }
+std::vector<std::pair<unsigned long long, std::string>> LogRingSince(unsigned long long seq, size_t max)
+{
+    std::lock_guard<std::mutex> lk(g_ringMx);
+    std::vector<std::pair<unsigned long long, std::string>> out;
+    for (const auto& e : g_ring) if (e.first > seq) out.push_back(e);
+    if (out.size() > max) out.erase(out.begin(), out.end() - max);
+    return out;
 }
 
 }  // namespace se

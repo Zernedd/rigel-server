@@ -1,0 +1,20 @@
+log GMP start
+enter
+wait 4
+pick BP_TeamChangeActor_C
+data
+wait 3
+datadump
+pick BP_TicketManagerSpawner_C
+data
+wait 3
+datadump
+pick BP_GameStateManager_C
+data
+wait 3
+datadump
+pick BP_Timer_C
+data
+wait 3
+datadump
+log GMP done

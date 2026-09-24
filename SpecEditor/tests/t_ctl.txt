@@ -1,0 +1,35 @@
+log CT start
+enter
+wait 3
+raw SE|ALLOWTEAM|1
+raw SE|MKSLOTID|0,-2600,-27000|tag/teamchanger|FabModeA
+wait 5
+raw SE|SBADD|GameStateManager|0.0,-2600.0,-27000.0
+raw SE|SBADD|teamChange|400.0,-2600.0,-27000.0
+raw SE|SBADD|BasicButton|800.0,-2600.0,-27000.0
+raw SE|SBADD|Timer|-400.0,-2600.0,-27000.0
+raw SE|SBADD|TrapTrapDoor|0.0,-2200.0,-27000.0
+raw SE|SBADD|TrapSpinner|0.0,-3000.0,-27000.0
+wait 8
+pickat BP_GameStateManager_C 0 -2600 -27000
+luaufile ZCtl
+wait 10
+pickat BP_GameStateManager_C 0 -2600 -27000
+luauref ZCtl Changer TeamChangeComponent BP_TeamChangeActor_C 400 -2600 -27000
+wait 6
+pickat BP_GameStateManager_C 0 -2600 -27000
+luauref ZCtl Button BasicButtonComponent BP_BasicButton_C 800 -2600 -27000
+wait 6
+pickat BP_GameStateManager_C 0 -2600 -27000
+luauref ZCtl Clock TimerComponent BP_Timer_C -400 -2600 -27000
+wait 6
+pickat BP_GameStateManager_C 0 -2600 -27000
+luauref ZCtl TrapDoor ToggleableComponent BP_Trap_TrapDoor_C 0 -2200 -27000
+wait 6
+pickat BP_GameStateManager_C 0 -2600 -27000
+luauref ZCtl Spinner TrapSpinnerComponent BP_Trap_Spinner_C 0 -3000 -27000
+wait 6
+pickat BP_GameStateManager_C 0 -2600 -27000
+luauref ZCtl Manager GameStateManagerComponent self
+wait 12
+log CT done

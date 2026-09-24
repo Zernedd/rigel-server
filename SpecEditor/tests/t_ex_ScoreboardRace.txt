@@ -1,0 +1,58 @@
+log EXLEVEL ScoreboardRace start
+enter
+wait 3
+raw SE|GMNEW|ScoreboardRace|0,2500,-28625|2|4,4|Blue,Red
+wait 10
+raw SE|GMSET|RigelMode1|start_mode|button
+raw SE|GMSET|RigelMode1|round_time|45
+raw SE|GMSET|RigelMode1|countdown|3
+raw SE|GMTEAM|RigelMode1|1|-700,1200,-28625
+raw SE|GMTEAM|RigelMode1|2|700,1200,-28625
+raw SE|SBADD|BasicButton|-800.0,2300.0,-28625.0
+raw SE|SBADD|BasicButton|0.0,1600.0,-28625.0
+raw SE|SBADD|BasicButton|800.0,2300.0,-28625.0
+raw SE|SBADD|Scoreboard|0.0,3800.0,-28375.0
+raw SE|SBADD|ScoreboardSideboard|-1400.0,3600.0,-28475.0
+raw SE|SBADD|Scoreboard_OLD|1400.0,3600.0,-28625.0
+raw SE|SBADD|DataTable|-700.0,3100.0,-28475.0
+raw SE|SBADD|aa_se_LE_BP_Text|700.0,3100.0,-28375.0
+raw SE|SBADD|aa_se_LE_BP_Text|0.0,2900.0,-28275.0
+wait 10
+gmrole BP_BasicButton_C ScoreboardRace score:1 0
+gmrole BP_BasicButton_C ScoreboardRace start 1
+gmrole BP_BasicButton_C ScoreboardRace score:2 2
+gmrole BP_Score_C ScoreboardRace score_board 0
+gmrole LE_BP_TableScoreboard_C ScoreboardRace score_table 0
+pickat BP_ScoreboardA_C 0 3800 -28375
+rotate 180
+wait 2
+pickat LE_BP_ScoreboardA_Sideboard_C -1400 3600 -28475
+rotate 180
+wait 2
+pickat BP_Score_C 1400 3600 -28625
+rotate 180
+wait 2
+pickat LE_BP_TableScoreboard_C -700 3100 -28475
+rotate 180
+wait 2
+pickat LE_BP_Text_C 700 3100 -28375
+rotate 180
+wait 2
+pickat LE_BP_Text_C 0 2900 -28275
+rotate 180
+wait 2
+raw SE|SBSET|LE_BP_Text_C@700.000,3100.000,-28375.000|props/Text|text|{Race}
+raw SE|SBSET|LE_BP_Text_C@0.000,2900.000,-28275.000|props/Text|text|{ScoreboardRace.team1.name} {ScoreboardRace.team1.score} - {ScoreboardRace.team2.score} {ScoreboardRace.team2.name}
+wait 6
+gmapply ScoreboardRace
+wait 10
+raw SE|GMCTL|RigelMode1|start
+wait 8
+expectgm ScoreboardRace running
+raw SE|GMCTL|RigelMode1|reset
+wait 4
+expectgm ScoreboardRace idle
+scene saveas ScoreboardRace
+wait 10
+expectlvfile ScoreboardRace 1
+log EXLEVEL ScoreboardRace done

@@ -3,9 +3,9 @@
 -- React to an event from a referenced component and drive another one.
 --
 -- IMPORTANT: the two locals in the External Dependencies block are filled in by the game from
--- the object's `references` wiring, matching by name. The Spec Editor does not configure
--- references yet, so on a plain sandbox object they stay nil. The nil checks below keep the
--- script from erroring in that case.
+-- the object's `references` wiring, matching by name: in the editor, Details > Game data > the
+-- script's slots (click a slot, then click the object). Until wired they are nil; the nil checks
+-- below keep the script from erroring in that case.
 
 -- External Dependencies
 local Button: BasicButtonComponent = nil

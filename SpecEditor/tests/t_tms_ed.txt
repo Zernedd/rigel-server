@@ -1,0 +1,26 @@
+log TMS start
+enter
+wait 3
+raw SE|ALLOWTEAM|1
+raw SE|SBADD|TicketManagerSpawner|0.0,-2600.0,-27000.0
+wait 4
+raw SE|SBADD|teamChange|400.0,-2600.0,-27000.0
+wait 4
+raw SE|SBADD|teamChange|-400.0,-2600.0,-27000.0
+wait 6
+pickat BP_TeamChangeActor_C -400 -2600 -27000
+dataset sd/TeamIndex num 1
+wait 3
+pickat BP_TeamChangeActor_C 400 -2600 -27000
+luaufile ZTeam
+wait 10
+pickat BP_TeamChangeActor_C 400 -2600 -27000
+luauref ZTeam Changer TeamChangeComponent self
+wait 8
+pickat BP_TicketManagerSpawner_C 0 -2600 -27000
+luaufile ZTms
+wait 10
+pickat BP_TicketManagerSpawner_C 0 -2600 -27000
+luauref ZTms Spawner TicketManagerSpawnerComponent self
+wait 20
+log TMS done

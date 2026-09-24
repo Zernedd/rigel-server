@@ -1,0 +1,6 @@
+log MCPIDLE start
+enter
+wait 3
+log MCPIDLE ready
+wait 420
+log MCPIDLE end

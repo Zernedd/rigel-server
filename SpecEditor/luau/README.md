@@ -8,6 +8,11 @@ luau/
   README.md                 this file
   Rigel-Luau-Guide.pdf      the guide (setup, API, examples, troubleshooting)
   Rigel-Quest-Guide.pdf     making quests, kiosks, start buttons, saving quests on the backend
+  Rigel-GameModes-Guide.pdf game modes: teams, rounds, scores, traps, balls, scoreboards, your own code
+  Rigel-MCP-Guide.pdf       let an AI agent (Claude, Codex ...) build, script and test in the editor
+  mcp/rigel_mcp.py          the MCP server for AI agents (see mcp/MCP.md)
+  examples/gamemodes/       game mode code (each has an example level in levels/, installed to RigelLevels)
+  tools/luau-lsp.exe        the type checker the MCP's check_luau uses (MIT, see LUAU-LSP-LICENSE.txt)
   generate_defs.py          builds types/rigel.d.luau from the game's class dump
   types/rigel.d.luau        luau-lsp definitions: components, events, globals
   types/api_index.json      the same API as JSON (used to build the guide's appendix)
@@ -123,6 +128,22 @@ end
 Naming rule: the C++ UFunction `UGolfCupComponent::SetCupVisibility(bool Show)` is
 `cup:setCupVisibility(show)`. Type names drop the `U`/`A` prefix (`UGolfCupComponent` becomes
 `GolfCupComponent`, `ADiscEntity` becomes `DiscEntity`).
+
+## Game modes
+
+Toolbar **Game Modes** (or Details > Game Modes) makes team games: an area with its own teams, rounds and scores,
+team changers, roles for buttons/traps/walls/timers/ball spawners/scoreboards, and your own Luau through hooks
+(`OnRoundStart`, `OnScore`, ...) and the `Rigel.*` library. Six example levels come ready to open. The full guide is
+**Rigel-GameModes-Guide.pdf**.
+
+## AI agents (MCP)
+
+`mcp/rigel_mcp.py` is an MCP server: Claude Code, Claude Desktop, Codex and other agents can use the editor through
+it -- look around, place and edit objects, make levels and game modes, and write Luau with a real type check
+(`check_luau`), attach it, read its log and fix it. Setup and everything an agent needs to know:
+**Rigel-MCP-Guide.pdf** (or `mcp/MCP.md`).
+
+    claude mcp add rigel -- python "%USERPROFILE%\Documents\RigelScripts\mcp\rigel_mcp.py"
 
 ## Regenerating the definitions
 

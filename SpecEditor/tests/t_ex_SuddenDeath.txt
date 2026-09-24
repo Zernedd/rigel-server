@@ -1,0 +1,46 @@
+log EXLEVEL SuddenDeath start
+enter
+wait 3
+raw SE|GMNEW|SuddenDeath|0,2500,-28625|2|4,4|Blue,Red
+wait 10
+raw SE|GMSET|RigelMode1|start_mode|button
+raw SE|GMSET|RigelMode1|round_time|120
+raw SE|GMSET|RigelMode1|countdown|3
+raw SE|GMTEAM|RigelMode1|1|-700,1200,-28625
+raw SE|GMTEAM|RigelMode1|2|700,1200,-28625
+raw SE|SBADD|BasicButton|-1300.0,2500.0,-28625.0
+raw SE|SBADD|BasicButton|0.0,1700.0,-28625.0
+raw SE|SBADD|BasicButton|1300.0,2500.0,-28625.0
+raw SE|SBADD|Timer|700.0,1700.0,-28625.0
+raw SE|SBADD|aa_se_LE_BP_Text|0.0,2900.0,-28375.0
+raw SE|SBADD|DataTable|0.0,3800.0,-28475.0
+raw SE|SBADD|Scoreboard|-1300.0,3700.0,-28375.0
+wait 10
+gmrole BP_BasicButton_C SuddenDeath score:1 0
+gmrole BP_BasicButton_C SuddenDeath start 1
+gmrole BP_BasicButton_C SuddenDeath score:2 2
+gmrole BP_Timer_C SuddenDeath timer 0
+gmrole LE_BP_TableScoreboard_C SuddenDeath score_table 0
+pickat LE_BP_Text_C 0 2900 -28375
+rotate 180
+wait 2
+pickat LE_BP_TableScoreboard_C 0 3800 -28475
+rotate 180
+wait 2
+pickat BP_ScoreboardA_C -1300 3700 -28375
+rotate 180
+wait 2
+raw SE|SBSET|LE_BP_Text_C@0.000,2900.000,-28375.000|props/Text|text|{Note}
+wait 6
+gmapply SuddenDeath
+wait 10
+raw SE|GMCTL|RigelMode1|start
+wait 8
+expectgm SuddenDeath running
+raw SE|GMCTL|RigelMode1|reset
+wait 4
+expectgm SuddenDeath idle
+scene saveas SuddenDeath
+wait 10
+expectlvfile SuddenDeath 1
+log EXLEVEL SuddenDeath done

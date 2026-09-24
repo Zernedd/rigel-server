@@ -1,0 +1,6 @@
+log mock start
+wait 15
+goto -600 -2600 -26950 6
+log mock at blue changer
+goto 0 -2000 -26950 150
+log mock done

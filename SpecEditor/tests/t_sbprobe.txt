@@ -1,0 +1,24 @@
+log SB start
+enter
+wait 3
+raw SE|GMNEW|Arena|0,-2600,-27000|2|3,3|Blue,Red
+wait 10
+raw SE|SBADD|Scoreboard|0.0,-2000.0,-27000.0
+raw SE|SBADD|Scoreboard_OLD|600.0,-2000.0,-27000.0
+raw SE|SBADD|ScoreboardHalfCourtA|-600.0,-2000.0,-27000.0
+raw SE|SBADD|ScoreboardSideboard|0.0,-1400.0,-27000.0
+raw SE|SBADD|DataTable|600.0,-1400.0,-27000.0
+wait 8
+camto 0 -2600 -26800
+wait 2
+pickat BP_ScoreboardA_C 0 -2000 -27000
+comps
+pickat BP_Score_C 600 -2000 -27000
+comps
+pickat BP_ScoreboardAHalfCourt_C -600 -2000 -27000
+comps
+pickat LE_BP_ScoreboardA_Sideboard_C 0 -1400 -27000
+comps
+pickat LE_BP_TableScoreboard_C 600 -1400 -27000
+comps
+log SB done

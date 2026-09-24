@@ -14,6 +14,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstring>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <filesystem>
@@ -23,6 +24,41 @@
 namespace se {
 namespace {
 bool CanPlace();   // below (the open level): placing needs one
+
+// ==== UI TOUR (tests: "uitour" op) ====
+// Opens every tab and popup of the editor in turn -- with whatever is on the server -- so a crash in any UI
+// path shows up in a test run instead of in a player's hands. Each step lasts ~1.2 s and logs "[uitour] <step>".
+bool g_gmWindow = false;                 // the Game Modes window (toolbar / Details tab)
+int g_tourStep = -1;
+double g_tourAt = 0;
+const char* const kTourSteps[] = { "tab:Details", "select:any", "tab:Details", "select:scripted", "tab:Details", "popup:slotcands",
+                                   "tab:Quest Editor", "tab:Levels", "popup:saveas", "popup:nolevel", "popup:deletelevel",
+                                   "tab:Game Modes", "gm:select", "popup:gm_new", "popup:gm_example", "popup:gm_preview",
+                                   "popup:gm_delete", "window:gm", "window:gm", "popup:quickadd", "popup:problem", "tab:Details" };
+const char* TourStep() { return g_tourStep >= 0 && g_tourStep < (int)(sizeof(kTourSteps) / sizeof(kTourSteps[0])) ? kTourSteps[g_tourStep] : ""; }
+bool TourIs(const char* step) { return strcmp(TourStep(), step) == 0; }
+std::string g_tourForce;                                // docs/tests: open this popup once (a tour step name)
+std::string g_tabForce;                                 // docs/tests: select this Details tab once
+float g_gmScrollReq = -1.0f;                            // docs/tests: scroll the Game Modes window's right pane
+bool TourOnce(const char* step)                         // true on the first frame of that step
+{
+    if (!g_tourForce.empty() && g_tourForce == step) { g_tourForce.clear(); return true; }
+    static int s_fired = -2;
+    if (!TourIs(step) || s_fired == g_tourStep) return false;
+    s_fired = g_tourStep;
+    return true;
+}
+ImGuiTabItemFlags TourTab(const char* tab)
+{
+    if (!g_tabForce.empty() && g_tabForce == tab) { g_tabForce.clear(); return ImGuiTabItemFlags_SetSelected; }
+    const std::string want = std::string("tab:") + tab;
+    return TourIs(want.c_str()) || (strcmp(tab, "Game Modes") == 0 && TourStep()[0] == 'g') ||
+           (strcmp(tab, "Game Modes") == 0 && strncmp(TourStep(), "popup:gm_", 9) == 0) ||
+           (strcmp(tab, "Levels") == 0 && (TourIs("popup:deletelevel"))) ||
+           (strcmp(tab, "Details") == 0 && TourIs("popup:slotcands"))
+               ? ImGuiTabItemFlags_SetSelected : 0;
+}
+
 // ---- undo / redo (Ctrl+Z / Ctrl+Y): the model is defined further down, next to the shortcuts ----
 struct UndoXf { std::string handle, cls, path; Vec3 loc; Rot rot; Vec3 scl{ 1, 1, 1 }; };
 void UndoRecordMove(const std::vector<UndoXf>& before, const std::vector<UndoXf>& after, bool coalesce);
@@ -366,7 +402,7 @@ void DrawGizmoOverlay(const Snapshot& snap, const SceneObject* sel)
     double depth = 1.0;
     if (!W2S(v, at, c, &depth)) return;                // selection is behind the camera
 
-    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
     const float  L = 95.0f;                            // handle length on screen, pixels
     const double worldPerPx = depth / v.focal;         // at the object's depth
 
@@ -810,7 +846,7 @@ const PaletteItem* FindItem(const Snapshot& snap, const std::string& byPathOrNam
 void DrawViewportMarkers(const Snapshot& snap)
 {
     const View v = MakeView(snap);
-    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
     const ImVec2 mouse = ImGui::GetIO().MousePos;
     const bool canPick = v.valid && snap.inEditor && !ImGui::GetIO().WantCaptureMouse && g_dragAxis < 0 &&
                          !g_gizmoHover && !Cam().looking && g_dragPath.empty();
@@ -1024,6 +1060,143 @@ void IconLevel(ImDrawList* dl, ImVec2 p, float s)
     dl->AddLine(ImVec2(p.x + s * 0.12f, p.y + s * 0.5f), ImVec2(p.x + s * 0.88f, p.y + s * 0.5f), kFg, 1.2f);
     dl->AddEllipse(ImVec2(p.x + s * 0.5f, p.y + s * 0.5f), ImVec2(s * 0.16f, s * 0.38f), kFg, 0, 16, 1.2f);
 }
+// Pieces the game has no icon for (the sandbox prefabs: traps, buttons, timers, scoreboards ...) get a drawn one
+// that says what they are, instead of the generic blueprint icon. Returns false when nothing specific fits.
+bool IconGlyph(ImDrawList* dl, ImVec2 p, float s, const std::string& cls)
+{
+    auto has = [&](const char* k) { return cls.find(k) != std::string::npos; };
+    const ImVec2 c(p.x + s * 0.5f, p.y + s * 0.5f);
+    const float r = s * 0.38f, lw = (std::max)(1.5f, s * 0.07f);
+    auto bg = [&](ImU32 col) { dl->AddRectFilled(p, ImVec2(p.x + s, p.y + s), col, s * 0.16f); };
+    const ImU32 W = IM_COL32(245, 245, 245, 255), K = IM_COL32(25, 25, 25, 255);
+    if (has("TeamChange"))                                          // a door arch with an arrow through it
+    {
+        bg(IM_COL32(40, 110, 200, 255));
+        dl->AddRect(ImVec2(c.x - r * 0.7f, c.y - r), ImVec2(c.x + r * 0.7f, c.y + r), W, r * 0.5f, 0, lw);
+        dl->AddLine(ImVec2(c.x - r * 1.1f, c.y), ImVec2(c.x + r * 0.9f, c.y), W, lw);
+        dl->AddTriangleFilled(ImVec2(c.x + r * 1.1f, c.y), ImVec2(c.x + r * 0.6f, c.y - r * 0.4f), ImVec2(c.x + r * 0.6f, c.y + r * 0.4f), W);
+        return true;
+    }
+    if (has("Button"))                                              // a big round button on a base
+    {
+        bg(IM_COL32(60, 60, 66, 255));
+        dl->AddRectFilled(ImVec2(c.x - r, c.y + r * 0.35f), ImVec2(c.x + r, c.y + r * 0.8f), IM_COL32(150, 150, 160, 255), 3);
+        dl->AddCircleFilled(ImVec2(c.x, c.y), r * 0.62f, IM_COL32(220, 50, 45, 255));
+        dl->AddCircle(ImVec2(c.x, c.y), r * 0.62f, W, 0, lw * 0.6f);
+        return true;
+    }
+    if (has("Spinner") || has("Fan") || has("Rotating"))           // blades around a hub
+    {
+        bg(IM_COL32(200, 120, 30, 255));
+        for (int i = 0; i < 3; ++i)
+        {
+            const float a = i * 2.0944f;
+            dl->AddLine(c, ImVec2(c.x + cosf(a) * r, c.y + sinf(a) * r), W, lw * 1.4f);
+            dl->AddCircleFilled(ImVec2(c.x + cosf(a) * r, c.y + sinf(a) * r), lw * 1.2f, W);
+        }
+        dl->AddCircleFilled(c, lw * 1.6f, K);
+        return true;
+    }
+    if (has("Laser"))                                               // two emitters and a beam
+    {
+        bg(IM_COL32(120, 30, 40, 255));
+        dl->AddRectFilled(ImVec2(p.x + s * 0.12f, c.y - r * 0.4f), ImVec2(p.x + s * 0.24f, c.y + r * 0.4f), W);
+        dl->AddRectFilled(ImVec2(p.x + s * 0.76f, c.y - r * 0.4f), ImVec2(p.x + s * 0.88f, c.y + r * 0.4f), W);
+        dl->AddLine(ImVec2(p.x + s * 0.24f, c.y), ImVec2(p.x + s * 0.76f, c.y), IM_COL32(255, 70, 70, 255), lw * 1.3f);
+        return true;
+    }
+    if (has("Trap") || has("Flipper") || has("FallingBlock") || has("StickySlime") || has("BunnyHop"))   // warning sign
+    {
+        bg(IM_COL32(200, 120, 30, 255));
+        dl->AddTriangleFilled(ImVec2(c.x, c.y - r), ImVec2(c.x + r, c.y + r * 0.8f), ImVec2(c.x - r, c.y + r * 0.8f), IM_COL32(250, 210, 40, 255));
+        dl->AddLine(ImVec2(c.x, c.y - r * 0.35f), ImVec2(c.x, c.y + r * 0.3f), K, lw * 1.2f);
+        dl->AddCircleFilled(ImVec2(c.x, c.y + r * 0.55f), lw * 0.8f, K);
+        return true;
+    }
+    if (has("ForceField") || has("Shield"))                         // a hex shield
+    {
+        bg(IM_COL32(20, 90, 110, 255));
+        dl->AddNgon(c, r, IM_COL32(90, 230, 255, 255), 6, lw);
+        dl->AddNgon(c, r * 0.5f, IM_COL32(90, 230, 255, 160), 6, lw * 0.7f);
+        return true;
+    }
+    if (has("TimerDisplay"))                                        // a small screen reading 00:00
+    {
+        bg(IM_COL32(50, 50, 60, 255));
+        dl->AddRectFilled(ImVec2(p.x + s * 0.1f, c.y - r * 0.55f), ImVec2(p.x + s * 0.9f, c.y + r * 0.55f), K, 3);
+        dl->AddText(nullptr, s * 0.3f, ImVec2(p.x + s * 0.16f, c.y - s * 0.15f), IM_COL32(90, 255, 120, 255), "0:45");
+        return true;
+    }
+    if (has("Timer"))                                               // a clock
+    {
+        bg(IM_COL32(70, 70, 140, 255));
+        dl->AddCircle(c, r, W, 0, lw);
+        dl->AddLine(c, ImVec2(c.x, c.y - r * 0.7f), W, lw);
+        dl->AddLine(c, ImVec2(c.x + r * 0.5f, c.y), W, lw);
+        return true;
+    }
+    if (has("TableScoreboard"))                                     // a table: rows and columns
+    {
+        bg(IM_COL32(40, 70, 60, 255));
+        dl->AddRect(ImVec2(c.x - r, c.y - r * 0.8f), ImVec2(c.x + r, c.y + r * 0.8f), W, 2, 0, lw * 0.7f);
+        for (int i = 1; i < 3; ++i) dl->AddLine(ImVec2(c.x - r, c.y - r * 0.8f + i * r * 0.53f), ImVec2(c.x + r, c.y - r * 0.8f + i * r * 0.53f), W, lw * 0.5f);
+        dl->AddLine(ImVec2(c.x - r * 0.1f, c.y - r * 0.8f), ImVec2(c.x - r * 0.1f, c.y + r * 0.8f), W, lw * 0.5f);
+        return true;
+    }
+    if (has("Score"))                                               // a scoreboard screen reading 2:1
+    {
+        bg(IM_COL32(40, 60, 100, 255));
+        dl->AddRectFilled(ImVec2(p.x + s * 0.1f, c.y - r * 0.7f), ImVec2(p.x + s * 0.9f, c.y + r * 0.6f), K, 3);
+        dl->AddText(nullptr, s * 0.36f, ImVec2(p.x + s * 0.26f, c.y - s * 0.2f), IM_COL32(255, 200, 60, 255), "2:1");
+        dl->AddLine(ImVec2(c.x, c.y + r * 0.6f), ImVec2(c.x, c.y + r), W, lw);
+        return true;
+    }
+    if (has("BallSpawner") || has("JakeBall") || has("DiscEntity"))   // a ball with a spawn arrow
+    {
+        bg(IM_COL32(30, 100, 60, 255));
+        dl->AddCircleFilled(ImVec2(c.x, c.y + r * 0.2f), r * 0.6f, IM_COL32(240, 240, 240, 255));
+        dl->AddCircle(ImVec2(c.x, c.y + r * 0.2f), r * 0.6f, K, 0, lw * 0.5f);
+        dl->AddLine(ImVec2(c.x - r * 0.6f, c.y + r * 0.2f), ImVec2(c.x + r * 0.6f, c.y + r * 0.2f), K, lw * 0.5f);
+        dl->AddTriangleFilled(ImVec2(c.x, c.y - r * 1.05f), ImVec2(c.x - r * 0.3f, c.y - r * 0.6f), ImVec2(c.x + r * 0.3f, c.y - r * 0.6f), W);
+        return true;
+    }
+    if (has("Goal"))                                                // a net
+    {
+        bg(IM_COL32(30, 100, 60, 255));
+        dl->AddRect(ImVec2(c.x - r, c.y - r * 0.7f), ImVec2(c.x + r, c.y + r * 0.7f), W, 0, 0, lw);
+        for (int i = 1; i < 4; ++i) dl->AddLine(ImVec2(c.x - r + i * r * 0.5f, c.y - r * 0.7f), ImVec2(c.x - r + i * r * 0.5f, c.y + r * 0.7f), W, lw * 0.4f);
+        return true;
+    }
+    if (has("_Text") || has("Text_C"))                              // a sign with a T
+    {
+        bg(IM_COL32(90, 90, 90, 255));
+        dl->AddText(nullptr, s * 0.7f, ImVec2(c.x - s * 0.18f, c.y - s * 0.38f), W, "T");
+        return true;
+    }
+    if (has("Teleport"))                                            // rings
+    {
+        bg(IM_COL32(90, 40, 140, 255));
+        dl->AddCircle(c, r, IM_COL32(210, 160, 255, 255), 0, lw);
+        dl->AddCircle(c, r * 0.55f, IM_COL32(210, 160, 255, 255), 0, lw);
+        return true;
+    }
+    if (has("GameStateManager"))                                    // gears: the mode's controller
+    {
+        bg(IM_COL32(80, 80, 80, 255));
+        dl->AddNgon(c, r, W, 8, lw);
+        dl->AddCircleFilled(c, r * 0.35f, W);
+        return true;
+    }
+    if (has("SlidingPlatform") || has("Platform"))                  // a slab with arrows
+    {
+        bg(IM_COL32(70, 90, 110, 255));
+        dl->AddRectFilled(ImVec2(c.x - r, c.y - r * 0.2f), ImVec2(c.x + r, c.y + r * 0.2f), W, 2);
+        dl->AddTriangleFilled(ImVec2(c.x - r * 1.1f, c.y - r * 0.55f), ImVec2(c.x - r * 0.6f, c.y - r * 0.8f), ImVec2(c.x - r * 0.6f, c.y - r * 0.3f), W);
+        dl->AddTriangleFilled(ImVec2(c.x + r * 1.1f, c.y - r * 0.55f), ImVec2(c.x + r * 0.6f, c.y - r * 0.8f), ImVec2(c.x + r * 0.6f, c.y - r * 0.3f), W);
+        return true;
+    }
+    return false;
+}
 void IconFor(ImDrawList* dl, ImVec2 p, float s, const std::string& cls)
 {
     if (const unsigned long long tex = IconTexture(cls))   // the game's own icon for this item
@@ -1032,6 +1205,7 @@ void IconFor(ImDrawList* dl, ImVec2 p, float s, const std::string& cls)
         dl->AddImageRounded(static_cast<ImTextureID>(tex), p, ImVec2(p.x + s, p.y + s), ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE, s * 0.12f);
         return;
     }
+    if (IconGlyph(dl, p, s, cls)) return;
     if (cls.rfind("LE_SM_", 0) == 0) IconCube(dl, p, s, IM_COL32(170, 190, 210, 255));
     else IconBlueprint(dl, p, s);
 }
@@ -1355,6 +1529,9 @@ void SceneTick(const Snapshot& snap)
     wasDirty = g_sceneDirty;
     if (snap.inEditor && !g_sceneName.empty() && g_sceneDirty && ImGui::GetTime() - dirtyAt > g_autosaveSec)
         SceneSave(g_sceneName, true);
+    if (TourOnce("popup:saveas")) g_saveAsOpen = true;
+    if (TourOnce("popup:nolevel")) g_needLevelAsk = true;
+    if (TourOnce("popup:deletelevel")) g_lvDeleteAsk = "ZUiTourNoSuchLevel";
     if (g_saveAsOpen) { ImGui::OpenPopup("Save Level As"); g_saveAsOpen = false; }
     if (g_needLevelAsk) { ImGui::OpenPopup("No Level Open"); g_needLevelAsk = false; }
     if (ImGui::BeginPopupModal("No Level Open", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
@@ -1513,7 +1690,10 @@ void DrawMainToolbar(const Snapshot& snap, ImVec2 pos, float w, float h)
 
     // "+ Add": UE5's quick-add menu, one submenu per category.
     ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(56, 56, 56, 255));
-    if (ImGui::Button(" + Add ")) ImGui::OpenPopup("quickadd");
+    if (ImGui::Button(" Game Modes ")) g_gmWindow = !g_gmWindow;
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Make and run team games: teams, rounds, scores, traps, scoreboards, Luau.");
+    ImGui::SameLine();
+    if (ImGui::Button(" + Add ") || TourOnce("popup:quickadd")) ImGui::OpenPopup("quickadd");
     ImGui::PopStyleColor();
     if (ImGui::BeginPopup("quickadd"))
     {
@@ -2578,13 +2758,27 @@ std::wstring ScriptsDir()
         if (std::filesystem::exists(kit, ec))
         {
             std::filesystem::copy(kit, dir, std::filesystem::copy_options::recursive | std::filesystem::copy_options::skip_existing, ec);
-            for (const wchar_t* ours : { L"types", L"tools", L"Rigel-Luau-Guide.pdf", L"Rigel-Quest-Guide.pdf", L"README.md",
+            for (const wchar_t* ours : { L"types", L"tools", L"mcp", L"Rigel-Luau-Guide.pdf", L"Rigel-Quest-Guide.pdf", L"Rigel-GameModes-Guide.pdf",
+                                         L"Rigel-MCP-Guide.pdf", L"GAMEMODES.md", L"README.md",
                                          L".vscode\\tasks.json" })   // the Rigel checker task (Problems panel)
             {
                 const std::wstring from = kit + L"\\" + ours, to = dir + L"\\" + ours;
                 if (std::filesystem::exists(from, ec))
                     std::filesystem::copy(from, to, std::filesystem::copy_options::recursive | std::filesystem::copy_options::overwrite_existing, ec);
             }
+            // Example game mode projects: their levels go where levels live, and each mode's own code goes where the
+            // Game Modes window looks for it (GameModes\<mode name>.luau). Never over a file the user has.
+            wchar_t docs2[MAX_PATH] = {};
+            if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_PERSONAL, nullptr, 0, docs2)))
+            {
+                const std::wstring levels = std::wstring(docs2) + L"\\RigelLevels";
+                std::filesystem::create_directories(levels, ec);
+                if (std::filesystem::exists(kit + L"\\levels", ec))
+                    std::filesystem::copy(kit + L"\\levels", levels, std::filesystem::copy_options::skip_existing, ec);
+            }
+            std::filesystem::create_directories(dir + L"\\GameModes", ec);
+            if (std::filesystem::exists(kit + L"\\examples\\gamemodes", ec))
+                std::filesystem::copy(kit + L"\\examples\\gamemodes", dir + L"\\GameModes", std::filesystem::copy_options::skip_existing, ec);
         }
     }
     if (fresh)
@@ -3260,7 +3454,7 @@ void DrawScriptSlots(const Snapshot& snap, const SceneObject* sel, const std::st
         if (ImGui::ArrowButton("##cands", ImGuiDir_Down))
         {
             Command c{ CmdType::SlotScan }; c.str = sl.type; State().Push(c);
-            ImGui::OpenPopup("##slotcands");
+            ImGui::OpenPopup("##slotcands");   // (the tour opens it through the button path)
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Objects that fit this slot (they have a %s)", sl.type.c_str());
         if (ImGui::BeginPopup("##slotcands"))
@@ -3568,12 +3762,870 @@ void DrawLevels(const Snapshot& snap)
 }
 
 
+
+// ==== GAME MODES (the fabricator) ========================================================================
+// A game mode is an area of its own on the server (its own teams, state and scores -- see specedit.h, "GAME MODE
+// FABRICATOR"). This tab makes them, shows them live, gives the objects inside roles, and builds the mode's
+// controller script from those roles plus the author's own code (RigelScripts\GameModes\<name>.luau).
+struct GmInfo
+{
+    std::string id, name, state, level;
+    double at[3]{};
+    int nTeams = 0, round = 0, time = 0, winner = 0;
+    std::string names[8];
+    int maxes[8]{}, sizes[8]{}, scores[8]{};
+    std::map<std::string, std::string> sets;
+};
+const double kGmHalf[3] = { 3881.0, 4733.0, 950.0 };     // a mode's area (the slot class's box), half-size in cm
+std::vector<std::string> GmSplit(const std::string& s, char sep)
+{
+    std::vector<std::string> v;
+    for (size_t b = 0; b <= s.size();) { size_t e = s.find(sep, b); if (e == std::string::npos) e = s.size(); v.push_back(s.substr(b, e - b)); b = e + 1; }
+    return v;
+}
+GmInfo GmParse(const std::string& rec)
+{
+    GmInfo g;
+    const auto f = GmSplit(rec, '~');
+    if (f.size() < 14) return g;
+    g.id = f[0]; g.name = f[1];
+    sscanf_s(f[2].c_str(), "%lf,%lf,%lf", &g.at[0], &g.at[1], &g.at[2]);
+    g.nTeams = (std::min)(8, atoi(f[3].c_str()));
+    const auto nm = GmSplit(f[4], ','), mx = GmSplit(f[5], ','), sz = GmSplit(f[11], ','), sc = GmSplit(f[12], ',');
+    for (int t = 0; t < g.nTeams; ++t)
+    {
+        g.names[t] = t < (int)nm.size() ? nm[t] : "";
+        g.maxes[t] = t < (int)mx.size() ? atoi(mx[t].c_str()) : 0;
+        g.sizes[t] = t < (int)sz.size() ? atoi(sz[t].c_str()) : 0;
+        g.scores[t] = t < (int)sc.size() ? atoi(sc[t].c_str()) : 0;
+    }
+    for (const auto& kv : GmSplit(f[6], ';'))
+    {
+        const size_t e = kv.find('=');
+        if (e != std::string::npos && e > 0) g.sets[kv.substr(0, e)] = kv.substr(e + 1);
+    }
+    g.state = f[7]; g.level = f[8]; g.round = atoi(f[9].c_str()); g.time = atoi(f[10].c_str()); g.winner = atoi(f[13].c_str());
+    return g;
+}
+std::string GmSetting(const GmInfo& g, const std::string& k, const char* def)
+{
+    auto it = g.sets.find(k);
+    return it == g.sets.end() ? std::string(def) : it->second;
+}
+bool GmInside(const GmInfo& g, const Vec3& p, double margin = 0.0)
+{
+    return fabs(p.x - g.at[0]) <= kGmHalf[0] + margin && fabs(p.y - g.at[1]) <= kGmHalf[1] + margin && fabs(p.z - g.at[2]) <= kGmHalf[2] + margin;
+}
+std::string GmGuid(const std::string& handle) { return handle.substr(0, handle.find('_')); }
+// A number field that reports once the edit is finished: typing commits when the field is left (or Enter), the
+// +/- buttons commit straight away. (ImGui's EnterReturnsTrue isn't allowed on number fields -- it asserted.)
+bool GmIntCommit(const char* label, int* v, int stepFast)
+{
+    // *v is refreshed from the server every frame, so what the user is typing lives here until it's committed.
+    static std::unordered_map<ImGuiID, int> s_edit;
+    const ImGuiID id = ImGui::GetID(label);
+    auto it = s_edit.find(id);
+    int val = it != s_edit.end() ? it->second : *v;
+    const bool changed = ImGui::InputInt(label, &val, 1, stepFast);
+    const bool active = ImGui::IsItemActive();
+    if (active || changed) s_edit[id] = val;
+    if ((changed && !active) || ImGui::IsItemDeactivatedAfterEdit()) { *v = val; s_edit.erase(id); return true; }
+    if (!active) s_edit.erase(id);
+    return false;
+}
+void GmSend(const std::string& line) { Command c{ CmdType::SendRaw }; c.str = line; State().Push(c); }
+
+// Roles: what an object does in the mode. Each becomes a typed slot in the generated script.
+struct GmRole { const char* key; const char* label; const char* type; const char* help; bool param; const char* paramLabel; };
+const GmRole kGmRoles[] = {
+    { "", "(no role)", "", "Just part of the arena.", false, "" },
+    { "start", "Start button", "BasicButtonComponent", "Pressing it starts a round (when no round is on).", false, "" },
+    { "score", "Score button", "BasicButtonComponent", "Pressing it during a round gives the team points.", true, "team" },
+    { "trap_round", "Trap - on during rounds", "ToggleableComponent", "Switched on when a round starts, off when it ends.", false, "" },
+    { "trap_pulse", "Trap - pulses during rounds", "ToggleableComponent", "Flips on/off every N seconds while a round is on.", true, "seconds" },
+    { "trap_fired", "Trap - fired by trap buttons", "ToggleableComponent", "Switched on for a while when a trap button is pressed.", false, "" },
+    { "trap_button", "Trap button", "BasicButtonComponent", "Fires every 'fired by trap buttons' trap for N seconds (during rounds).", true, "seconds" },
+    { "wall_lobby", "Wall - between rounds only", "PhysicalComponent", "Solid and visible between rounds, gone while a round is on (keep players out / in).", false, "" },
+    { "wall_round", "Wall - during rounds only", "PhysicalComponent", "Only there while a round is on.", false, "" },
+    { "timer", "Round timer", "TimerComponent", "Counts the countdown, then the round (or up, with no round limit).", false, "" },
+    { "ball", "Ball spawner", "BallSpawnerComponent", "The server spawns (or resets) its ball when a round starts. Rigel.resetBalls() does it any time.", false, "" },
+    { "score_board", "Scoreboard (score + clock)", "ScoreComponent", "The classic Score board: shows team 1 / team 2 points.", false, "" },
+    { "score_table", "Score table", "DataTableComponent", "A table: one row per team with its name, score, players and rounds won.", false, "" },
+};
+const GmRole* GmRoleOf(const std::string& key)
+{
+    for (const auto& r : kGmRoles) if (key == r.key) return &r;
+    return &kGmRoles[0];
+}
+// The component a role needs, as the palette/object knows it: does this class plausibly have it?
+bool GmRoleFits(const GmRole& r, const std::string& cls)
+{
+    const std::string t = r.type;
+    if (t.empty()) return true;
+    if (t == "BasicButtonComponent") return cls.find("Button") != std::string::npos;
+    if (t == "ToggleableComponent") return cls.find("Trap") != std::string::npos || cls.find("Switch") != std::string::npos || cls.find("Sliding") != std::string::npos;
+    if (t == "TimerComponent") return cls.find("Timer") != std::string::npos;
+    if (t == "BallSpawnerComponent") return cls.find("BallSpawner") != std::string::npos;
+    if (t == "ScoreComponent") return cls == "BP_Score_C";
+    if (t == "DataTableComponent") return cls.find("TableScoreboard") != std::string::npos;
+    return true;   // PhysicalComponent: most placed pieces
+}
+
+bool GmIsToggleWall(const std::string& cls)   // force fields / shields: toggled, not shown / hidden
+{
+    return cls.find("ForceField") != std::string::npos || cls.find("Shield") != std::string::npos;
+}
+std::string GmSlotName(const std::string& roleKey, int n)
+{
+    std::string s;
+    bool up = true;
+    for (char c : roleKey) { if (c == '_') { up = true; continue; } s += up ? static_cast<char>(toupper(static_cast<unsigned char>(c))) : c; up = false; }
+    return s + std::to_string(n);
+}
+std::string GmFileStem(const std::string& name)
+{
+    std::string o;
+    for (char c : name) o += (isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-') ? c : '_';
+    return o;
+}
+std::wstring GmCodePath(const GmInfo& g)
+{
+    const std::wstring dir = ScriptsDir() + L"\\GameModes";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    const std::string stem = GmFileStem(g.name);
+    return dir + L"\\" + std::wstring(stem.begin(), stem.end()) + L".luau";
+}
+// The author's own code: made from a template the first time.
+std::string GmUserCode(const GmInfo& g, bool create)
+{
+    const std::wstring path = GmCodePath(g);
+    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES && create)
+        if (FILE* f = _wfopen(path.c_str(), L"wb"))
+        {
+            const std::string t =
+                "-- Your code for the game mode \"" + g.name + "\". The Game Modes window puts it into the mode's controller\n"
+                "-- script (with the roles you gave objects) whenever you click Apply -- or on every save if Auto-apply is on.\n"
+                "-- Don't write BeginPlay here (the controller has it); use these hooks instead -- all optional:\n"
+                "--   OnLobby()                          no round on (after a reset or a round's result)\n"
+                "--   OnCountdown(seconds)               a round is about to start\n"
+                "--   OnRoundStart(round)                a round started (round = 1, 2, ...)\n"
+                "--   OnRoundEnd(winner)                 a round ended (winner = team number, 0 = draw)\n"
+                "--   OnTeamChanged(team, size, oldSize) someone joined / left a team\n"
+                "--   OnScore(team, score, oldScore)     a team's score changed\n"
+                "--   OnTime(secondsLeft)                every second of a countdown or round\n"
+                "-- Everything in Rigel.* works here: Rigel.addScore(1), Rigel.endRound(2), Rigel.teamSize(1), Rigel.setting(\"round_time\") ...\n"
+                "-- (see the Game Modes guide). Objects with roles are available by their slot names, shown in the window.\n\n"
+                "function OnRoundStart(round: number)\n\tlog(\"Round \" .. round .. \" started\")\nend\n\n"
+                "function OnRoundEnd(winner: number)\n\tif winner > 0 then\n\t\tlog(Rigel.teamName(winner) .. \" won\")\n\telse\n\t\tlog(\"Draw\")\n\tend\nend\n";
+            fwrite(t.data(), 1, t.size(), f);
+            fclose(f);
+        }
+    return ReadFileUtf8(path);
+}
+struct GmSlot { std::string slot, type, targetHandle; };
+// Build the controller script. Returns the source; fills the slots to wire.
+std::string GmBuildScript(const Snapshot& snap, const GmInfo& g, std::vector<GmSlot>& slots)
+{
+    std::map<std::string, int> counters;
+    std::vector<std::pair<std::string, std::string>> roleOf;   // slot -> role value
+    std::string head, body;
+    head += "-- [Rigel game mode] " + g.name + " -- generated by the Game Modes window. Don't edit this one: give objects roles in\n"
+            "-- the window, and write your own code in RigelScripts\\GameModes\\" + GmFileStem(g.name) + ".luau (included below).\n";
+    for (const auto& o : snap.objects)
+    {
+        if (!GmInside(g, o.location)) continue;
+        auto it = g.sets.find("role." + GmGuid(o.handle));
+        if (it == g.sets.end() || it->second.empty()) continue;
+        const std::string key = it->second.substr(0, it->second.find(':'));
+        const GmRole* r = GmRoleOf(key);
+        if (!r->type[0]) continue;
+        const std::string slot = GmSlotName(key, ++counters[key]);
+        // A wall is whatever the object is: force fields / shields only have a ToggleableComponent (on = the wall
+        // is up), other pieces are shown / hidden through their PhysicalComponent.
+        std::string type = r->type;
+        if (key.rfind("wall_", 0) == 0 && GmIsToggleWall(o.className)) type = "ToggleableComponent";
+        head += "local " + slot + ": " + type + " = nil\n";
+        slots.push_back({ slot, type, o.handle });
+        roleOf.push_back({ slot, it->second + (type == "ToggleableComponent" && key.rfind("wall_", 0) == 0 ? "|toggle" : "") });
+    }
+    std::string user = GmUserCode(g, false);
+    body += "\n-- ==== your code (GameModes\\" + GmFileStem(g.name) + ".luau) ====\n" + user + "\n-- ==== generated wiring ====\n";
+    body += "local function __call(name: string, ...) local f = _G[name] or getfenv()[name]; if type(f) == \"function\" then local ok, err = pcall(f, ...); if not ok then warn(\"[RigelError] \" .. name .. \": \" .. tostring(err)) end end end\n";
+    body += "local __trapFiredUntil = 0\n";
+    // Scoreboards: the monitor boards show the game mode's own team scores / rounds won (Gamemode:setTeamScore,
+    // as the stock TKB mode does); the classic Score board and the score table get theirs through their slots.
+    body += "local function __boards()\n\tfor t = 1, Rigel.teams() do\n"
+            "\t\tpcall(function() Gamemode:setTeamScore(t - 1, Rigel.score(t)) end)\n"
+            "\t\tpcall(function() Gamemode:setTeamRoundsWon(t - 1, Rigel.roundsWon(t)) end)\n";
+    for (const auto& sr : roleOf)
+        if (sr.second == "score_board") body += "\t\tpcall(function() " + sr.first + ":setTeamPoints(t - 1, Rigel.score(t)) end)\n";
+    body += "\tend\n";
+    for (const auto& sr : roleOf)
+        if (sr.second == "score_table")
+        {
+            const std::string& s = sr.first;
+            body += "\tpcall(function()\n\t\t" + s + ":beginDataTransaction()\n"
+                    "\t\tfor c, h in { \"Team\", \"Score\", \"Players\", \"Wins\" } do " + s + ":setCellText(h, 0, c - 1) end\n"
+                    "\t\tfor t = 1, Rigel.teams() do\n"
+                    "\t\t\t" + s + ":setCellText(Rigel.teamName(t), t, 0)\n"
+                    "\t\t\t" + s + ":setCellText(tostring(Rigel.score(t)), t, 1)\n"
+                    "\t\t\t" + s + ":setCellText(Rigel.teamSize(t) .. \"/\" .. Rigel.teamMax(t), t, 2)\n"
+                    "\t\t\t" + s + ":setCellText(tostring(Rigel.roundsWon(t)), t, 3)\n"
+                    "\t\tend\n\t\t" + s + ":endDataTransaction()\n\tend)\n";
+        }
+    body += "end\n";
+    body += "function BeginPlay()\n";
+    body += "\tlocal function onState(st: string)\n";
+    // state-driven roles
+    for (const auto& sr : roleOf)
+    {
+        const std::string key = sr.second.substr(0, sr.second.find_first_of(":|"));
+        const std::string& s = sr.first;
+        if (key == "trap_round") body += "\t\tpcall(function() if st == \"running\" then " + s + ":luaEnable() else " + s + ":luaDisable() end end)\n";
+        else if (key == "trap_pulse" || key == "trap_fired") body += "\t\tif st ~= \"running\" then pcall(function() " + s + ":luaDisable() end) end\n";
+        else if (key == "wall_lobby" || key == "wall_round")
+        {
+            const bool toggle = sr.second.find("|toggle") != std::string::npos;
+            const std::string up = key == "wall_lobby" ? "st ~= \"running\"" : "st == \"running\"";   // when the wall stands
+            if (toggle) body += "\t\tpcall(function() if " + up + " then " + s + ":luaEnable() else " + s + ":luaDisable() end end)\n";
+            else body += "\t\tpcall(function() if " + up + " then " + s + ":showLua(); " + s + ":setDefaultCollision() else " + s + ":hideLua(); " + s + ":disableCollisionLua() end end)\n";
+        }
+        else if (key == "timer") body += "\t\tpcall(function()\n\t\t\tif st == \"countdown\" then " + s + ":start(Rigel.timeLeft())\n\t\t\telseif st == \"running\" then if Rigel.settingNumber(\"round_time\") > 0 then " + s + ":start(Rigel.timeLeft()) else " + s + ":startCountUpFromZero() end\n\t\t\telse " + s + ":stopAndResetTimer() end\n\t\tend)\n";
+        // "ball": the server spawns / resets the ball itself when a round starts (a Luau spawnBall on every machine made
+        // client-only balls). The slot stays available to your code: Ball1:getSpawnedBall(), Rigel.resetBalls().
+    }
+    body += "\tend\n";
+    body += "\tonState(Rigel.state())\n\t__boards()\n";
+    body += "\tRigel.onStateChanged(function(st: string, old: string)\n\t\tonState(st)\n\t\t__boards()\n"
+            "\t\tif st == \"running\" and old ~= \"running\" then pcall(function() Gamemode:startGame() end)\n"
+            "\t\telseif (st == \"ended\" or st == \"idle\") and (old == \"running\" or old == \"countdown\") then pcall(function() Gamemode:stopGame() end) end\n"
+            "\t\tif st == \"idle\" then __call(\"OnLobby\")\n"
+            "\t\telseif st == \"countdown\" then __call(\"OnCountdown\", Rigel.timeLeft())\n"
+            "\t\telseif st == \"running\" then __call(\"OnRoundStart\", Rigel.round())\n"
+            "\t\telseif st == \"ended\" then __call(\"OnRoundEnd\", Rigel.winner()) end\n\tend)\n";
+    body += "\tRigel.onTeamChanged(function(team: number, size: number, old: number) __boards(); __call(\"OnTeamChanged\", team, size, old) end)\n";
+    body += "\tRigel.onScoreChanged(function(team: number, score: number, old: number) __boards(); __call(\"OnScore\", team, score, old) end)\n";
+    body += "\tRigel.onTimeChanged(function(t: number) __call(\"OnTime\", t) end)\n";
+    // event-driven roles
+    std::string firedList;
+    for (const auto& sr : roleOf) if (sr.second.rfind("trap_fired", 0) == 0) firedList += (firedList.empty() ? "" : ", ") + sr.first;
+    for (const auto& sr : roleOf)
+    {
+        const std::string key = sr.second.substr(0, sr.second.find_first_of(":|"));
+        const std::string param = sr.second.find(':') == std::string::npos ? std::string() : sr.second.substr(sr.second.find(':') + 1);
+        const std::string& s = sr.first;
+        if (key == "start")
+            body += "\tif " + s + " then " + s + ".OnButtonPressEvent.Listen(function() local st = Rigel.state(); if st == \"idle\" or st == \"ended\" then Rigel.startRound() end end) end\n";
+        else if (key == "score")
+            body += "\tif " + s + " then " + s + ".OnButtonPressEvent.Listen(function() if Rigel.isRunning() then Rigel.addScore(" + std::to_string((std::max)(1, atoi(param.c_str()))) + ", 1) end end) end\n";
+        else if (key == "trap_pulse")
+        {
+            const double sec = (std::max)(0.5, atof(param.c_str()) > 0 ? atof(param.c_str()) : 3.0);
+            char b[32]; snprintf(b, sizeof(b), "%.2f", sec);
+            body += "\tdo local on = false; LuauClock.createTimer(" + std::string(b) + ", function() if Rigel.isRunning() then on = not on; pcall(function() if on then " + s + ":luaEnable() else " + s + ":luaDisable() end end) end end) end\n";
+        }
+        else if (key == "trap_button" && !firedList.empty())
+        {
+            const double sec = atof(param.c_str()) > 0 ? atof(param.c_str()) : 5.0;
+            char b[32]; snprintf(b, sizeof(b), "%.2f", sec);
+            body += "\tif " + s + " then " + s + ".OnButtonPressEvent.Listen(function()\n\t\tif not Rigel.isRunning() or LuauClock.getTime() < __trapFiredUntil then return end\n"
+                    "\t\t__trapFiredUntil = LuauClock.getTime() + " + std::string(b) + "\n"
+                    "\t\tfor _, t in { " + firedList + " } do pcall(function() t:luaEnable() end) end\n"
+                    "\t\tLuauClock.timeout(" + std::string(b) + "):andThen(function() for _, t in { " + firedList + " } do pcall(function() t:luaDisable() end) end end)\n\tend) end\n";
+        }
+    }
+    body += "end\n";
+    return head + body;
+}
+
+std::string g_gmSel;                     // selected mode id
+char g_gmNewName[40] = "My Game";
+int  g_gmNewTeams = 2;
+int  g_gmNewMax[4] = { 4, 4, 4, 4 };
+char g_gmNewNames[4][24] = { "Blue", "Red", "Green", "Yellow" };
+bool g_gmAutoApply = true;
+std::map<std::string, FILETIME> g_gmCodeWritten;   // per mode id: the custom code file's time when last applied
+std::string g_gmPreview;                 // "Show generated script"
+
+void GmApply(const Snapshot& snap, const GmInfo& g)
+{
+    auto it = g.sets.find("controller");
+    const SceneObject* ctl = nullptr;
+    if (it != g.sets.end()) for (const auto& o : snap.objects) if (o.handle.rfind(it->second, 0) == 0) ctl = &o;
+    if (!ctl) { Notes().Set("The game mode's controller (its Game State Manager) isn't here any more - make the mode again."); return; }
+    std::vector<GmSlot> slots;
+    GmUserCode(g, true);
+    const std::string src = GmBuildScript(snap, g, slots);
+    const std::string script = "GM_" + GmFileStem(g.name) + ".luau";
+    { Command c{ CmdType::LuauAttach }; c.str = ctl->handle; c.str2 = script; c.str3 = src; State().Push(c); }
+    for (const auto& sl : slots) { Command c{ CmdType::LuauRef }; c.str = ctl->handle; c.str2 = script; c.str3 = sl.slot; c.str4 = sl.type; c.str5 = sl.targetHandle; State().Push(c); }
+    Log("[gamemode] applied %s: %zu slot(s), %zu byte(s)", script.c_str(), slots.size(), src.size());
+    Notes().Set("Applied the script for '" + g.name + "' (" + std::to_string(slots.size()) + " object(s) wired).");
+    WIN32_FILE_ATTRIBUTE_DATA fa{};
+    if (GetFileAttributesExW(GmCodePath(g).c_str(), GetFileExInfoStandard, &fa)) g_gmCodeWritten[g.id] = fa.ftLastWriteTime;
+}
+
+// A piece to place, with its icon: class in the palette, and a role it gets straight away.
+struct GmPiece { const char* cls; const char* label; const char* role; };
+const GmPiece kGmPieces[] = {
+    { "BP_BasicButton_C", "Start button", "start" },
+    { "BP_BasicButton_C", "Score button", "score:1" },
+    { "BP_BasicButton_C", "Trap button", "trap_button:5" },
+    { "BP_Trap_Spinner_C", "Spinner trap", "trap_round" },
+    { "BP_Trap_TrapDoor_C", "Trap door", "trap_fired" },
+    { "BP_Trap_Laser_C", "Laser trap", "trap_pulse:3" },
+    { "BP_Trap_Fan_C", "Fan trap", "trap_round" },
+    { "BP_Trap_Flipper_C", "Flipper trap", "trap_fired" },
+    { "BP_Trap_FallingBlock_C", "Falling block", "trap_fired" },
+    { "BP_Trap_BunnyHop_C", "Bunny hop", "trap_round" },
+    { "BP_Trap_StickySlime_C", "Sticky slime", "trap_round" },
+    { "BP_Trap_RotatingPlatform_C", "Rotating platform", "trap_round" },
+    { "BP_SlidingPlatform_C", "Sliding platform", "trap_round" },
+    { "BP_ForceFieldA_C", "Force field", "wall_lobby" },
+    { "BP_Timer_C", "Round timer", "timer" },
+    { "BP_TimerDisplay_C", "Timer display", "" },
+    { "BP_ScoreboardA_C", "Scoreboard monitor", "" },
+    { "LE_BP_ScoreboardA_Sideboard_C", "Side scoreboard", "" },
+    { "BP_Score_C", "Score board", "score_board" },
+    { "LE_BP_TableScoreboard_C", "Score table", "score_table" },
+    { "LE_BP_Text_C", "Text sign", "" },
+    { "BP_BallSpawner_C", "Ball spawner", "ball" },
+    { "BP_JakeBallSpawner_C", "Jake ball spawner", "ball" },
+    { "BP_Goal_C", "Goal", "" },
+    { "BP_DeathrunResetTeleporter_C", "Reset teleporter", "" },
+};
+struct GmPendingRole { std::string mode, role, cls; std::vector<std::string> before; double at = 0; };
+std::vector<GmPendingRole> g_gmPendingRoles;   // placed from the piece list: give the role once it shows up
+
+void GmAdoptPending(const Snapshot& snap)
+{
+    for (size_t i = 0; i < g_gmPendingRoles.size();)
+    {
+        auto& p = g_gmPendingRoles[i];
+        bool done = false;
+        for (const auto& o : snap.objects)
+            if (o.className == p.cls && std::find(p.before.begin(), p.before.end(), o.handle) == p.before.end())
+            {
+                if (!p.role.empty()) GmSend("SE|GMSET|" + p.mode + "|role." + GmGuid(o.handle) + "|" + p.role);
+                done = true;
+                break;
+            }
+        if (done || ImGui::GetTime() - p.at > 15.0) g_gmPendingRoles.erase(g_gmPendingRoles.begin() + i); else ++i;
+    }
+}
+
+void DrawGameModeBoxes(const Snapshot& snap)
+{
+    GmAdoptPending(snap);
+    if (snap.gameModes.empty()) return;
+    const View v = MakeView(snap);
+    if (!v.valid) return;
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    for (const auto& rec : snap.gameModes)
+    {
+        const GmInfo g = GmParse(rec);
+        if (g.id.empty()) continue;
+        const bool sel = g.id == g_gmSel;
+        const ImU32 col = g.state == "running" ? IM_COL32(80, 220, 120, sel ? 230 : 140) : IM_COL32(240, 160, 40, sel ? 230 : 120);
+        DrawBox(dl, v, Vec3{ g.at[0], g.at[1], g.at[2] }, Vec3{ kGmHalf[0], kGmHalf[1], kGmHalf[2] }, col, sel ? 2.0f : 1.2f);
+        ImVec2 sp;
+        if (W2S(v, Vec3{ g.at[0], g.at[1], g.at[2] + kGmHalf[2] }, sp))
+        {
+            const std::string label = g.name + "  [" + g.state + "]";
+            dl->AddText(ImVec2(sp.x - ImGui::CalcTextSize(label.c_str()).x * 0.5f, sp.y - 16), col, label.c_str());
+        }
+    }
+}
+
+void DrawGameModeDetail(const Snapshot& snap, const GmInfo& g);   // below
+
+// The game modes UI. big = the Game Modes window: list on the left, the chosen mode on the right.
+void DrawGameModes(const Snapshot& snap, bool big = false)
+{
+    std::vector<GmInfo> modes;
+    for (const auto& r : snap.gameModes) { GmInfo g = GmParse(r); if (!g.id.empty()) modes.push_back(g); }
+    // ---- list + new
+    ImGui::TextUnformatted("Game modes");
+    ImGui::SameLine(ImGui::GetContentRegionAvail().x - 150);
+    if (ImGui::SmallButton("Refresh")) GmSend("SE|GMLIST");
+    ImGui::SameLine();
+    if (ImGui::SmallButton("+ New game mode") || TourOnce("popup:gm_new")) ImGui::OpenPopup("New game mode");
+    if (ImGui::BeginPopup("New game mode"))
+    {
+        ImGui::TextDisabled("A game mode is an area (about 78 x 95 x 19 m) with its own teams,\nrounds and scores. It is made around the point in front of the camera.");
+        ImGui::SetNextItemWidth(220);
+        ImGui::InputText("Name", g_gmNewName, sizeof(g_gmNewName));
+        ImGui::SetNextItemWidth(220);
+        ImGui::SliderInt("Teams", &g_gmNewTeams, 1, 4);
+        for (int t = 0; t < g_gmNewTeams; ++t)
+        {
+            ImGui::PushID(t);
+            ImGui::SetNextItemWidth(120);
+            ImGui::InputText("##tn", g_gmNewNames[t], sizeof(g_gmNewNames[t]));
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(90);
+            ImGui::InputInt("players max", &g_gmNewMax[t]);
+            g_gmNewMax[t] = (std::max)(1, (std::min)(64, g_gmNewMax[t]));
+            ImGui::PopID();
+        }
+        if (ImGui::Button("Create", ImVec2(120, 0)) && CanPlace())
+        {
+            const Vec3 at = InFront(snap, 3000.0);
+            std::string maxes, names;
+            for (int t = 0; t < g_gmNewTeams; ++t) { maxes += (t ? "," : "") + std::to_string(g_gmNewMax[t]); names += (t ? "," : "") + std::string(g_gmNewNames[t]); }
+            char b[512];
+            snprintf(b, sizeof(b), "SE|GMNEW|%s|%.0f,%.0f,%.0f|%d|%s|%s", g_gmNewName, at.x, at.y, at.z, g_gmNewTeams, maxes.c_str(), names.c_str());
+            GmSend(b);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(90, 0))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    if (modes.empty())
+    {
+        ImGui::Spacing();
+        ImGui::TextWrapped("Make team games: teams with team changers, rounds with a countdown and a time limit, scores, "
+                           "traps that switch on during a round, walls that open, start and score buttons -- and your own Luau.");
+        ImGui::TextDisabled("Click  + New game mode  (a level must be open).");
+        return;
+    }
+    if (TourOnce("gm:select") && !modes.empty()) g_gmSel = modes.front().id;
+    if (!big)
+    {
+        if (ImGui::Button("Open the Game Modes window", ImVec2(-1, 0))) g_gmWindow = true;
+        if (ImGui::BeginListBox("##gms", ImVec2(-1, (std::min)(4, (int)modes.size()) * ImGui::GetTextLineHeightWithSpacing() + 6)))
+        {
+            for (const auto& g : modes)
+            {
+                std::string players;
+                for (int t = 0; t < g.nTeams; ++t) players += (t ? " / " : "") + std::to_string(g.sizes[t]);
+                const std::string label = g.name + "   " + g.state + "   players " + players + "##" + g.id;
+                if (ImGui::Selectable(label.c_str(), g_gmSel == g.id)) g_gmSel = g.id;
+            }
+            ImGui::EndListBox();
+        }
+        const GmInfo* gp = nullptr;
+        for (const auto& g : modes) if (g.id == g_gmSel) gp = &g;
+        if (!gp) { ImGui::TextDisabled("Pick a game mode to edit it."); return; }
+        DrawGameModeDetail(snap, *gp);
+        return;
+    }
+    // ---- the window: modes on the left, the chosen one on the right
+    ImGui::BeginChild("##gmleft", ImVec2(260, 0), ImGuiChildFlags_Borders);
+    for (const auto& g : modes)
+    {
+        ImGui::PushID(g.id.c_str());
+        const ImVec4 stc = g.state == "running" ? ImVec4(0.35f, 0.9f, 0.45f, 1) : g.state == "countdown" ? ImVec4(0.95f, 0.8f, 0.3f, 1)
+                         : g.state == "ended" ? ImVec4(0.9f, 0.5f, 0.3f, 1) : ImVec4(0.7f, 0.7f, 0.7f, 1);
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        if (ImGui::Selectable("##row", g_gmSel == g.id, 0, ImVec2(0, ImGui::GetTextLineHeight() * 2 + 6))) g_gmSel = g.id;
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddText(ImVec2(at.x + 6, at.y + 2), IM_COL32(235, 235, 235, 255), g.name.c_str());
+        std::string sub = g.state;
+        for (int t = 0; t < g.nTeams; ++t) sub += (t ? " / " : "   ") + g.names[t] + " " + std::to_string(g.sizes[t]) + "p " + std::to_string(g.scores[t]);
+        dl->AddText(ImVec2(at.x + 6, at.y + 4 + ImGui::GetTextLineHeight()), ImGui::GetColorU32(stc), sub.c_str());
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+    ImGui::SameLine();
+    ImGui::BeginChild("##gmright", ImVec2(0, 0), ImGuiChildFlags_Borders);
+    if (g_gmScrollReq >= 0.0f) { ImGui::SetScrollY(g_gmScrollReq); g_gmScrollReq = -1.0f; }
+    const GmInfo* gp = nullptr;
+    for (const auto& g : modes) if (g.id == g_gmSel) gp = &g;
+    if (gp)
+    {
+        ImGui::PushFont(nullptr);
+        ImGui::TextUnformatted(gp->name.c_str());
+        ImGui::PopFont();
+        ImGui::Separator();
+        DrawGameModeDetail(snap, *gp);
+    }
+    else ImGui::TextDisabled("Pick a game mode on the left.");
+    ImGui::EndChild();
+}
+
+void DrawGameModeDetail(const Snapshot& snap, const GmInfo& g)
+{
+    const std::string pre = "SE|GMSET|" + g.id + "|";
+
+    // ---- status + controls
+    const ImVec4 stc = g.state == "running" ? ImVec4(0.35f, 0.9f, 0.45f, 1) : g.state == "countdown" ? ImVec4(0.95f, 0.8f, 0.3f, 1)
+                     : g.state == "ended" ? ImVec4(0.9f, 0.5f, 0.3f, 1) : ImVec4(0.7f, 0.7f, 0.7f, 1);
+    ImGui::TextColored(stc, "%s", g.state.c_str());
+    ImGui::SameLine();
+    if (g.state == "countdown" || g.state == "running" || g.state == "ended") ImGui::Text("  %d s   round %d", g.time, g.round);
+    else ImGui::Text("  round %d", g.round);
+    if (g.state == "ended") { ImGui::SameLine(); ImGui::Text("   winner: %s", g.winner > 0 ? g.names[g.winner - 1].c_str() : "draw"); }
+    for (int t = 0; t < g.nTeams; ++t)
+    {
+        if (t) ImGui::SameLine();
+        ImGui::Text("%s %d/%d  (%d pts)%s", g.names[t].c_str(), g.sizes[t], g.maxes[t], g.scores[t], t + 1 < g.nTeams ? "  |" : "");
+    }
+    if (ImGui::Button("Start round")) GmSend("SE|GMCTL|" + g.id + "|start");
+    ImGui::SameLine();
+    if (ImGui::Button("End round")) GmSend("SE|GMCTL|" + g.id + "|end");
+    ImGui::SameLine();
+    if (ImGui::Button("Reset")) GmSend("SE|GMCTL|" + g.id + "|reset");
+    ImGui::SameLine();
+    if (ImGui::Button("Go to"))
+    {
+        Command c{ CmdType::FocusCamera }; c.loc = { g.at[0], g.at[1], g.at[2] }; State().Push(c);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Delete...") || TourOnce("popup:gm_delete")) ImGui::OpenPopup("##gmdel");
+    if (ImGui::BeginPopup("##gmdel"))
+    {
+        ImGui::Text("Delete '%s' and every object in it?", g.name.c_str());
+        if (ImGui::Button("Delete")) { GmSend("SE|GMDEL|" + g.id); g_gmSel.clear(); ImGui::CloseCurrentPopup(); }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    if (g_gmSel.empty()) return;
+
+    // ---- teams
+    if (ImGui::CollapsingHeader("Teams", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        for (int t = 0; t < g.nTeams; ++t)
+        {
+            ImGui::PushID(t);
+            char nb[32]; strncpy_s(nb, g.names[t].c_str(), _TRUNCATE);
+            ImGui::SetNextItemWidth(110);
+            if (ImGui::InputText("##n", nb, sizeof(nb), ImGuiInputTextFlags_EnterReturnsTrue)) GmSend(pre + "team" + std::to_string(t + 1) + ".name|" + nb);
+            ImGui::SameLine();
+            int mx = g.maxes[t];
+            ImGui::SetNextItemWidth(80);
+            if (GmIntCommit("max##m", &mx, 1)) GmSend(pre + "team" + std::to_string(t + 1) + ".max|" + std::to_string(mx));
+            ImGui::SameLine();
+            const ImVec2 ip = ImGui::GetCursorScreenPos();
+            ImGui::Dummy(ImVec2(18, 18));
+            IconFor(ImGui::GetWindowDrawList(), ip, 18, "BP_TeamChangeActor_C");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Place team changer") && CanPlace())
+            {
+                const Vec3 at = InFront(snap, 300.0);
+                if (!GmInside(g, at)) Notes().Set("Look at a spot inside '" + g.name + "' (the orange box) to place its team changers.");
+                else { char b[160]; snprintf(b, sizeof(b), "SE|GMTEAM|%s|%d|%.0f,%.0f,%.0f", g.id.c_str(), t + 1, at.x, at.y, at.z); GmSend(b); }
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Walking into it puts a player on %s.", g.names[t].c_str());
+            ImGui::PopID();
+        }
+    }
+    // ---- rules
+    if (ImGui::CollapsingHeader("Rules", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        const char* modesTxt[] = { "manual", "button", "auto" };
+        const std::string sm = GmSetting(g, "start_mode", "manual");
+        int smi = sm == "button" ? 1 : sm == "auto" ? 2 : 0;
+        ImGui::SetNextItemWidth(140);
+        if (ImGui::Combo("Start", &smi, "Manual (this window / scripts)\0Start button\0Automatic (when every team has players)\0"))
+            GmSend(pre + "start_mode|" + modesTxt[smi]);
+        auto intRow = [&](const char* label, const char* key, const char* def, const char* tip) {
+            int v = atoi(GmSetting(g, key, def).c_str());
+            ImGui::SetNextItemWidth(110);
+            if (GmIntCommit(label, &v, 10)) GmSend(pre + key + "|" + std::to_string((std::max)(0, v)));
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+        };
+        intRow("Players per team to start", "min_players", "1", "Automatic start: every team needs at least this many.");
+        intRow("Countdown (s)", "countdown", "5", "Seconds between 'start' and the round beginning. 0 = straight away.");
+        intRow("Round length (s)", "round_time", "180", "0 = no time limit (the round ends by score or a script).");
+        intRow("Score to win", "score_to_win", "0", "A team reaching this wins at once. 0 = no score limit.");
+        intRow("Result shown (s)", "end_delay", "10", "How long the result stays before the mode goes back to the lobby.");
+        bool ar = GmSetting(g, "auto_restart", "0") == "1";
+        if (ImGui::Checkbox("Restart automatically", &ar)) GmSend(pre + "auto_restart|" + (ar ? "1" : "0"));
+        ImGui::SameLine();
+        bool se = GmSetting(g, "stop_when_empty", "1") == "1";
+        if (ImGui::Checkbox("End a round when every team is empty", &se)) GmSend(pre + "stop_when_empty|" + (se ? "1" : "0"));
+    }
+    // ---- pieces (icons)
+    if (ImGui::CollapsingHeader("Place pieces", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        ImGui::TextDisabled("Placed in front of the camera (must be inside the mode's box); each gets its role at once.");
+        const float tile = 78.0f;
+        const float avail = ImGui::GetContentRegionAvail().x;
+        const int perRow = (std::max)(1, static_cast<int>(avail / (tile + 8)));
+        int col = 0;
+        for (const auto& pc : kGmPieces)
+        {
+            const PaletteItem* it = FindItem(snap, pc.cls);
+            if (!it) continue;
+            if (col++ % perRow) ImGui::SameLine(0, 8);
+            ImGui::PushID(pc.label);
+            const ImVec2 q = ImGui::GetCursorScreenPos();
+            const bool clicked = ImGui::InvisibleButton("##pc", ImVec2(tile, tile + ImGui::GetTextLineHeight() * 2));
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            dl->AddRectFilled(q, ImVec2(q.x + tile, q.y + tile + ImGui::GetTextLineHeight() * 2), ImGui::IsItemHovered() ? IM_COL32(64, 64, 64, 255) : IM_COL32(40, 40, 40, 255), 3);
+            IconFor(dl, ImVec2(q.x + 10, q.y + 4), tile - 20, it->name);
+            // the label on up to two centred lines (split at the space nearest the middle)
+            std::string l1 = pc.label, l2;
+            if (ImGui::CalcTextSize(l1.c_str()).x > tile - 4)
+            {
+                size_t best = std::string::npos;
+                for (size_t k = 0; k < l1.size(); ++k)
+                    if (l1[k] == ' ' && (best == std::string::npos || std::abs((int)k - (int)l1.size() / 2) < std::abs((int)best - (int)l1.size() / 2))) best = k;
+                if (best != std::string::npos) { l2 = l1.substr(best + 1); l1 = l1.substr(0, best); }
+            }
+            for (std::string* l : { &l1, &l2 }) while (l->size() > 3 && ImGui::CalcTextSize(l->c_str()).x > tile - 4) l->pop_back();
+            const float lh = ImGui::GetTextLineHeight();
+            dl->AddText(ImVec2(q.x + (tile - ImGui::CalcTextSize(l1.c_str()).x) * 0.5f, q.y + tile - 4), IM_COL32(220, 220, 220, 255), l1.c_str());
+            if (!l2.empty()) dl->AddText(ImVec2(q.x + (tile - ImGui::CalcTextSize(l2.c_str()).x) * 0.5f, q.y + tile - 4 + lh), IM_COL32(220, 220, 220, 255), l2.c_str());
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s\n%s\nRole: %s", pc.label, it->name.c_str(), GmRoleOf(std::string(pc.role).substr(0, std::string(pc.role).find(':')))->label);
+            if (clicked && CanPlace())
+            {
+                const Vec3 at = InFront(snap, 400.0);
+                if (!GmInside(g, at)) Notes().Set("Look at a spot inside '" + g.name + "' (the orange box) first.");
+                else
+                {
+                    GmPendingRole pr;
+                    pr.mode = g.id; pr.role = pc.role; pr.cls = it->name; pr.at = ImGui::GetTime();
+                    for (const auto& o : snap.objects) pr.before.push_back(o.handle);
+                    g_gmPendingRoles.push_back(pr);
+                    SpawnAt(*it, at, 0.0);
+                }
+            }
+            ImGui::PopID();
+        }
+    }
+    // ---- objects + roles
+    if (ImGui::CollapsingHeader("Objects and roles", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        std::map<std::string, int> counters;
+        int shown = 0;
+        for (const auto& o : snap.objects)
+        {
+            if (!GmInside(g, o.location)) continue;
+            if (o.className.find("TeamChange") != std::string::npos) continue;   // teams section
+            if (o.handle.size() < 36 || o.handle[8] != '-') continue;              // station props: only placed objects take roles
+            ++shown;
+            ImGui::PushID(o.handle.c_str());
+            const ImVec2 ip = ImGui::GetCursorScreenPos();
+            ImGui::Dummy(ImVec2(20, 20));
+            IconFor(ImGui::GetWindowDrawList(), ip, 20, o.className);
+            ImGui::SameLine();
+            if (ImGui::SmallButton(PrettyName(o.className).c_str())) RequestUiSelect(o.handle);
+            auto it = g.sets.find("role." + GmGuid(o.handle));
+            const std::string val = it == g.sets.end() ? std::string() : it->second;
+            const std::string key = val.substr(0, val.find(':'));
+            const std::string param = val.find(':') == std::string::npos ? std::string() : val.substr(val.find(':') + 1);
+            const bool isCtl = g.sets.count("controller") && o.handle.rfind(g.sets.at("controller"), 0) == 0;
+            ImGui::SameLine(210);
+            if (isCtl) { ImGui::TextDisabled("controller (runs the mode's script)"); ImGui::PopID(); continue; }
+            ImGui::SetNextItemWidth(190);
+            if (ImGui::BeginCombo("##role", GmRoleOf(key)->label))
+            {
+                for (const auto& r : kGmRoles)
+                {
+                    if (!GmRoleFits(r, o.className)) continue;
+                    if (ImGui::Selectable(r.label, key == r.key))
+                        GmSend(pre + "role." + GmGuid(o.handle) + "|" + std::string(r.key) + (r.param ? std::string(":") + (param.empty() ? (std::string(r.key) == "score" ? "1" : "5") : param) : std::string()));
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", r.help);
+                }
+                ImGui::EndCombo();
+            }
+            const GmRole* r = GmRoleOf(key);
+            if (r->param)
+            {
+                ImGui::SameLine();
+                int pv = atoi(param.c_str());
+                ImGui::SetNextItemWidth(70);
+                if (GmIntCommit(r->paramLabel, &pv, 1))
+                    GmSend(pre + "role." + GmGuid(o.handle) + "|" + key + ":" + std::to_string((std::max)(1, pv)));
+            }
+            if (!key.empty()) { ImGui::SameLine(); ImGui::TextDisabled("%s", GmSlotName(key, ++counters[key]).c_str()); }
+            ImGui::PopID();
+        }
+        if (!shown) ImGui::TextDisabled("Nothing placed inside this game mode yet.");
+    }
+    // ---- script
+    if (ImGui::CollapsingHeader("Script", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        ImGui::TextWrapped("The mode's controller script is built from the roles above plus your code in GameModes\\%s.luau "
+                           "(hooks like OnRoundStart / OnRoundEnd / OnScore, and Rigel.* - see the Game Modes guide).", GmFileStem(g.name).c_str());
+        if (ImGui::Button("Apply script")) GmApply(snap, g);
+        ImGui::SameLine();
+        if (ImGui::Button("Edit my code"))
+        {
+            GmUserCode(g, true);
+            const std::wstring arg = L"\"" + GmCodePath(g) + L"\"";
+            if (reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", L"code", arg.c_str(), nullptr, SW_HIDE)) <= 32)
+                ShellExecuteW(nullptr, L"open", GmCodePath(g).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        }
+        ImGui::SameLine();
+        static std::wstring s_pickExample;
+        if (ImGui::Button("Start from example...") || TourOnce("popup:gm_example")) ImGui::OpenPopup("##gmex");
+        if (ImGui::BeginPopup("##gmex"))
+        {
+            ImGui::TextDisabled("Replaces your code for this mode with an example (each has a matching example level).");
+            std::error_code ec;
+            const std::wstring exDir = ScriptsDir() + L"\\examples\\gamemodes";
+            if (std::filesystem::exists(exDir, ec))
+                for (const auto& e : std::filesystem::directory_iterator(exDir, ec))
+                {
+                    if (e.path().extension() != L".luau") continue;
+                    const std::string nm = e.path().stem().string();
+                    if (ImGui::Selectable(nm.c_str())) s_pickExample = e.path().wstring();
+                    if (ImGui::IsItemHovered())
+                    {
+                        const std::string src = ReadFileUtf8(e.path().wstring());
+                        std::string head;
+                        for (size_t i = 0, lines = 0; i < src.size() && lines < 14; ++i) { head += src[i]; if (src[i] == '\n') ++lines; }
+                        ImGui::SetTooltip("%s", head.c_str());
+                    }
+                }
+            else ImGui::TextDisabled("(no examples installed)");
+            ImGui::EndPopup();
+        }
+        if (!s_pickExample.empty())
+        {
+            std::error_code ec;
+            std::filesystem::copy_file(s_pickExample, GmCodePath(g), std::filesystem::copy_options::overwrite_existing, ec);
+            Notes().Set(ec ? "Couldn't copy the example." : "Your code for '" + g.name + "' is now the example -- applying.");
+            s_pickExample.clear();
+            if (!ec) GmApply(snap, g);
+        }
+        ImGui::SameLine();
+        ImGui::Checkbox("Auto-apply on save", &g_gmAutoApply);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Show generated") || TourOnce("popup:gm_preview")) { std::vector<GmSlot> sl; g_gmPreview = GmBuildScript(snap, g, sl); ImGui::OpenPopup("##gmprev"); }
+        if (ImGui::BeginPopup("##gmprev"))
+        {
+            ImGui::InputTextMultiline("##src", g_gmPreview.data(), g_gmPreview.size() + 1, ImVec2(620, 420), ImGuiInputTextFlags_ReadOnly);
+            if (ImGui::Button("Copy")) ImGui::SetClipboardText(g_gmPreview.c_str());
+            ImGui::EndPopup();
+        }
+        // auto-apply when the author saves their file
+        if (g_gmAutoApply)
+        {
+            static double s_last = 0;
+            if (ImGui::GetTime() - s_last > 1.0)
+            {
+                s_last = ImGui::GetTime();
+                WIN32_FILE_ATTRIBUTE_DATA fa{};
+                if (GetFileAttributesExW(GmCodePath(g).c_str(), GetFileExInfoStandard, &fa))
+                {
+                    auto it = g_gmCodeWritten.find(g.id);
+                    if (it != g_gmCodeWritten.end() && CompareFileTime(&it->second, &fa.ftLastWriteTime) != 0)
+                    {
+                        if (CheckScriptFile(GmCodePath(g), GmFileStem(g.name))) GmApply(snap, g);
+                        else g_gmCodeWritten[g.id] = fa.ftLastWriteTime;
+                    }
+                }
+            }
+        }
+    }
+    // ---- text templates
+    if (ImGui::CollapsingHeader("Text on signs"))
+    {
+        ImGui::TextWrapped("Put these in a Text object's Text (Game data) and they update live for everyone:");
+        std::vector<std::string> toks = { g.name + ".state", g.name + ".time", g.name + ".round", g.name + ".winner", g.name + ".players" };
+        for (int t = 1; t <= g.nTeams; ++t)
+            for (const char* k : { "name", "score", "size", "max", "wins" }) toks.push_back(g.name + ".team" + std::to_string(t) + "." + k);
+        for (const auto& t : toks)
+        {
+            const std::string tk = "{" + t + "}";
+            ImGui::PushID(tk.c_str());
+            if (ImGui::SmallButton("copy")) ImGui::SetClipboardText(tk.c_str());
+            ImGui::SameLine();
+            ImGui::TextUnformatted(tk.c_str());
+            ImGui::PopID();
+        }
+    }
+    // ---- custom settings
+    if (ImGui::CollapsingHeader("Custom settings"))
+    {
+        ImGui::TextDisabled("Your own values, read in scripts with Rigel.setting(\"name\").");
+        for (const auto& kv : g.sets)
+        {
+            if (kv.first.rfind("custom.", 0) != 0) continue;
+            ImGui::BulletText("%s = %s", kv.first.substr(7).c_str(), kv.second.c_str());
+        }
+        static char ck[32] = "", cv[64] = "";
+        ImGui::SetNextItemWidth(120);
+        ImGui::InputTextWithHint("##ck", "name", ck, sizeof(ck));
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(160);
+        ImGui::InputTextWithHint("##cv", "value", cv, sizeof(cv));
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Set") && ck[0]) { GmSend(pre + "custom." + ck + "|" + cv); ck[0] = cv[0] = 0; }
+    }
+}
+
+// Test ops (tests/*.txt): gmrole <Class> x y z <mode> <role>  |  gmapply <mode>  |  gmpiece <mode> <piece label>  |
+// expectgm <mode> <state> [team scores csv]
+void GmTestOp(const Snapshot& snap, const std::string& line)
+{
+    std::vector<std::string> a;
+    for (size_t b = 0; b < line.size();) { size_t e = line.find(' ', b); if (e == std::string::npos) e = line.size(); if (e > b) a.push_back(line.substr(b, e - b)); b = e + 1; }
+    auto mode = [&](const std::string& n) -> GmInfo { for (const auto& r : snap.gameModes) { GmInfo g = GmParse(r); if (g.name == n) return g; } return GmInfo{}; };
+    if (a[0] == "gmrole" && a.size() >= 4)      // gmrole <Class> <mode> <role> [n]: the n-th (by x) object of that class in the mode
+    {
+        const GmInfo g = mode(a[2]);
+        std::vector<const SceneObject*> hits;
+        for (const auto& o : snap.objects)
+            if (!g.id.empty() && o.className.find(a[1]) != std::string::npos && GmInside(g, o.location)) hits.push_back(&o);
+        std::sort(hits.begin(), hits.end(), [](const SceneObject* x, const SceneObject* y) { return x->location.x < y->location.x; });
+        const size_t n = a.size() >= 5 ? static_cast<size_t>(atoi(a[4].c_str())) : 0;
+        if (n >= hits.size()) { Log("[gmtest] FAIL gmrole: mode '%s' %s, %zu %s inside", a[2].c_str(), g.id.empty() ? "missing" : "ok", hits.size(), a[1].c_str()); return; }
+        GmSend("SE|GMSET|" + g.id + "|role." + GmGuid(hits[n]->handle) + "|" + a[3]);
+        Log("[gmtest] role %s -> %s (%s)", hits[n]->handle.c_str(), a[3].c_str(), g.id.c_str());
+    }
+    else if (a[0] == "gmapply" && a.size() >= 2)
+    {
+        const GmInfo g = mode(a[1]);
+        if (g.id.empty()) { Log("[gmtest] FAIL gmapply: no mode '%s'", a[1].c_str()); return; }
+        GmApply(snap, g);
+        std::vector<GmSlot> sl;
+        Log("[gmtest] generated script:\n%s", GmBuildScript(snap, g, sl).c_str());
+    }
+    else if (a[0] == "gmpiece" && a.size() >= 3)
+    {
+        const GmInfo g = mode(a[1]);
+        std::string label = line.substr(line.find(a[2], line.find(a[1]) + a[1].size()));
+        for (const auto& pc : kGmPieces)
+        {
+            if (label != pc.label) continue;
+            const PaletteItem* it = FindItem(snap, pc.cls);
+            const Vec3 at{ g.at[0] + 300.0, g.at[1] + 300.0, g.at[2] };   // the tests can't aim the camera at the mode
+            if (!it || g.id.empty() || !GmInside(g, at)) { Log("[gmtest] FAIL gmpiece %s: item %d mode %d inside %d", pc.label, !!it, !g.id.empty(), !g.id.empty() && GmInside(g, at)); return; }
+            GmPendingRole pr;
+            pr.mode = g.id; pr.role = pc.role; pr.cls = it->name; pr.at = ImGui::GetTime();
+            for (const auto& o : snap.objects) pr.before.push_back(o.handle);
+            g_gmPendingRoles.push_back(pr);
+            g_placeBypass = true; SpawnAt(*it, at, 0.0); g_placeBypass = false;
+            Log("[gmtest] piece %s (%s) role %s at (%.0f,%.0f,%.0f)", pc.label, it->name.c_str(), pc.role, at.x, at.y, at.z);
+            return;
+        }
+        Log("[gmtest] FAIL gmpiece: no piece '%s'", label.c_str());
+    }
+    else if (a[0] == "gmwin")                    // gmwin [mode] | gmwin off: the Game Modes window
+    {
+        if (a.size() >= 2 && a[1] == "off") g_gmWindow = false;
+        else { g_gmWindow = true; if (a.size() >= 2) { const GmInfo g = mode(a[1]); if (!g.id.empty()) g_gmSel = g.id; } }
+        Log("[gmtest] game modes window %s", g_gmWindow ? "open" : "closed");
+    }
+    else if (a[0] == "gmscroll" && a.size() >= 2) g_gmScrollReq = static_cast<float>(atof(a[1].c_str()));
+    else if (a[0] == "gmpopup" && a.size() >= 2) g_tourForce = a[1];          // e.g. popup:gm_new, popup:saveas, popup:quickadd
+    else if (a[0] == "gmtab" && a.size() >= 2) g_tabForce = line.substr(line.find(a[1]));   // Details / Quest Editor / Levels / Game Modes
+    else if (a[0] == "expectgm" && a.size() >= 3)
+    {
+        const GmInfo g = mode(a[1]);
+        std::string sc;
+        for (int t = 0; t < g.nTeams; ++t) sc += (t ? "," : "") + std::to_string(g.scores[t]);
+        const bool ok = !g.id.empty() && g.state == a[2] && (a.size() < 4 || sc == a[3]);
+        std::string szs; for (int t = 0; t < g.nTeams; ++t) szs += (t ? "," : "") + std::to_string(g.sizes[t]);
+        Log("[gmtest] %s expectgm %s: state %s scores %s sizes %s (want %s %s), %zu setting(s)", ok ? "PASS" : "FAIL", a[1].c_str(), g.state.c_str(), sc.c_str(), szs.c_str(),
+            a[2].c_str(), a.size() >= 4 ? a[3].c_str() : "-", g.sets.size());
+    }
+}
+
 void DrawDetailsPanel(const Snapshot& snap, const SceneObject* sel, ImVec2 pos, ImVec2 size)
 {
     if (!BeginPanel("##details", pos, size)) { ImGui::End(); return; }
     if (ImGui::BeginTabBar("##dettabs"))
     {
-        if (ImGui::BeginTabItem("Details"))
+        if (ImGui::BeginTabItem("Details", nullptr, TourTab("Details")))
         {
             if (!sel)
             {
@@ -3674,14 +4726,19 @@ void DrawDetailsPanel(const Snapshot& snap, const SceneObject* sel, ImVec2 pos, 
             }
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("Quest Editor"))
+        if (ImGui::BeginTabItem("Quest Editor", nullptr, TourTab("Quest Editor")))
         {
             DrawQuestEditor(snap, sel);
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("Levels"))
+        if (ImGui::BeginTabItem("Levels", nullptr, TourTab("Levels")))
         {
             DrawLevels(snap);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Game Modes", nullptr, TourTab("Game Modes")))
+        {
+            DrawGameModes(snap);
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
@@ -4249,8 +5306,10 @@ void HandleShortcuts()
 }  // namespace
 
 static std::mutex g_uiSelectMx;
-static std::string g_uiSelectReq;                         // a test script asked the UI to select this handle
-void RequestUiSelect(const std::string& handle) { std::lock_guard<std::mutex> lk(g_uiSelectMx); g_uiSelectReq = handle; }
+static std::vector<std::string> g_uiSelectReqs;            // test scripts / the MCP bridge: UI actions, one per frame
+void RequestUiSelect(const std::string& handle) { std::lock_guard<std::mutex> lk(g_uiSelectMx); g_uiSelectReqs.push_back(handle); }
+std::string CurrentSceneName() { return g_sceneName; }
+bool CurrentSceneDirty() { return g_sceneDirty.load(); }
 
 std::wstring LevelsDir()
 {
@@ -4266,9 +5325,39 @@ void DrawEditorUI()
     const Snapshot snap = State().ReadSnapshot();
     g_undoSnap = &snap;
     UndoTick(snap);
+    if (g_tourStep >= 0 && ImGui::GetTime() - g_tourAt > 1.2)          // the UI tour: next step
+    {
+        g_tourAt = ImGui::GetTime();
+        ++g_tourStep;
+        if (!TourStep()[0])
+        {
+            g_tourStep = -1;
+            ProblemBox::Item it;
+            if (Problems().Front(it) && it.title == "UI tour") Problems().Pop();
+            ImGui::CloseCurrentPopup();
+            g_gmWindow = false;
+            Log("[uitour] done: every tab and popup drawn");
+        }
+        else
+        {
+            Log("[uitour] step %d %s", g_tourStep, TourStep());
+            if (TourIs("select:any") && !snap.objects.empty()) SelectHandle(snap.objects.front().handle);
+            if (TourIs("select:scripted"))
+                for (const auto& r : snap.gameModes)
+                {
+                    const GmInfo g = GmParse(r);
+                    auto c = g.sets.find("controller");
+                    if (c == g.sets.end()) continue;
+                    for (const auto& o : snap.objects) if (o.handle.rfind(c->second, 0) == 0) { SelectHandle(o.handle); break; }
+                    break;
+                }
+            if (TourIs("window:gm")) g_gmWindow = true;
+            if (TourIs("popup:problem")) { ProblemBox::Item it; it.title = "UI tour"; it.text = "A test problem (the tour closes it)."; Problems().Push(it); }
+        }
+    }
     {
         std::string req;
-        { std::lock_guard<std::mutex> lk(g_uiSelectMx); req.swap(g_uiSelectReq); }
+        { std::lock_guard<std::mutex> lk(g_uiSelectMx); if (!g_uiSelectReqs.empty()) { req = g_uiSelectReqs.front(); g_uiSelectReqs.erase(g_uiSelectReqs.begin()); } }
         if (req.empty()) {}
         else if (req[0] == '+') { ToggleMultiSel(req.substr(1)); Log("[ui] selection toggle %s -> %zu selected", req.c_str() + 1, g_selected.empty() ? 0 : 1 + g_multiSel.size()); }
         else if (req.rfind("!expectscene ", 0) == 0)
@@ -4280,6 +5369,7 @@ void DrawEditorUI()
             Log("[script] %s expectscene want='%s' dirty=%d have='%s' dirty=%d", ok ? "PASS" : "FAIL", want.c_str(), dirty,
                 g_sceneName.c_str(), (int)g_sceneDirty.load());
         }
+        else if (req == "!uitour") { g_tourStep = 0; g_tourAt = ImGui::GetTime(); g_uiVisible = true; Log("[uitour] step 0 %s", TourStep()); }
         else if (req == "!undo" || req == "!redo")
         {
             const bool ok = UndoApply(req == "!redo");
@@ -4318,6 +5408,7 @@ void DrawEditorUI()
             Log("[ui] synthetic drag (%d,%d) -> (%d,%d)", a, b, c, d);
         }
         else if (req == "!dup") { g_placeBypass = true; DuplicateSelected(snap); g_placeBypass = false; Log("[ui] duplicate: %zu pending", g_dupPending.size()); }
+        else if (req.rfind("!gm", 0) == 0 || req.rfind("!expectgm ", 0) == 0) GmTestOp(snap, req.substr(1));
         else if (req.rfind("!placeui ", 0) == 0)       // placeui <palette name>: place through the UI path (gated)
         {
             const PaletteItem* it = FindItem(snap, req.substr(9));
@@ -4493,6 +5584,15 @@ void DrawEditorUI()
 
     DrawGizmoOverlay(snap, sel);   // first: a handle click must win over a marker click
     DrawViewportMarkers(snap);
+    if (g_gmWindow)                                     // the Game Modes window: roomy, resizable, its own thing
+    {
+        const ImGuiViewport* vp = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f, vp->WorkPos.y + vp->WorkSize.y * 0.5f), ImGuiCond_FirstUseEver, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(ImVec2((std::min)(1100.0f, vp->WorkSize.x * 0.8f), (std::min)(780.0f, vp->WorkSize.y * 0.85f)), ImGuiCond_FirstUseEver);
+        if (ImGui::Begin("Game Modes##gmwin", &g_gmWindow, ImGuiWindowFlags_NoCollapse)) DrawGameModes(snap, true);
+        ImGui::End();
+    }
+    DrawGameModeBoxes(snap);
     HandleAssetDrag(snap);
     AdoptPreviewCoins(snap);
     ResendChangedScripts();

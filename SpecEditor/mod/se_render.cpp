@@ -20,6 +20,7 @@
 #include <mutex>
 #include "MinHook.h"
 #include "imgui.h"
+#include "imgui_internal.h"
 #include "backends/imgui_impl_win32.h"
 #include "backends/imgui_impl_dx12.h"
 
@@ -518,6 +519,87 @@ void SyntheticDragTick()
 }
 
 
+// The whole editor UI for one frame, fenced: an access violation or C++ exception in any panel is logged and the
+// frame is abandoned (the caller then repairs ImGui's state) instead of killing the game.
+bool SafeDrawEditorUI()
+{
+    static int s_faults = 0;
+    __try { DrawEditorUI(); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        if (s_faults++ < 20) se::Log("[ui] the editor UI faulted (code 0x%08X) -- frame skipped, the game carries on", GetExceptionCode());
+        return false;
+    }
+}
+
+// ---- screenshots (tests / the docs): the frame as presented, editor UI included, read back from the GPU ----
+// Screen grabs of the window fail when it isn't on top (or the desktop is locked); this reads the back buffer
+// itself. RequestScreenshot(path) -> the next presented frame is written as a 24-bit BMP.
+std::mutex g_shotMx;
+std::string g_shotPath;
+bool WriteBmp(const std::string& path, const uint8_t* src, UINT w, UINT h, UINT pitch, DXGI_FORMAT fmt)
+{
+    FILE* f = nullptr;
+    if (fopen_s(&f, path.c_str(), "wb") || !f) return false;
+    const UINT row = (w * 3 + 3) & ~3u;
+    const uint32_t dataSize = row * h, fileSize = 54 + dataSize;
+    uint8_t hdr[54] = { 'B', 'M' };
+    memcpy(hdr + 2, &fileSize, 4); const uint32_t off = 54; memcpy(hdr + 10, &off, 4);
+    const uint32_t ih = 40; memcpy(hdr + 14, &ih, 4);
+    const int32_t iw = static_cast<int32_t>(w), ihh = static_cast<int32_t>(h);
+    memcpy(hdr + 18, &iw, 4); memcpy(hdr + 22, &ihh, 4);
+    const uint16_t planes = 1, bpp = 24; memcpy(hdr + 26, &planes, 2); memcpy(hdr + 28, &bpp, 2);
+    memcpy(hdr + 34, &dataSize, 4);
+    fwrite(hdr, 1, 54, f);
+    std::vector<uint8_t> line(row, 0);
+    for (int y = static_cast<int>(h) - 1; y >= 0; --y)
+    {
+        const uint8_t* p = src + static_cast<size_t>(y) * pitch;
+        for (UINT x = 0; x < w; ++x)
+        {
+            uint8_t r, g, b;
+            if (fmt == DXGI_FORMAT_R10G10B10A2_UNORM)
+            {
+                uint32_t v; memcpy(&v, p + x * 4, 4);
+                r = static_cast<uint8_t>((v & 0x3FF) >> 2); g = static_cast<uint8_t>(((v >> 10) & 0x3FF) >> 2); b = static_cast<uint8_t>(((v >> 20) & 0x3FF) >> 2);
+            }
+            else if (fmt == DXGI_FORMAT_B8G8R8A8_UNORM || fmt == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)
+            { b = p[x * 4]; g = p[x * 4 + 1]; r = p[x * 4 + 2]; }
+            else { r = p[x * 4]; g = p[x * 4 + 1]; b = p[x * 4 + 2]; }
+            line[x * 3] = b; line[x * 3 + 1] = g; line[x * 3 + 2] = r;
+        }
+        fwrite(line.data(), 1, row, f);
+    }
+    fclose(f);
+    return true;
+}
+// Called with the command list open, the back buffer in RENDER_TARGET state; leaves it in PRESENT. Returns the
+// readback buffer to read after the list has executed (nullptr = no capture).
+ID3D12Resource* ShotRecord(ID3D12Resource* bb, D3D12_PLACED_SUBRESOURCE_FOOTPRINT& fp, UINT& rows, UINT64& total)
+{
+    const D3D12_RESOURCE_DESC d = bb->GetDesc();
+    UINT64 rowBytes = 0;
+    g_device->GetCopyableFootprints(&d, 0, 1, 0, &fp, &rows, &rowBytes, &total);
+    D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_READBACK;
+    D3D12_RESOURCE_DESC rd{};
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; rd.Width = total; rd.Height = 1; rd.DepthOrArraySize = 1; rd.MipLevels = 1;
+    rd.SampleDesc.Count = 1; rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ID3D12Resource* rb = nullptr;
+    if (FAILED(g_device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&rb))))
+        return nullptr;
+    D3D12_RESOURCE_BARRIER b{};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition.pResource = bb; b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    b.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET; b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    g_cmdList->ResourceBarrier(1, &b);
+    D3D12_TEXTURE_COPY_LOCATION dst{}; dst.pResource = rb; dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; dst.PlacedFootprint = fp;
+    D3D12_TEXTURE_COPY_LOCATION srcl{}; srcl.pResource = bb; srcl.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; srcl.SubresourceIndex = 0;
+    g_cmdList->CopyTextureRegion(&dst, 0, 0, 0, &srcl, nullptr);
+    b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE; b.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+    g_cmdList->ResourceBarrier(1, &b);
+    return rb;
+}
+
 HRESULT __stdcall Hook_Present(IDXGISwapChain3* sc, UINT interval, UINT flags)
 {
     se::g_presentCount.fetch_add(1, std::memory_order_relaxed);
@@ -531,9 +613,16 @@ HRESULT __stdcall Hook_Present(IDXGISwapChain3* sc, UINT interval, UINT flags)
 
     ImGui_ImplDX12_NewFrame();
     ImGui_ImplWin32_NewFrame();
+    if (se::g_uiMouseParked) ImGui::GetIO().AddMousePosEvent(-FLT_MAX, -FLT_MAX);   // docs/tests: no hover tooltips
     SyntheticDragTick();                            // tests: a scripted drag, fed after the real input so it wins
     ImGui::NewFrame();
-    DrawEditorUI();
+    {
+        // A fault anywhere in the editor UI must not take the game with it: catch it, repair ImGui's stacks
+        // (unclosed windows / popups / IDs) and carry on with the next frame.
+        ImGuiErrorRecoveryState rec;
+        ImGui::ErrorRecoveryStoreState(&rec);
+        if (!SafeDrawEditorUI()) ImGui::ErrorRecoveryTryToRecoverState(&rec);
+    }
     ImGui::Render();
 
     // ImGui lays out in the window's client pixels, but the game draws into its back buffer, which Windows
@@ -587,12 +676,45 @@ HRESULT __stdcall Hook_Present(IDXGISwapChain3* sc, UINT interval, UINT flags)
         g_cmdList->OMSetRenderTargets(1, &f.rtv, FALSE, nullptr);
         g_cmdList->SetDescriptorHeaps(1, &g_srvHeap);
         ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_cmdList);
-        b.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        b.Transition.StateAfter  = D3D12_RESOURCE_STATE_PRESENT;
-        g_cmdList->ResourceBarrier(1, &b);
+        std::string shotPath;
+        { std::lock_guard<std::mutex> lk(g_shotMx); shotPath.swap(g_shotPath); }
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{}; UINT rows = 0; UINT64 total = 0;
+        ID3D12Resource* rb = shotPath.empty() ? nullptr : ShotRecord(f.backbuffer, fp, rows, total);
+        if (!rb)
+        {
+            b.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            b.Transition.StateAfter  = D3D12_RESOURCE_STATE_PRESENT;
+            g_cmdList->ResourceBarrier(1, &b);
+        }
         g_cmdList->Close();
         ID3D12CommandList* lists[] = { g_cmdList };
         g_cmdQueue->ExecuteCommandLists(1, lists);
+        if (rb)
+        {
+            // wait for this one list (a single stall, only when a screenshot was asked for), then write the file
+            ID3D12Fence* fence = nullptr;
+            if (SUCCEEDED(g_device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))))
+            {
+                HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+                g_cmdQueue->Signal(fence, 1);
+                fence->SetEventOnCompletion(1, ev);
+                WaitForSingleObject(ev, 2000);
+                CloseHandle(ev);
+                fence->Release();
+            }
+            void* data = nullptr;
+            D3D12_RANGE rr{ 0, static_cast<SIZE_T>(total) };
+            const D3D12_RESOURCE_DESC d = f.backbuffer->GetDesc();
+            bool ok = false;
+            if (SUCCEEDED(rb->Map(0, &rr, &data)) && data)
+            {
+                ok = WriteBmp(shotPath, static_cast<const uint8_t*>(data) + fp.Offset, static_cast<UINT>(d.Width), d.Height, fp.Footprint.RowPitch, d.Format);
+                D3D12_RANGE none{ 0, 0 };
+                rb->Unmap(0, &none);
+            }
+            rb->Release();
+            se::Log("[shot] %s %s (%llux%u, format %d)", ok ? "saved" : "FAILED", shotPath.c_str(), d.Width, d.Height, (int)d.Format);
+        }
     }
     return g_presentOrig(sc, interval, flags);
 }
@@ -717,6 +839,8 @@ unsigned long long se::IconTexture(const std::string& itemName)
     return tex;
 }
 
+std::atomic<bool> se::g_uiMouseParked{ false };
+void se::RequestScreenshot(const std::string& path) { std::lock_guard<std::mutex> lk(g_shotMx); g_shotPath = path; }
 void se::StartSyntheticDrag(int sx, int sy, int ex, int ey)
 {
     POINT a{ sx, sy }, b{ ex, ey };

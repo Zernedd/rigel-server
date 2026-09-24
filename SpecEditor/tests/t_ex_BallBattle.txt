@@ -1,0 +1,47 @@
+log EXLEVEL BallBattle start
+enter
+wait 3
+raw SE|GMNEW|BallBattle|0,2500,-28625|2|4,4|Blue,Red
+wait 10
+raw SE|GMSET|RigelMode1|start_mode|button
+raw SE|GMSET|RigelMode1|score_to_win|5
+raw SE|GMSET|RigelMode1|round_time|300
+raw SE|GMSET|RigelMode1|countdown|3
+raw SE|GMTEAM|RigelMode1|1|-700,1200,-28625
+raw SE|GMTEAM|RigelMode1|2|700,1200,-28625
+raw SE|SBADD|BasicButton|-1500.0,3600.0,-28625.0
+raw SE|SBADD|BasicButton|0.0,1600.0,-28625.0
+raw SE|SBADD|BasicButton|1500.0,3600.0,-28625.0
+raw SE|SBADD|JakeBallSpawner|0.0,2700.0,-28525.0
+raw SE|SBADD|Scoreboard|0.0,3900.0,-28375.0
+raw SE|SBADD|Scoreboard_OLD|1400.0,1600.0,-28625.0
+raw SE|SBADD|aa_se_LE_BP_Text|-1400.0,1600.0,-28375.0
+wait 10
+gmrole BP_BasicButton_C BallBattle score:1 0
+gmrole BP_BasicButton_C BallBattle start 1
+gmrole BP_BasicButton_C BallBattle score:2 2
+gmrole BP_JakeBallSpawner_C BallBattle ball 0
+gmrole BP_Score_C BallBattle score_board 0
+pickat BP_ScoreboardA_C 0 3900 -28375
+rotate 180
+wait 2
+pickat BP_Score_C 1400 1600 -28625
+rotate 180
+wait 2
+pickat LE_BP_Text_C -1400 1600 -28375
+rotate 180
+wait 2
+raw SE|SBSET|LE_BP_Text_C@-1400.000,1600.000,-28375.000|props/Text|text|{Match}
+wait 6
+gmapply BallBattle
+wait 10
+raw SE|GMCTL|RigelMode1|start
+wait 8
+expectgm BallBattle running
+raw SE|GMCTL|RigelMode1|reset
+wait 4
+expectgm BallBattle idle
+scene saveas BallBattle
+wait 10
+expectlvfile BallBattle 1
+log EXLEVEL BallBattle done

@@ -1,0 +1,13 @@
+log EXLOAD start
+enter
+wait 3
+scene open BallBattle
+wait 20
+expectgm BallBattle idle
+expectnear BP_BasicButton_C 0 -5600 -27000 1 200
+expectnear BP_JakeBallSpawner_C 0 -2600 -26900 1 200
+expectnear BP_TeamChangeActor_C -800 -6500 -27000 1 200
+raw SE|GMCTL|RigelMode1|startnow
+wait 5
+expectgm BallBattle ended
+log EXLOAD done

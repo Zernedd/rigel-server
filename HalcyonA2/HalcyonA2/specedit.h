@@ -298,6 +298,9 @@ static void SbMoveFlush();                                                      
 static void SbEditorSlotTick(ULONGLONG now);                                                // below (editor-made slot)
 static void SbEditorSlotClearTick(ULONGLONG now);                                           // below
 static std::string g_sbSpawnCls;   // the editor class of the sandbox spawn in flight (for SbOwned)
+static bool SeTeamChangerAllowedAt(const double* loc);   // below (game modes)
+static void SeModeTick();   // below (game modes)
+static std::vector<SDK::AActor*> g_seFabSlots;   // game mode fabricator: every fabricated mode's slot (hosts first)
 static bool SeRefusedPrefab(const std::string& name);   // below (team changers)
 static std::string g_sbSpawnPath;  // ...and the palette path it was asked for (saved levels reload by it)
 static std::vector<std::string> g_sbPendingScripts;   // custom Luau script names for the spawn in flight
@@ -341,10 +344,14 @@ static void SeSpawn(SDK::UObject* pawn, const std::string& path, const std::stri
     if (!cls) return;
     if (SeRefusedPrefab(cls->GetName()))
     {
-        HxLog("[HalcyonA2][SPECEDIT] refused %s: team changers crash players outside a game mode arena\n", cls->GetName().c_str());
-        if (SDK::UObject* pc = SeCallerPC(pawn))
-            SeBroadcast("SE|NOTE|Team changers only work inside a game mode's arena - placed with the editor they crashed players, so they're refused.", pc);
-        return;
+        double tl[3] = { 0, 0, 0 };
+        if (!(SeVec(locs, tl) && SeTeamChangerAllowedAt(tl)))
+        {
+            HxLog("[HalcyonA2][SPECEDIT] refused %s: team changers only work inside a game mode\n", cls->GetName().c_str());
+            if (SDK::UObject* pc = SeCallerPC(pawn))
+                SeBroadcast("SE|NOTE|Team changers only work inside a game mode: open Window > Game Modes, make one, and place team changers inside its area.", pc);
+            return;
+        }
     }
 
     // -SpecEditSandbox: a prefab the sandbox knows is placed as a real sandbox object instead, so every
@@ -622,6 +629,8 @@ static void SeDropProxies(SDK::AActor* a)
 static void SeQuestTick();   // below
 
 static void SeTextTick();   // below (text from scripts)
+static void SbDeferredSetsTick();   // below (Game data writes that had to wait)
+static std::unordered_map<std::string, ULONGLONG> g_sbSpawnAt;   // sandbox idx -> when its node was created (see SbDeferredSet)
 static void SeLvTick();   // below (saved levels)
 static void SeCamMarkersTick(ULONGLONG now);   // below (editor camera markers)
 static void SpecEditTick()
@@ -629,7 +638,9 @@ static void SpecEditTick()
     if (!g_specEdit) return;
     SeQuestTick();
     SeLvTick();
+    SbDeferredSetsTick();
     SeTextTick();
+    SeModeTick();
     SbMoveFlush();
     const ULONGLONG now = GetTickCount64();
     SeCamMarkersTick(now);
@@ -1807,6 +1818,48 @@ static int SbOwnedNodeCore(void* lgmHandle, uint64_t objectsBits, uint64_t idxBi
     return r;
 }
 
+// ---- team changers never appear on top of a player ----
+// A team changer that spawns (or is rebuilt by a move) where a player stands gets its begin-overlap DURING the
+// spawn, before its component is bound to its node (TeamChangeComponent+0x268 still null). The game's handler
+// (0x53C48B0) then reads through that null on the player's own machine and the player's game crashes -- seen
+// 2026-09-24 with an unmodded PlayerNovBuild client standing where GMTEAM placed a changer (not every time:
+// it is a race). So a changer is only ever built where no player is: moves wait, new ones start at a free
+// spot in the same area and move in when the player has stepped off.
+constexpr double kSeTcClearCm = 500.0;
+static bool SeIsTeamChangerName(const std::string& n)
+{
+    std::string lo;
+    for (char c : n) lo += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    return lo.find("teamchange") != std::string::npos || lo.find("teamswitch") != std::string::npos;
+}
+// Where a VR player really is. The server's pawn actor does not follow the player's pose; the pose arrives in
+// the player entity's replicated frequent data (AVRPawn.Entity @0x928, FReplicatedFrequentData @0xF0, root
+// position @+0x10 -> entity+0x100). Falls back to the actor location while there is no entity/pose yet.
+static SDK::FVector SePawnPos(SDK::AActor* pawn)
+{
+    const uintptr_t ent = *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(pawn) + 0x928);
+    if (ent)
+    {
+        const double* r = reinterpret_cast<const double*>(ent + 0x100);
+        if (r[0] != 0.0 || r[1] != 0.0 || r[2] != 0.0) return SDK::FVector{ r[0], r[1], r[2] };
+    }
+    return pawn->K2_GetActorLocation();
+}
+static bool SePawnNear(const double* loc, double radius)
+{
+    static SDK::UClass* cls = nullptr;
+    if (!cls) cls = SDK::UObject::FindClassFast("VRPawn");
+    if (!cls) return false;
+    for (SDK::UObject* o : ClassObjects(cls))
+    {
+        if (!o || o->IsDefaultObject() || !*reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(o) + 0x2D0)) continue;   // no controller
+        const SDK::FVector l = SePawnPos(static_cast<SDK::AActor*>(o));
+        const double dx = l.X - loc[0], dy = l.Y - loc[1], dz = l.Z - loc[2];
+        if (dx * dx + dy * dy + dz * dz < radius * radius) return true;
+    }
+    return false;
+}
+
 // Moves waiting to be applied: object idx -> when it last moved.
 static std::unordered_map<std::string, ULONGLONG> g_sbMovePending;
 constexpr ULONGLONG kSbMoveSettleMs = 300;
@@ -1821,6 +1874,13 @@ static void SbMoveFlush()
         g_sbMovePending.erase(idx);
         const SbOwned* o = SbOwnedByIdx(idx);
         if (!o) continue;                                // deleted or rebuilt meanwhile
+        if ((SeIsTeamChangerName(o->cls) || SeIsTeamChangerName(o->uniqueId)) && SePawnNear(o->loc, kSeTcClearCm))
+        {
+            static ULONGLONG s_said = 0;
+            if (now - s_said > 5000) { s_said = now; HxLog("[HalcyonA2][SPECEDIT] team changer %s waits: a player is standing on its spot\n", idx.c_str()); }
+            g_sbMovePending[idx] = now;                   // try again once they have stepped off
+            continue;
+        }
         const SbOwned keep = *o;                         // o lives in g_sbOwned, which the rebuild changes
         SbRespawnKeep(SbActorForIdx(keep.idx), keep, "move");
     }
@@ -1912,6 +1972,14 @@ static bool SeSandboxDelete(SDK::AActor* a)
 {
     SDK::UObject* pc = SbPrefabOf(a);
     if (!pc) return false;
+    // A station/project team changer must never lose its node: every client keeps its actor with a cleared
+    // node handle and crashes when a player overlaps it (see SeModeClearStarters). Ours rebuild cleanly.
+    if (a->Class && a->Class->GetName().find("TeamChange") != std::string::npos &&
+        !SbOwnedByIdx(FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(pc) + 0x248))))
+    {
+        HxLog("[HalcyonA2][SPECEDIT] sandbox delete of %s refused: a station team changer (clients would crash on it)\n", a->GetName().c_str());
+        return false;
+    }
     SDK::UObject* lgm = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(pc) + 0x440);
     SDK::AActor* slot = lgm ? *reinterpret_cast<SDK::AActor**>(reinterpret_cast<uintptr_t>(lgm) + 0x320) : nullptr;
     const int r = SbRemoveCore(reinterpret_cast<uint8_t*>(pc) + 0x3A0);
@@ -2867,6 +2935,48 @@ static double SbOutsideBox(SDK::UBoxComponent* box, const double* p)
     return sqrt(dx * dx + dy * dy + dz * dz);
 }
 // SE|SLOTS[|x,y,z] (local test): every loaded gamemode's slot -- class, importance box, and how far the point is from it.
+static SDK::UObject* SbGamemodesManager();   // below
+// A map-placed module slot by its SlotID (every client has these, with their real IDs and boxes).
+static SDK::AActor* SeMapSlotById(const std::string& id)
+{
+    auto* slotCls = SDK::UObject::FindClassFast("ModuleSlot");
+    const int32_t n = SDK::UObject::GObjects->Num();
+    for (int32_t i = 0; slotCls && i < n; ++i)
+    {
+        SDK::UObject* o = SDK::UObject::GObjects->GetByIndex(i);
+        if (!o || o->IsDefaultObject() || !o->IsA(slotCls)) continue;
+        const wchar_t* sid = *reinterpret_cast<const wchar_t**>(reinterpret_cast<uintptr_t>(o) + 0x390);
+        if (!sid) continue;
+        std::string s8;
+        for (const wchar_t* w = sid; *w; ++w) s8 += static_cast<char>(*w);
+        if (s8 == id) return static_cast<SDK::AActor*>(o);
+    }
+    return nullptr;
+}
+// Load <project> into an EMPTY map slot at runtime: set DefaultGamemodePath, then GamemodesManager::AddSlot again.
+// AddSlot (0x46C9580) loads the path when it is set (the slot is already known under its own id, so it doesn't bail).
+static SDK::UObject* SeLoadMapSlot(const std::string& id, const std::string& path)
+{
+    SDK::AActor* slot = SeMapSlotById(id);
+    SDK::UObject* mgr = SbGamemodesManager();
+    if (!slot || !mgr) { HxLog("[HalcyonA2][SPECEDIT] LOADSLOT %s: %s\n", id.c_str(), slot ? "no gamemodes manager" : "no such slot"); return nullptr; }
+    SDK::UObject* before = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(slot) + 0x440);
+    if (before) { HxLog("[HalcyonA2][SPECEDIT] LOADSLOT %s: already has %s\n", id.c_str(), before->GetName().c_str()); return before; }
+    const std::wstring wpath(path.begin(), path.end());
+    SetSlotFString(slot, 0x418, wpath.c_str());
+    struct { SDK::AActor* s; } parms{ slot };
+    if (auto* fn = mgr->Class->GetFunction("GamemodesManager", "AddSlot")) SafeProcessEvent(mgr, fn, &parms);
+    SDK::UObject* lgm = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(slot) + 0x440);
+    if (lgm)
+    {
+        if (auto* fn = slot->Class->GetFunction("ModuleSlot", "PushNetVars")) SafeProcessEvent(slot, fn, nullptr);
+        if (auto* fn = lgm->Class->GetFunction("LoadedGameMode", "PushNetVars")) SafeProcessEvent(lgm, fn, nullptr);
+    }
+    SDK::UObject* tm = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(slot) + 0x438);
+    HxLog("[HalcyonA2][SPECEDIT] LOADSLOT %s <- '%s': LoadedGameMode=%s TicketManager=%s\n", id.c_str(), path.c_str(),
+          lgm ? lgm->GetName().c_str() : "none", tm ? tm->GetName().c_str() : "none");
+    return lgm;
+}
 static void SeSlotsDump(const std::string& at)
 {
     if (!g_seLocalTest) return;
@@ -2910,6 +3020,15 @@ static void SeSlotsDump(const std::string& at)
                  std::string(wsid.begin(), wsid.end()).c_str(), std::string(wgmp.begin(), wgmp.end()).c_str(), sl.X, sl.Y, sl.Z,
                  hosted.count(l) ? hosted[l] : 0, boxs.c_str());
         HxLog("[HalcyonA2][SPECEDIT] %s\n", b);
+        {   // teams: MaximumTeamSizes (+0x428 TArray<int32>) and the TicketManager (+0x438)
+            const int32_t* ts = *reinterpret_cast<int32_t* const*>(reinterpret_cast<uintptr_t>(slot) + 0x428);
+            const int tn = *reinterpret_cast<const int32_t*>(reinterpret_cast<uintptr_t>(slot) + 0x430);
+            std::string sizes;
+            for (int k = 0; ts && k < tn && k < 16; ++k) sizes += (k ? "," : "") + std::to_string(ts[k]);
+            SDK::UObject* tm = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(slot) + 0x438);
+            HxLog("[HalcyonA2][SPECEDIT]   teams of %s: MaximumTeamSizes=[%s] TicketManager=%s\n", slot->GetName().c_str(), sizes.c_str(),
+                  tm ? tm->GetName().c_str() : "none");
+        }
     }
     // Slots with NO game area loaded (map-placed, so every client has them with their real IDs and boxes).
     auto* slotCls = SDK::UObject::FindClassFast("ModuleSlot");
@@ -3029,6 +3148,50 @@ static bool SbCreateEditorSlot(const double* at, const std::string& path)
     SbEditorSlotTick(GetTickCount64());                    // the load binds during the spawn: usually ready right now
     return true;
 }
+// A runtime slot with its OWN SlotID (set before the spawn finishes, like the path), loading `path`. Used by the
+// game mode fabricator: one slot per game mode, so each gets its own gamemode, ticket manager and teams.
+static std::vector<std::wstring*> g_seSlotStrings;      // FString buffers must outlive the slot (never freed)
+static SDK::AActor* SbCreateSlotWithId(const double* at, const std::string& path, const std::string& slotId, const int* teamSizes, int nTeams)
+{
+    auto* cls = SDK::UObject::FindClassFast("BP_ModuleSlotWithImportanceVolume_C");
+    auto* world = SDK::UWorld::GetWorld();
+    SDK::UObject* mgr = SbGamemodesManager();
+    if (!cls || !world || !mgr) return nullptr;
+    SDK::FTransform xf{};
+    xf.Rotation = SDK::FQuat{ 0, 0, 0, 1 };
+    xf.Translation = SDK::FVector{ at[0] - kSlotBoxOffset[0], at[1] - kSlotBoxOffset[1], at[2] - kSlotBoxOffset[2] };
+    xf.Scale3D = SDK::FVector{ 1, 1, 1 };
+    SDK::AActor* slot = SDK::UGameplayStatics::BeginDeferredActorSpawnFromClass(world, cls, xf, SDK::ESpawnActorCollisionHandlingMethod::AlwaysSpawn,
+                                                                              nullptr, SDK::ESpawnActorScaleMethod::MultiplyWithRoot);
+    if (!slot) return nullptr;
+    auto* wp = new std::wstring(path.begin(), path.end());
+    auto* wid = new std::wstring(slotId.begin(), slotId.end());
+    g_seSlotStrings.push_back(wp); g_seSlotStrings.push_back(wid);
+    SetSlotFString(slot, 0x418, wp->c_str());                          // DefaultGamemodePath
+    SetSlotFString(slot, 0x390, wid->c_str());                         // SlotID (replicated)
+    if (teamSizes && nTeams > 0)                                       // MaximumTeamSizes (TArray<int32> @0x428)
+    {
+        int32_t* arr = *reinterpret_cast<int32_t**>(reinterpret_cast<uintptr_t>(slot) + 0x428);
+        const int32_t num = *reinterpret_cast<int32_t*>(reinterpret_cast<uintptr_t>(slot) + 0x430);
+        const int32_t max = *reinterpret_cast<int32_t*>(reinterpret_cast<uintptr_t>(slot) + 0x434);
+        if (arr && max >= nTeams) { for (int k = 0; k < nTeams; ++k) arr[k] = teamSizes[k]; *reinterpret_cast<int32_t*>(reinterpret_cast<uintptr_t>(slot) + 0x430) = nTeams; }
+        else if (arr && num > 0) for (int k = 0; k < num && k < nTeams; ++k) arr[k] = teamSizes[k];
+    }
+    SDK::UGameplayStatics::FinishSpawningActor(slot, xf, SDK::ESpawnActorScaleMethod::MultiplyWithRoot);
+    const uintptr_t sp = reinterpret_cast<uintptr_t>(slot);
+    if (auto* f = slot->Class->GetFunction("Actor", "SetReplicates")) { struct { bool b; } rp{ true }; SafeProcessEvent(slot, f, &rp); }
+    *reinterpret_cast<uint8_t*>(sp + 0x60) |= 0x08 | 0x10;               // bAlwaysRelevant | bReplicateMovement
+    *reinterpret_cast<float*>(sp + 0x170) = 1.0e12f;
+    if (auto* f = slot->Class->GetFunction("Actor", "ForceNetUpdate")) SafeProcessEvent(slot, f, nullptr);
+    if (auto* f = slot->Class->GetFunction("ModuleSlot", "PushNetVars")) SafeProcessEvent(slot, f, nullptr);
+    SDK::UObject* lgm = *reinterpret_cast<SDK::UObject**>(sp + 0x440);
+    if (lgm) if (auto* f = lgm->Class->GetFunction("LoadedGameMode", "PushNetVars")) SafeProcessEvent(lgm, f, nullptr);
+    SDK::UObject* tm = *reinterpret_cast<SDK::UObject**>(sp + 0x438);
+    HxLog("[HalcyonA2][SPECEDIT] slot '%s' <- '%s' at (%.0f,%.0f,%.0f): LoadedGameMode=%s TicketManager=%s\n", slotId.c_str(), path.c_str(),
+          at[0], at[1], at[2], lgm ? lgm->GetName().c_str() : "none", tm ? tm->GetName().c_str() : "none");
+    g_seFabSlots.push_back(slot);
+    return slot;
+}
 // Tick: once the load binds a LoadedGameMode, push the slot's and gamemode's netvars so clients build it.
 static void SbEditorSlotTick(ULONGLONG now)
 {
@@ -3088,7 +3251,7 @@ static void SbEditorSlotClearTick(ULONGLONG now)
         if (!o || o->IsDefaultObject() || !o->IsA(pcCls)) continue;
         if (*reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(o) + 0x440) != lgm) continue;
         if (SbOwnedByIdx(FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(o) + 0x248)))) continue;   // ours: keep
-        if (o->Outer && SeActorAlive(static_cast<SDK::AActor*>(o->Outer))) doomed.push_back(static_cast<SDK::AActor*>(o->Outer));
+        if (o->Outer && SeAlive(o->Outer)) doomed.push_back(static_cast<SDK::AActor*>(o->Outer));
     }
     int cleared = 0;
     for (SDK::AActor* a : doomed) if (SeSandboxDelete(a)) ++cleared;
@@ -3149,6 +3312,7 @@ static SDK::UObject* SbEditorSlotLgm()   // the editor area's gamemode once it i
 // SelectionBase fault in the loader; the rest bring cubes, bridges, team changers or scripts.)
 static const char kSeEditorProject[] = "Testing/TestingProject20";
 
+
 static SDK::UObject* SbHostGamemode(const std::string& uniqueId, const double* loc)
 {
     static SDK::UClass* exactCls = nullptr;
@@ -3158,6 +3322,20 @@ static SDK::UObject* SbHostGamemode(const std::string& uniqueId, const double* l
     SDK::UObject* best = nullptr; int bestTier = 99; double bestScore = 1.0e300;
     std::string bestWhy;
     std::vector<SDK::UObject*> cands;
+    // A fabricated game mode owns everything inside its box: checked first, whatever the object index holds.
+    for (SDK::AActor* fs : g_seFabSlots)
+    {
+        if (!fs || !SeAlive(fs)) continue;
+        SDK::UObject* flgm = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(fs) + 0x440);
+        SDK::UBoxComponent* fbox = SbImportanceBox(fs);
+        if (flgm && fbox && SbOutsideBox(fbox, loc) <= 1.0)
+        {
+            HxLog("[HalcyonA2][SPECEDIT] host for %s at (%.0f,%.0f,%.0f): %s (game mode %ls)\n", uniqueId.c_str(), loc[0], loc[1], loc[2],
+                  flgm->GetName().c_str(), *reinterpret_cast<const wchar_t**>(reinterpret_cast<uintptr_t>(fs) + 0x390));
+            g_sbHostOutsideCm = 0.0;
+            return flgm;
+        }
+    }
     if (SDK::UObject* ed = SbEditorSlotLgm()) { seen.insert(ed); cands.push_back(ed); }   // empty, so no PrefabComponents
     for (SDK::UObject* o : ClassObjects(pcCls))           // [PERF] shared index: this runs for every placed object
     {
@@ -3211,24 +3389,52 @@ static SDK::UObject* SbHostGamemode(const std::string& uniqueId, const double* l
 // Team changers are refused on EVERY placement path (palette, duplicate, catalogue, level loads): placed
 // outside a game mode's arena they have no arena (-1), block players, and their team-change logic -- which
 // runs on every client, Quest included -- crashed players who walked into one.
+static bool g_seAllowTeamChangers = false;   // SE|ALLOWTEAM|1 (local test) -- experiments with team changers
 static bool SeRefusedPrefab(const std::string& name)
 {
+    if (g_seAllowTeamChangers) return false;
     std::string lo = name;
     for (char& ch : lo) ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
     return lo.find("teamchange") != std::string::npos || lo.find("teamswitch") != std::string::npos;
 }
 static std::string SeSandboxSpawn(const std::string& uniqueId, const double* loc, const double* rot, const double* scl)
 {
-    if (SeRefusedPrefab(uniqueId) || SeRefusedPrefab(g_sbSpawnCls))
+    if ((SeRefusedPrefab(uniqueId) || SeRefusedPrefab(g_sbSpawnCls)) && !SeTeamChangerAllowedAt(loc))
     {
-        HxLog("[HalcyonA2][SPECEDIT] refused %s: team changers crash players outside a game mode arena\n", uniqueId.c_str());
+        HxLog("[HalcyonA2][SPECEDIT] refused %s at (%.0f,%.0f,%.0f): team changers only work inside a game mode\n", uniqueId.c_str(),
+              loc[0], loc[1], loc[2]);
         return std::string();
     }
     SDK::UObject* sb = SbEngine();
     SDK::UObject* lgm = (g_sbForceLgm && SeAlive(g_sbForceLgm)) ? g_sbForceLgm : SbHostGamemode(uniqueId, loc);
     if (!sb || !lgm) { HxLog("[HalcyonA2][SPECEDIT] sandbox spawn: sandbox=%p gamemode=%p\n", sb, lgm); return std::string(); }
     SDK::AActor* slot = *reinterpret_cast<SDK::AActor**>(reinterpret_cast<uintptr_t>(lgm) + 0x320);
-    SDK::FVector relLoc{ loc[0], loc[1], loc[2] };
+    // A team changer never spawns on a player (see SeIsTeamChangerName): start at a free spot in the same area,
+    // and the move queue brings it to `loc` once nobody stands there.
+    double buildAt[3] = { loc[0], loc[1], loc[2] };
+    bool tcDeferred = false;
+    if ((SeIsTeamChangerName(uniqueId) || SeIsTeamChangerName(g_sbSpawnCls)) && SePawnNear(loc, kSeTcClearCm))
+    {
+        static const double offs[][3] = { { 0, 0, 700 }, { 700, 0, 0 }, { -700, 0, 0 }, { 0, 700, 0 }, { 0, -700, 0 }, { 0, 0, -700 },
+                                          { 1400, 0, 0 }, { -1400, 0, 0 }, { 0, 1400, 0 }, { 0, -1400, 0 }, { 0, 0, 1400 } };
+        for (const auto& d : offs)
+        {
+            const double c[3] = { loc[0] + d[0], loc[1] + d[1], loc[2] + d[2] };
+            if (SePawnNear(c, kSeTcClearCm) || !SeTeamChangerAllowedAt(c) || SbHostGamemode(uniqueId, c) != lgm) continue;
+            memcpy(buildAt, c, sizeof(buildAt));
+            tcDeferred = true;
+            break;
+        }
+        if (!tcDeferred)
+        {
+            HxLog("[HalcyonA2][SPECEDIT] refused %s at (%.0f,%.0f,%.0f): a player is standing there and no free spot nearby\n",
+                  uniqueId.c_str(), loc[0], loc[1], loc[2]);
+            return std::string();
+        }
+        HxLog("[HalcyonA2][SPECEDIT] %s: a player stands at (%.0f,%.0f,%.0f) -- built at (%.0f,%.0f,%.0f), moves in when they step off\n",
+              uniqueId.c_str(), loc[0], loc[1], loc[2], buildAt[0], buildAt[1], buildAt[2]);
+    }
+    SDK::FVector relLoc{ buildAt[0], buildAt[1], buildAt[2] };
     SDK::FRotator relRot{ rot[0], rot[1], rot[2] };
     if (slot)
     {
@@ -3280,6 +3486,11 @@ static std::string SeSandboxSpawn(const std::string& uniqueId, const double* loc
     if (ncomp) HxLog("[HalcyonA2][SPECEDIT] sandbox spawn %s: %d component override(s)\n", idxA.c_str(), ncomp);
     const int before = SbObjectMapCount(sb);
     g_sbDefBp = SbBlueprintFor(uniqueId);
+    // The object's class for level saves. Palette placements say it (g_sbSpawnCls); game mode pieces (team
+    // changers, the controller) and SE|SBADD don't -- and a saved level skips objects without one, which lost a
+    // mode's team changers and controller. Take it from the prefab's blueprint class.
+    std::string bpName;
+    if (g_sbDefBp && SeAlive(static_cast<SDK::UObject*>(g_sbDefBp))) bpName = static_cast<SDK::UObject*>(g_sbDefBp)->GetName();
     g_sbLbClass = SDK::UObject::FindClassFast("LuauBehavior");
     const std::vector<SbLeaf> leaves = std::move(g_sbPendingLeaves);
     g_sbPendingLeaves.clear();
@@ -3300,12 +3511,14 @@ static std::string SeSandboxSpawn(const std::string& uniqueId, const double* loc
     if (r == 6)
     {
         SbOwned o;
-        o.idx = idxA; o.cls = g_sbSpawnCls; o.lgm = lgm;
+        o.idx = idxA; o.cls = g_sbSpawnCls.empty() ? bpName : g_sbSpawnCls; o.lgm = lgm;
         o.uniqueId = uniqueId; o.path = g_sbSpawnPath; o.level = g_lvLoading;
         if (!g_seCaller.empty() && !g_ownLocks.count(idxA)) g_ownLocks[idxA] = { g_seCaller, g_seCallerName, false };
         memcpy(o.loc, loc, sizeof(o.loc)); memcpy(o.rot, rot, sizeof(o.rot)); memcpy(o.scl, scl, sizeof(o.scl));
         g_sbOwned.push_back(o);
         SeWantProxy(idxA);                               // collision stand-ins, whichever path spawned it
+        if (tcDeferred) g_sbMovePending[idxA] = GetTickCount64();   // the record holds the real spot
+        g_sbSpawnAt[idxA] = GetTickCount64();            // Game data writes wait until the node is settled
     }
     HxLog("[HalcyonA2][SPECEDIT] sandbox spawn %s: defaults from %d template(s), %d default node(s)\n", idxA.c_str(),
           g_sbDefResult > 0 ? g_sbDefResult >> 8 : g_sbDefResult, g_sbDefResult > 0 ? g_sbDefResult & 0xFF : 0);
@@ -3796,12 +4009,45 @@ static void SeSbData(SDK::UObject* ctx, const std::string& ident)
 // SE|SBSET|<ident>|<path>|<kind>|<value>
 static bool g_seSbNoRecord = false;   // SeTextTick: write a rendered text without replacing the saved template
 static void SeTextQueueObject(SDK::UObject* prefab);   // below
+// When each object's Game data was last written. Replacing the same leaf twice in one frame (a {template} text set,
+// then its rendered value) left a null entry in the netvar change list and the server faulted in the replication
+// hash (+0x465C4FD, seen 2026-09-24): the template renderer waits until an object's last write is 300 ms old.
+static std::unordered_map<std::string, ULONGLONG> g_sbLeafWriteAt;
+// ...and when each object's node was created. A write in the same frame as the object's creation (level loads
+// replay Game data right after the spawn) faulted the same way -- six times loading one level (2026-09-24). So
+// every write to an object whose node is < 400 ms old, or was written < 400 ms ago, waits in this queue.
+struct SbDeferredSet { std::string idx, path, kind, value; bool noRecord = false; ULONGLONG due = 0; };
+static std::vector<SbDeferredSet> g_sbDeferredSets;
+constexpr ULONGLONG kSbWriteGapMs = 400;
+static bool g_sbApplyingDeferred = false;
 static void SeSbSet(SDK::UObject* ctx, const std::string& ident, const std::string& path, const std::string& kind,
                     const std::string& value)
 {
     SDK::AActor* a = SeFindEditorActor(ident);
     SDK::UObject* pc = SbPrefabOf(a);
     if (!pc) return;
+    {
+        const std::string widx = FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(pc) + 0x248));
+        const ULONGLONG nowW = GetTickCount64();
+        auto sp = g_sbSpawnAt.find(widx);
+        auto lw = g_sbLeafWriteAt.find(widx);
+        const bool young = sp != g_sbSpawnAt.end() && nowW - sp->second < kSbWriteGapMs;
+        const bool recent = lw != g_sbLeafWriteAt.end() && nowW - lw->second < kSbWriteGapMs;
+        bool queued = false;                                  // keep writes to one object in order
+        for (const auto& d : g_sbDeferredSets) if (d.idx == widx) queued = true;
+        // only props/ writes replace a leaf (the faulting operation); sd/ gd/ values are written in place and
+        // must land at once (a team changer's TeamIndex has to be there before clients build it)
+        if (!widx.empty() && path.rfind("props/", 0) == 0 && (young || recent || (queued && !g_sbApplyingDeferred)))
+        {
+            // the same path queued again: the newer value wins
+            for (auto it = g_sbDeferredSets.begin(); it != g_sbDeferredSets.end(); ++it)
+                if (it->idx == widx && it->path == path) { g_sbDeferredSets.erase(it); break; }
+            ULONGLONG due = nowW + kSbWriteGapMs;
+            for (const auto& d : g_sbDeferredSets) if (d.idx == widx && d.due + kSbWriteGapMs > due) due = d.due + kSbWriteGapMs;
+            g_sbDeferredSets.push_back({ widx, path, kind, value, g_seSbNoRecord, due });
+            return;
+        }
+    }
     uint8_t* handle = reinterpret_cast<uint8_t*>(pc) + 0x3A0;
     bool ok = false;
     if (path.rfind("props/", 0) == 0)
@@ -3858,6 +4104,7 @@ static void SeSbSet(SDK::UObject* ctx, const std::string& ident, const std::stri
         SDK::AActor* slot = lgm ? *reinterpret_cast<SDK::AActor**>(reinterpret_cast<uintptr_t>(lgm) + 0x320) : nullptr;
         if (ok && slot) static_cast<SDK::AModuleSlot*>(slot)->PushNetVars();
     }
+    g_sbLeafWriteAt[FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(pc) + 0x248))] = GetTickCount64();
     if (g_seSbNoRecord) return;                          // a rendered template: the saved value stays the template
     HxLog("[HalcyonA2][SPECEDIT] SBSET %s %s (%s) = '%s': %s\n", a->GetName().c_str(), path.c_str(), kind.c_str(), value.c_str(),
           ok ? "ok" : "FAILED");
@@ -3911,6 +4158,28 @@ static void SeSandboxAdd(const std::string& uniqueId, const std::string& locs)
 // real player's position and publishes a checkpoint quest over them -- exercising SeQuestTick end to end.
 // SE|SBADDATPLAYER|<UniqueID>|dx,dy,dz -- LOCAL TEST: a catalogue item on another (non-caller) player, placed
 // by the server (the editor client cannot see a distant pawn). Used to walk a player into a team changer.
+static bool SeOtherPlayerPos(SDK::UObject* ctx, double* out)   // LOCAL TEST: the first non-caller player's pawn
+{
+    // Walk the VR pawns, not the controllers: a player that left spectator can still show its spectator pawn in
+    // the controller's Pawn field on the server (seen 2026-09-24), while the VR pawn's own Controller is set.
+    SDK::UObject* callerPc = SeCallerPC(ctx);
+    static SDK::UClass* cls = nullptr;
+    if (!cls) cls = SDK::UObject::FindClassFast("VRPawn");
+    for (SDK::UObject* o : cls ? ClassObjects(cls) : std::vector<SDK::UObject*>())
+    {
+        if (!o || o->IsDefaultObject()) continue;
+        SDK::UObject* ctrl = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(o) + 0x2D0);
+        auto* pawn = static_cast<SDK::AActor*>(o);
+        const SDK::FVector al = SePawnPos(pawn);
+        HxLog("[HalcyonA2][SPECEDIT] @P pawn %s ctrl=%s caller=%d at (%.0f,%.0f,%.0f)\n", o->GetName().c_str(), ctrl ? ctrl->GetName().c_str() : "-",
+              ctrl == callerPc, al.X, al.Y, al.Z);
+        if (!ctrl || ctrl == callerPc) continue;
+        if (al.Z < -50000.0 || (al.X == 0.0 && al.Y == 0.0 && al.Z == 0.0)) continue;
+        out[0] = al.X; out[1] = al.Y; out[2] = al.Z;
+        return true;
+    }
+    return false;
+}
 static void SeSandboxAddAtPlayer(SDK::UObject* ctx, const std::string& uniqueId, const std::string& offs)
 {
     if (!g_seLocalTest) return;
@@ -4132,6 +4401,53 @@ static int SeLuauNodeCore(void* lgmHandle, uint64_t scriptsBits, uint64_t nameBi
     }
     __except (EXCEPTION_EXECUTE_HANDLER) { return -20; }
 }
+// POD core: add a string leaf `name` = src directly under the container `parent` (a netvar handle or a FindChild
+// iterator -- the game treats both as containers). Built exactly like SeLuauNodeCore's node. 1 = added.
+static int SeNvAddStringCore(void* parent, uint64_t nameBits, const wchar_t* src, int len)
+{
+    uint8_t itOld[0x100] = {};
+    __try
+    {
+        const uintptr_t base = GetBase();
+        auto find = reinterpret_cast<void*(__fastcall*)(void*, uint8_t*, uint64_t, char)>(base + SeSb::FindChild);
+        auto mal = reinterpret_cast<uint8_t*(__fastcall*)(size_t)>(base + SeSb::Malloc);
+        find(parent, itOld, nameBits, 0);
+        const bool exists = itOld[0x48] != 0;
+        NvReleaseIter(base, itOld);
+        if (exists) return -11;
+        uint8_t* n = mal(0x50);
+        memset(n, 0, 0x50);
+        uint64_t nm = nameBits;
+        reinterpret_cast<void(__fastcall*)(uint8_t*, uint64_t*, uint8_t)>(base + SeSb::LeafCtor)(n, &nm, 4);
+        *reinterpret_cast<uintptr_t*>(n) = base + 0x8021318;                    // string node vtable
+        *reinterpret_cast<uint64_t*>(n + 0x38) = 0;
+        *reinterpret_cast<uint64_t*>(n + 0x40) = 0;
+        *reinterpret_cast<uint32_t*>(n + 0x48) = 0x200;
+        reinterpret_cast<void(__fastcall*)(uint8_t*, const wchar_t*, int32_t)>(base + SeSb::StrAssign)(n + 0x38, src, len);
+        reinterpret_cast<void(__fastcall*)(uint8_t*)>(base + SeSb::StringStat)(n);
+        reinterpret_cast<void(__fastcall*)(uint8_t*, uint8_t**)>(base + SeSb::AddChild)(static_cast<uint8_t*>(parent), &n);
+        return 1;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return -20; }
+}
+// A string config variable of a module slot's gamemode (what Luau's Gamemode:getStringConfigVariable reads, on
+// every machine): written in place when it exists, created otherwise. Then pushed so clients get it.
+static int SeModeConfigSet(SDK::AActor* slot, const std::string& name, const std::string& value)
+{
+    if (!slot || !SeAlive(slot)) return -1;
+    SDK::UObject* ms = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(slot) + 0x300);
+    if (!ms || !SeAlive(ms)) return -2;
+    void* cfg = reinterpret_cast<uint8_t*>(ms) + 0xE8;
+    const uint64_t nb = NvNameBits(NvName(name));
+    const std::wstring w(value.begin(), value.end());
+    int r = NvWriteNative(cfg, nb, NvNative::TString, 0.0f, 0, w.c_str(), static_cast<int32_t>(w.size()) + 1, nullptr);
+    if (r != 1) r = SeNvAddStringCore(cfg, nb, w.c_str(), static_cast<int>(w.size()));
+    if (auto* f = slot->Class->GetFunction("ModuleSlot", "PushNetVars")) SafeProcessEvent(slot, f, nullptr);
+    if (SDK::UObject* lgm = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(slot) + 0x440))
+        if (auto* f = lgm->Class->GetFunction("LoadedGameMode", "PushNetVars")) SafeProcessEvent(lgm, f, nullptr);
+    return r;
+}
+
 // Every editor script gets this appended: the lifecycle functions the game calls run inside pcall, so a
 // runtime error (a nil slot, a typo'd method) is logged and the object keeps working. Without it an error in
 // BeginPlay left the object half-built and every client -- joiners included -- crashed on it moments later.
@@ -4172,6 +4488,74 @@ pcall(function()
 		return if ok and type(n) == "string" then n else "None"
 	end
 end)
+-- [Rigel] game modes: Rigel.* (see the scripting guide, "Game modes"). Available inside functions -- BeginPlay
+-- and later -- not at the top of the file (this part of the script runs after yours).
+Rigel = {}
+do
+	local function cfg(k: string): string
+		local ok, v = pcall(function() return Gamemode:getStringConfigVariable(k) end)
+		if ok and type(v) == "string" then return v end
+		return ""
+	end
+	local function num(k: string): number return tonumber(cfg(k)) or 0 end
+	local function send(ev: string, arg: string) pcall(function() Gamemode:broadcastEventString(ev, arg) end) end
+	Rigel.isGameMode = function(): boolean return cfg("rgm.id") ~= "" end
+	Rigel.name = function(): string return cfg("rgm.name") end
+	Rigel.state = function(): string local st = cfg("rgm.state"); return if st == "" then "none" else st end
+	Rigel.isRunning = function(): boolean return cfg("rgm.state") == "running" end
+	Rigel.round = function(): number return num("rgm.round") end
+	Rigel.timeLeft = function(): number return num("rgm.time") end
+	Rigel.teams = function(): number return num("rgm.teams") end
+	Rigel.teamName = function(team: number): string return cfg("rgm.team" .. team .. ".name") end
+	Rigel.teamSize = function(team: number): number return num("rgm.team" .. team .. ".size") end
+	Rigel.teamMax = function(team: number): number return num("rgm.team" .. team .. ".max") end
+	Rigel.score = function(team: number): number return num("rgm.team" .. team .. ".score") end
+	Rigel.roundsWon = function(team: number): number return num("rgm.team" .. team .. ".wins") end
+	Rigel.players = function(): number return num("rgm.players") end
+	Rigel.winner = function(): number return num("rgm.winner") end
+	Rigel.setting = function(key: string): string
+		local v = cfg("rgm.set." .. key)
+		if v == "" then v = cfg("rgm.set.custom." .. key) end
+		return v
+	end
+	Rigel.settingNumber = function(key: string): number return tonumber(Rigel.setting(key)) or 0 end
+	Rigel.startRound = function() send("rgm:start", "") end
+	Rigel.startNow = function() send("rgm:startnow", "") end
+	Rigel.endRound = function(winner: number?) send("rgm:end", tostring(winner or 0)) end
+	Rigel.resetGame = function() send("rgm:reset", "") end
+	Rigel.resetBalls = function() send("rgm:balls", "") end
+	Rigel.addScore = function(team: number, amount: number?) send("rgm:score", team .. "," .. (amount or 1)) end
+	Rigel.setScore = function(team: number, value: number) send("rgm:setscore", team .. "," .. value) end
+	Rigel.setCustom = function(key: string, value: string) send("rgm:set", key .. "=" .. value) end
+	Rigel.setText = function(name: string, value: string) send(name, value) end
+	-- change callbacks: one shared 0.2 s poll per script
+	local subs = { state = {}, team = {}, score = {}, time = {} }
+	local last = { state = nil, team = {}, score = {}, time = nil }
+	local polling = false
+	local function poll()
+		local st = Rigel.state()
+		if st ~= last.state then
+			local old = last.state
+			last.state = st
+			for _, f in subs.state do pcall(f, st, old or "none") end
+		end
+		for t = 1, Rigel.teams() do
+			local sz, sc = Rigel.teamSize(t), Rigel.score(t)
+			if last.team[t] ~= sz then local old = last.team[t]; last.team[t] = sz; if old ~= nil then for _, f in subs.team do pcall(f, t, sz, old) end end end
+			if last.score[t] ~= sc then local old = last.score[t]; last.score[t] = sc; if old ~= nil then for _, f in subs.score do pcall(f, t, sc, old) end end end
+		end
+		local tl = Rigel.timeLeft()
+		if tl ~= last.time then last.time = tl; for _, f in subs.time do pcall(f, tl) end end
+	end
+	local function watch(list: any, f: any)
+		table.insert(list, f)
+		if not polling then polling = true; pcall(function() LuauClock.createTimer(0.2, poll) end) end
+	end
+	Rigel.onStateChanged = function(f: (string, string) -> ()) watch(subs.state, f) end
+	Rigel.onTeamChanged = function(f: (number, number, number) -> ()) watch(subs.team, f) end
+	Rigel.onScoreChanged = function(f: (number, number, number) -> ()) watch(subs.score, f) end
+	Rigel.onTimeChanged = function(f: (number) -> ()) watch(subs.time, f) end
+end
 )LUAU";
 
 // Typed `local` declarations become the object's editor properties (the game's "External Dependencies"):
@@ -4862,6 +5246,10 @@ static std::string SeLvResolve(const std::string& value)
 // the saved objects become that level's. It used to take only unsaved work plus content already tagged
 // with this exact name, so loading a level, editing it and saving (under any other name, or a different
 // capitalisation) wrote only the new pieces and silently dropped everything that had been loaded.
+static std::string SeModesForLevel(const std::string& name, bool tag, const std::unordered_map<std::string, int>& ownedIdx);   // below
+static void SeModesLoadCreate(const std::string& level, const std::vector<std::vector<std::string>>& lines);                   // below
+static void SeModesLoadFixup(const std::string& level, const std::unordered_map<int, std::string>& objIdx);                    // below
+static void SeModesUnload(const std::string& level);                                                                          // below
 static std::string SeLvBuild(const std::string& name, int* counts, bool tag = true)   // tag=false: export only
 {
     std::string t = "L\t" + SeLvClean(name) + "\t1\n";
@@ -4937,6 +5325,7 @@ static std::string SeLvBuild(const std::string& name, int* counts, bool tag = tr
         t += "R\t" + r.questRef + "\t" + b + "\t" + std::to_string(r.thr) + "\t" + SeLvVec(r.at) + "\t" + SeLvVec(r.button) + "\t" + r.coins + "\n";
         ++nr;
     }
+    t += SeModesForLevel(name, tag, ownedIdx);             // G: the level's game modes (roles by object number)
     if (counts) { counts[0] = n; counts[1] = nq; counts[2] = nr; }
     return t;
 }
@@ -4985,6 +5374,7 @@ static void SeLvLoad(const std::string& name, const std::string& text)
         b = e + 1;
         if (!line.empty()) lines.push_back(SeLvFields(line));
     }
+    SeModesLoadCreate(name, lines);                       // game modes first: their objects are hosted inside them
     for (const auto& f : lines)
     {
         if (f[0] != "O" || f.size() < 9) continue;
@@ -5073,6 +5463,7 @@ static void SeLvLoad(const std::string& name, const std::string& text)
         SeCoinRun("new", f[4], f[2], f[1], f[6], f[5], f[3]);
         ++nr;
     }
+    SeModesLoadFixup(name, objIdx);                        // roles / controller -> the new object ids
     g_lvLoading.clear();
     g_lvLoaded.push_back(name);
     g_lvStatusDirty = true;
@@ -5113,6 +5504,7 @@ static void SeLvUnload(const std::string& name)
     for (auto& q : g_seAuthored)
         if (q.level == name && !q.deleted) { SeQuestRemove(q); gone.push_back(&q); ++n; }
     if (!gone.empty()) SeQuestResendAll(gone);
+    SeModesUnload(name);
     g_lvLoaded.erase(std::remove(g_lvLoaded.begin(), g_lvLoaded.end(), name), g_lvLoaded.end());
     g_lvLocal.erase(std::remove(g_lvLocal.begin(), g_lvLocal.end(), name), g_lvLocal.end());
     g_lvStatusDirty = true;
@@ -5223,6 +5615,7 @@ static void SeLvPoller()
 // The saved value stays the template; unknown {names} are shown as written until something sets them.
 static std::unordered_map<std::string, std::string> g_seTextVars;
 static std::vector<std::pair<std::string, std::string>> g_seTextQueue;   // (name, value) from scripts
+static std::vector<std::pair<void*, std::pair<std::string, std::string>>> g_seModeEvents;   // (Gamemode API, (name, value))
 static std::vector<std::string> g_seTextObjQueue;                        // object ids to (re)render
 static SRWLOCK g_seTextLock = SRWLOCK_INIT;
 static std::string SeTextRender(const std::string& t)
@@ -5261,19 +5654,40 @@ static int SeFStrCopy(const void* f, char* buf, int cap)
 }
 // UModuleStateLuaAPI::BroadcastEventString (Luau Gamemode:broadcastEventString). The strings are copied before
 // the original runs (it takes ownership of them).
-static void SeBesQueue(void* name, void* value)
+static void SeBesQueue(void* api, void* name, void* value)
 {
     static char nb[80], vb[1100];
     if (SeFStrCopy(name, nb, sizeof(nb)) <= 0 || strlen(nb) > 64) return;
     SeFStrCopy(value, vb, sizeof(vb));
     AcquireSRWLockExclusive(&g_seTextLock);
-    if (g_seTextQueue.size() < 4096) g_seTextQueue.push_back({ nb, vb });
+    if (strncmp(nb, "rgm:", 4) == 0) { if (g_seModeEvents.size() < 4096) g_seModeEvents.push_back({ api, { nb, vb } }); }
+    else if (g_seTextQueue.size() < 4096) g_seTextQueue.push_back({ nb, vb });
     ReleaseSRWLockExclusive(&g_seTextLock);
 }
 static __int64 __fastcall SeBes_Hook(void* api, void* name, void* value)
 {
-    SeBesQueue(name, value);
+    SeBesQueue(api, name, value);
     return g_seBesOrig(api, name, value);
+}
+static void SbDeferredSetsTick()
+{
+    if (g_sbDeferredSets.empty()) return;
+    const ULONGLONG now = GetTickCount64();
+    for (size_t i = 0; i < g_sbDeferredSets.size();)
+    {
+        const SbDeferredSet d = g_sbDeferredSets[i];
+        if (now < d.due) { ++i; continue; }
+        g_sbDeferredSets.erase(g_sbDeferredSets.begin() + i);
+        SDK::AActor* a = SbActorForIdx(d.idx);
+        if (!a) continue;                                 // gone meanwhile
+        const bool prevNoRec = g_seSbNoRecord;
+        g_seSbNoRecord = d.noRecord;
+        g_sbApplyingDeferred = true;
+        SeSbSet(nullptr, SeLvIdent(a), d.path, d.kind, d.value);
+        g_sbApplyingDeferred = false;
+        g_seSbNoRecord = prevNoRec;
+        return;                                           // one write per tick
+    }
 }
 static void SeTextQueueObject(SDK::UObject* prefab)
 {
@@ -5311,6 +5725,8 @@ static void SeTextTick()
     }
     const std::unordered_set<std::string> only(objs.begin(), objs.end());
     int n = 0;
+    const ULONGLONG nowT = GetTickCount64();
+    std::vector<std::string> later;
     for (size_t i = 0; i < g_sbOwned.size() && n < 200; ++i)
     {
         const SbOwned& o = g_sbOwned[i];
@@ -5320,6 +5736,8 @@ static void SeTextTick()
         bool want = only.count(o.idx) > 0;
         for (const auto& c : changed) if (!want && (*tpl)[2].find("{" + c + "}") != std::string::npos) want = true;
         if (!want) continue;
+        auto lw = g_sbLeafWriteAt.find(o.idx);
+        if (lw != g_sbLeafWriteAt.end() && nowT - lw->second < 300) { later.push_back(o.idx); continue; }   // written just now: next tick
         SDK::AActor* a = SbActorForIdx(o.idx);
         if (!a) continue;
         const std::string idx = o.idx, kind = (*tpl)[1], text = SeTextRender((*tpl)[2]);
@@ -5328,10 +5746,561 @@ static void SeTextTick()
         g_seSbNoRecord = false;
         ++n;
     }
+    if (!later.empty())
+    {
+        AcquireSRWLockExclusive(&g_seTextLock);
+        for (auto& l : later) g_seTextObjQueue.push_back(l);
+        ReleaseSRWLockExclusive(&g_seTextLock);
+    }
     if (n || !changed.empty())
         HxLog("[HalcyonA2][SPECEDIT] text bridge: %zu value(s) from scripts, %d text object(s) updated\n", changed.size(), n);
 }
 
+// ==== GAME MODE FABRICATOR ================================================================================
+// A game mode made in the editor is a module slot of its own (SbCreateSlotWithId): a unique SlotID set before
+// the spawn finishes -- clients get it, verified -- loading tag/teamchanger (two team changers, no scripts) so
+// the slot gets its TicketManager, with MaximumTeamSizes = the mode's teams. Everything placed inside its box
+// is hosted by it (SbHostGamemode checks g_seFabSlots first), so team changers placed there join ITS teams.
+// The server runs the mode (idle -> countdown -> running -> ended), reads team sizes from the team changers,
+// and publishes everything as the mode's config variables ("rgm.*", Gamemode:getStringConfigVariable on every
+// machine) plus text-template values; scripts drive it back with Gamemode:broadcastEventString("rgm:...").
+struct SeGameMode
+{
+    std::string id, name, level;
+    double at[3]{};
+    int nTeams = 2;
+    int teamMax[8]{};
+    std::string teamName[8];
+    std::map<std::string, std::string> settings;
+    SDK::AActor* slot = nullptr;
+    std::string state = "idle";
+    ULONGLONG stateAt = 0;
+    int score[8]{};
+    int wins[8]{};                                       // rounds won (reset by "reset")
+    int teamSize[8]{};
+    int round = 0, winner = 0, timeLeft = 0;
+    ULONGLONG starterClearAt = 0;
+    bool deleted = false;
+    std::unordered_map<std::string, std::string> pushed;   // config values already pushed
+    std::string statSent;                                   // last status line sent to editors
+};
+static std::vector<SeGameMode> g_seModes;
+static int g_seModeCounter = 0;
+static const char* kSeModeDefaults[][2] = {
+    { "start_mode", "manual" },   // manual | button | auto
+    { "min_players", "1" },       // per team, for auto start
+    { "countdown", "5" },         // seconds before a round
+    { "round_time", "180" },      // seconds; 0 = no limit
+    { "score_to_win", "0" },      // 0 = none
+    { "end_delay", "10" },        // seconds the result shows before idle
+    { "auto_restart", "0" },      // 1 = auto mode starts again after a round
+    { "stop_when_empty", "1" },   // 1 = a running round ends when every team is empty
+};
+static const double kSeModeHalf[3] = { 3881.0, 4733.0, 950.0 };   // the slot class's box (half-size, cm)
+
+static SeGameMode* SeModeById(const std::string& id)
+{
+    for (auto& m : g_seModes) if (!m.deleted && m.id == id) return &m;
+    return nullptr;
+}
+static SeGameMode* SeModeByApi(void* api)
+{
+    for (auto& m : g_seModes)
+    {
+        if (m.deleted || !m.slot || !SeAlive(m.slot)) continue;
+        SDK::UObject* ms = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(m.slot) + 0x300);
+        if (ms && *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(ms) + 0x90) == api) return &m;
+    }
+    return nullptr;
+}
+static SeGameMode* SeModeAt(const double* loc)
+{
+    for (auto& m : g_seModes)
+    {
+        if (m.deleted || !m.slot || !SeAlive(m.slot)) continue;
+        if (SDK::UBoxComponent* box = SbImportanceBox(m.slot)) if (SbOutsideBox(box, loc) <= 1.0) return &m;
+    }
+    return nullptr;
+}
+static bool SeTeamChangerAllowedAt(const double* loc)
+{
+    if (g_seAllowTeamChangers) return true;
+    SeGameMode* m = SeModeAt(loc);
+    return m && *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(m->slot) + 0x438) != nullptr;
+}
+static std::string SeModeSetting(const SeGameMode& m, const std::string& k)
+{
+    auto it = m.settings.find(k);
+    if (it != m.settings.end()) return it->second;
+    for (auto& d : kSeModeDefaults) if (k == d[0]) return d[1];
+    return std::string();
+}
+static int SeModeSettingInt(const SeGameMode& m, const std::string& k) { return atoi(SeModeSetting(m, k).c_str()); }
+static std::string SeModeClean(const std::string& raw, size_t maxLen)
+{
+    std::string o;
+    for (char c : raw) if (isalnum(static_cast<unsigned char>(c)) || c == ' ' || c == '_' || c == '-') o += c;
+    return o.size() > maxLen ? o.substr(0, maxLen) : o;
+}
+// Push one config value to the mode (only when it changed): scripts on every machine read it.
+static void SeModePush(SeGameMode& m, const std::string& k, const std::string& v)
+{
+    auto it = m.pushed.find(k);
+    if (it != m.pushed.end() && it->second == v) return;
+    if (SeModeConfigSet(m.slot, k, v) == 1) m.pushed[k] = v;
+    // and as a text template value: {<mode name>.<key without rgm.>}
+    const std::string tk = m.name + "." + (k.rfind("rgm.", 0) == 0 ? k.substr(4) : k);
+    AcquireSRWLockExclusive(&g_seTextLock);
+    if (g_seTextQueue.size() < 4096) g_seTextQueue.push_back({ tk, v });
+    ReleaseSRWLockExclusive(&g_seTextLock);
+}
+static void SeModePushAll(SeGameMode& m)
+{
+    SeModePush(m, "rgm.id", m.id);
+    SeModePush(m, "rgm.name", m.name);
+    SeModePush(m, "rgm.state", m.state);
+    SeModePush(m, "rgm.round", std::to_string(m.round));
+    SeModePush(m, "rgm.time", std::to_string(m.timeLeft));
+    SeModePush(m, "rgm.winner", std::to_string(m.winner));
+    SeModePush(m, "rgm.teams", std::to_string(m.nTeams));
+    int players = 0;
+    for (int t = 0; t < m.nTeams; ++t)
+    {
+        const std::string p = "rgm.team" + std::to_string(t + 1) + ".";
+        SeModePush(m, p + "name", m.teamName[t]);
+        SeModePush(m, p + "size", std::to_string(m.teamSize[t]));
+        SeModePush(m, p + "max", std::to_string(m.teamMax[t]));
+        SeModePush(m, p + "score", std::to_string(m.score[t]));
+        SeModePush(m, p + "wins", std::to_string(m.wins[t]));
+        players += m.teamSize[t];
+    }
+    SeModePush(m, "rgm.players", std::to_string(players));
+    for (auto& d : kSeModeDefaults) SeModePush(m, std::string("rgm.set.") + d[0], SeModeSetting(m, d[0]));
+    for (auto& kv : m.settings) if (kv.first.rfind("custom.", 0) == 0) SeModePush(m, "rgm.set." + kv.first, kv.second);
+}
+static std::string SeModeRecord(const SeGameMode& m)
+{
+    // id~name~x,y,z~teams~names~maxes~k=v;k=v~state~level~round~time~sizes~scores~winner
+    std::string names, maxes, sets, sizes, scores;
+    for (int t = 0; t < m.nTeams; ++t)
+    {
+        names += (t ? "," : "") + m.teamName[t];
+        maxes += (t ? "," : "") + std::to_string(m.teamMax[t]);
+        sizes += (t ? "," : "") + std::to_string(m.teamSize[t]);
+        scores += (t ? "," : "") + std::to_string(m.score[t]);
+    }
+    for (auto& kv : m.settings) sets += (sets.empty() ? "" : ";") + kv.first + "=" + kv.second;
+    char at[96];
+    snprintf(at, sizeof(at), "%.0f,%.0f,%.0f", m.at[0], m.at[1], m.at[2]);
+    return m.id + "~" + m.name + "~" + at + "~" + std::to_string(m.nTeams) + "~" + names + "~" + maxes + "~" + sets + "~" + m.state + "~" +
+           m.level + "~" + std::to_string(m.round) + "~" + std::to_string(m.timeLeft) + "~" + sizes + "~" + scores + "~" + std::to_string(m.winner);
+}
+static void SeModeListTo(SDK::UObject* pc)
+{
+    std::string out;
+    for (auto& m : g_seModes) if (!m.deleted) out += (out.empty() ? "" : "\x1E") + SeModeRecord(m);
+    SeBroadcast("SE|GMLIST|" + out, pc);
+}
+// Balls for objects with the "ball" role: spawned (or reset) by the SERVER only. A Luau spawnBall runs on every
+// machine and each client then makes its own client-only ball the server never heard of (Iris "failed to
+// resolve clientassigned ref", seen 2026-09-24 on an unmodded player) -- so the mode does it natively here.
+static int SeModeBalls(SeGameMode& m)
+{
+    static SDK::UClass* bsc = nullptr;
+    if (!bsc) bsc = SDK::UObject::FindClassFast("BallSpawnerComponent");
+    if (!bsc) return 0;
+    int n = 0;
+    for (const auto& kv : m.settings)
+    {
+        if (kv.first.rfind("role.", 0) != 0 || kv.second.rfind("ball", 0) != 0) continue;
+        SDK::AActor* a = SbActorForIdx(kv.first.substr(5));
+        if (!a || !SeAlive(a)) continue;
+        for (SDK::UObject* c : ClassObjects(bsc))
+        {
+            if (!c || c->Outer != a) continue;
+            struct { SDK::UObject* ReturnValue; } gb{};
+            auto* fGet = c->Class->GetFunction("BallSpawnerComponent", "GetSpawnedBall");
+            if (fGet) SafeProcessEvent(c, fGet, &gb);
+            if (gb.ReturnValue && SeAlive(gb.ReturnValue))
+            {
+                if (auto* f = c->Class->GetFunction("BallSpawnerComponent", "ResetBall")) SafeProcessEvent(c, f, nullptr);
+                HxLog("[HalcyonA2][GAMEMODE] %s: ball of %s reset\n", m.name.c_str(), a->GetName().c_str());
+            }
+            else if (auto* f = c->Class->GetFunction("BallSpawnerComponent", "SpawnBall"))
+            {
+                struct { bool CanSpawnMany; uint8_t pad[7]; SDK::FVector OverrideSpawnLocation; } sp{};
+                sp.CanSpawnMany = false;
+                sp.OverrideSpawnLocation = a->K2_GetActorLocation();
+                sp.OverrideSpawnLocation.Z += 100.0;
+                SafeProcessEvent(c, f, &sp);
+                struct { SDK::UObject* ReturnValue; } after{};
+                if (fGet) SafeProcessEvent(c, fGet, &after);
+                HxLog("[HalcyonA2][GAMEMODE] %s: ball spawned by %s -> %s\n", m.name.c_str(), a->GetName().c_str(),
+                      after.ReturnValue ? after.ReturnValue->GetName().c_str() : "(none)");
+            }
+            ++n;
+            break;
+        }
+    }
+    return n;
+}
+static void SeModeSetState(SeGameMode& m, const std::string& st)
+{
+    if (m.state == st) return;
+    HxLog("[HalcyonA2][GAMEMODE] %s: %s -> %s\n", m.name.c_str(), m.state.c_str(), st.c_str());
+    m.state = st;
+    m.stateAt = GetTickCount64();
+    if (st == "countdown" || (st == "running" && m.round == 0)) { for (int t = 0; t < 8; ++t) m.score[t] = 0; m.winner = 0; }
+    if (st == "running") ++m.round;
+    if (st == "idle") { m.winner = 0; }
+    SeModePushAll(m);
+    if (st == "running") SeModeBalls(m);
+}
+static void SeModeEnd(SeGameMode& m, int winner)   // winner: 1-based team, 0 = work it out from the scores (tie = 0)
+{
+    if (m.state != "running" && m.state != "countdown") return;
+    if (winner <= 0)
+    {
+        int best = -1, bestScore = -2147483647; bool tie = false;
+        for (int t = 0; t < m.nTeams; ++t)
+        {
+            if (m.score[t] > bestScore) { bestScore = m.score[t]; best = t; tie = false; }
+            else if (m.score[t] == bestScore) tie = true;
+        }
+        winner = (best >= 0 && !tie) ? best + 1 : 0;
+    }
+    m.winner = winner;
+    if (winner >= 1 && winner <= m.nTeams) ++m.wins[winner - 1];
+    SeModeSetState(m, "ended");
+}
+// Create: a slot of its own, teams sized as asked. Returns the mode (nullptr + a note when it can't).
+static SeGameMode* SeModeCreate(const std::string& rawName, const double* at, int nTeams, const int* maxes, const std::string* names,
+                                const std::string& level, const std::string& wantId, SDK::UObject* pc, bool withController = true)
+{
+    const std::string name = SeModeClean(rawName, 32);
+    auto note = [&](const std::string& t) { if (pc) SeBroadcast("SE|NOTE|" + t, pc); HxLog("[HalcyonA2][GAMEMODE] %s\n", t.c_str()); };
+    if (name.empty()) { note("Give the game mode a name."); return nullptr; }
+    for (auto& m : g_seModes)
+        if (!m.deleted && _stricmp(m.name.c_str(), name.c_str()) == 0) { note("There is already a game mode called '" + name + "'."); return nullptr; }
+    int live = 0;
+    for (auto& m : g_seModes) if (!m.deleted) ++live;
+    if (live >= 12) { note("12 game modes is the limit for one server run."); return nullptr; }
+    for (auto& m : g_seModes)
+        if (!m.deleted && fabs(m.at[0] - at[0]) < 2 * kSeModeHalf[0] && fabs(m.at[1] - at[1]) < 2 * kSeModeHalf[1] && fabs(m.at[2] - at[2]) < 2 * kSeModeHalf[2])
+        { note("That area overlaps game mode '" + m.name + "'. Move the camera further away (each game mode is about 78 x 95 x 19 m)."); return nullptr; }
+    nTeams = (std::max)(1, (std::min)(8, nTeams));
+    int sizes[8];
+    for (int t = 0; t < nTeams; ++t) sizes[t] = (std::max)(1, (std::min)(64, maxes ? maxes[t] : 4));
+    std::string id = wantId;
+    if (id.empty() || SeModeById(id)) id = "RigelMode" + std::to_string(++g_seModeCounter);
+    SDK::AActor* slot = SbCreateSlotWithId(at, "tag/teamchanger", id, sizes, nTeams);
+    if (!slot || !*reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(slot) + 0x440))
+    { note("Couldn't create the game mode area here (the game refused the slot)."); return nullptr; }
+    SeGameMode m;
+    m.id = id; m.name = name; m.level = level; m.slot = slot; m.nTeams = nTeams;
+    for (int i = 0; i < 3; ++i) m.at[i] = at[i];
+    static const char* kDefaultNames[] = { "Blue", "Red", "Green", "Yellow", "Purple", "Orange", "Pink", "White" };
+    for (int t = 0; t < nTeams; ++t) { m.teamMax[t] = sizes[t]; m.teamName[t] = names && !names[t].empty() ? SeModeClean(names[t], 20) : kDefaultNames[t]; }
+    m.stateAt = GetTickCount64();
+    m.starterClearAt = GetTickCount64() + 6000;          // the project's own two team changers go once it settles
+    g_seModes.push_back(m);
+    SeGameMode& r = g_seModes.back();
+    if (withController)
+    {
+        // The mode's controller: a Game State Manager at the centre. The Game Modes window attaches the mode's
+        // generated script to it (with its slots wired to the objects that have roles).
+        const double rot0[3] = { 0, 0, 0 }, scl1[3] = { 1, 1, 1 };
+        const std::string prevLoading = g_lvLoading;
+        g_lvLoading = level;
+        const std::string cidx = SeSandboxSpawn("GameStateManager", at, rot0, scl1);
+        g_lvLoading = prevLoading;
+        SeGameMode* again = SeModeById(id);                   // (the spawn cannot move g_seModes, but be safe)
+        if (again && !cidx.empty()) again->settings["controller"] = cidx;
+    }
+    SeGameMode& rr = *SeModeById(id);
+    SeModePushAll(rr);
+    const bool tm = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(slot) + 0x438) != nullptr;
+    HxLog("[HalcyonA2][GAMEMODE] created '%s' (%s) at (%.0f,%.0f,%.0f): %d team(s), ticket manager %s, controller %s\n", name.c_str(),
+          id.c_str(), at[0], at[1], at[2], nTeams, tm ? "yes" : "NO", rr.settings.count("controller") ? rr.settings["controller"].c_str() : "none");
+    return &rr;
+}
+// Delete: every object we placed in it goes (the slot itself stays -- it is inert once empty).
+static void SeModeDelete(SeGameMode& m)
+{
+    SDK::UObject* lgm = m.slot && SeAlive(m.slot) ? *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(m.slot) + 0x440) : nullptr;
+    int n = 0;
+    for (size_t i = 0; lgm && i < g_sbOwned.size();)
+    {
+        if (g_sbOwned[i].lgm != lgm) { ++i; continue; }
+        SDK::AActor* a = SbActorForIdx(g_sbOwned[i].idx);
+        const std::string idx = g_sbOwned[i].idx;
+        if (a && SeSandboxDelete(a)) { SbOwnedForget(idx); ++n; continue; }
+        if (SbOwnedApply(g_sbOwned[i], true)) { g_sbOwned.erase(g_sbOwned.begin() + i); ++n; continue; }
+        ++i;
+    }
+    g_seFabSlots.erase(std::remove(g_seFabSlots.begin(), g_seFabSlots.end(), m.slot), g_seFabSlots.end());
+    m.deleted = true;
+    HxLog("[HalcyonA2][GAMEMODE] deleted '%s': %d object(s) removed\n", m.name.c_str(), n);
+}
+// The objects the project loaded with (not ours): the two starter team changers. Our own are kept.
+static int SeModeClearStarters(SeGameMode& m)
+{
+    SDK::UObject* lgm = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(m.slot) + 0x440);
+    if (!lgm) return 0;
+    auto* pcCls = SDK::UObject::FindClassFast("PrefabComponent");
+    std::vector<SDK::AActor*> doomed;
+    const int32_t n = SDK::UObject::GObjects->Num();
+    for (int32_t i = 0; pcCls && i < n; ++i)
+    {
+        SDK::UObject* o = SDK::UObject::GObjects->GetByIndex(i);
+        if (!o || o->IsDefaultObject() || !o->IsA(pcCls)) continue;
+        if (*reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(o) + 0x440) != lgm) continue;
+        const std::string pidx = FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(o) + 0x248));
+        if (!pidx.empty() && SbOwnedByIdx(pidx)) continue;
+        if (o->Outer && SeAlive(o->Outer)) doomed.push_back(static_cast<SDK::AActor*>(o->Outer));
+    }
+    // The project's team changers carry no prefab link to the gamemode: find them by their ticket manager.
+    void* tm = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(m.slot) + 0x438);
+    if (auto* tcc = SDK::UObject::FindClassFast("TeamChangeComponent"))
+        for (int32_t i = 0; tm && i < n; ++i)
+        {
+            SDK::UObject* c = SDK::UObject::GObjects->GetByIndex(i);
+            if (!c || c->IsDefaultObject() || !c->IsA(tcc) || *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(c) + 0x508) != tm) continue;
+            SDK::AActor* owner = static_cast<SDK::AActor*>(c->Outer);
+            if (!owner || !SeAlive(owner)) continue;             // (SeActorAlive only knows actors we track)
+            SDK::UObject* opc = SbPrefabOf(owner);
+            const std::string oidx = opc ? FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(opc) + 0x248)) : std::string();
+            if (!oidx.empty() && SbOwnedByIdx(oidx)) continue;   // ours
+            if (std::find(doomed.begin(), doomed.end(), owner) == doomed.end()) doomed.push_back(owner);
+        }
+    // PARK them, never delete. Removing a project object's node leaves every CLIENT's copy of the actor alive
+    // with its node handle cleared (TeamChangeComponent+0x268 = null), and the team changer's own overlap
+    // handler (0x53C48B0) dereferences that handle on the overlapping player's machine -> a real player
+    // walking through the spot crashed (seen 2026-09-24 with an unmodded PlayerNovBuild client). Moving a
+    // project node (a merge) is safe and every machine follows it: put them outside the station's hull
+    // (radially out from the cylinder axis, world Y), where nobody can reach them.
+    double rx = m.at[0], rz = m.at[2];
+    const double r = sqrt(rx * rx + rz * rz);
+    if (r < 1.0) { rx = 0; rz = -1; } else { rx /= r; rz /= r; }
+    int cleared = 0, k = 0;
+    for (SDK::AActor* a : doomed)
+    {
+        const double park[3] = { rx * 80000.0, m.at[1] + 600.0 * k++, rz * 80000.0 }, rot0[3] = { 0, 0, 0 }, scl1[3] = { 1, 1, 1 };
+        { const SDK::FVector was = a->K2_GetActorLocation(); HxLog("[HalcyonA2][GAMEMODE] starter %s was at centre%+.0f,%+.0f,%+.0f\n", a->GetName().c_str(), was.X - m.at[0], was.Y - m.at[1], was.Z - m.at[2]); }
+        if (SeSandboxXform(a, park, rot0, scl1)) ++cleared;
+    }
+    HxLog("[HalcyonA2][GAMEMODE] %s: parked %d of %zu starter object(s) outside the hull (lgm=%p tm=%p)\n", m.name.c_str(), cleared,
+          doomed.size(), (void*)lgm, tm);
+    if (auto* f = m.slot->Class->GetFunction("ModuleSlot", "PushNetVars")) SafeProcessEvent(m.slot, f, nullptr);
+    return cleared;
+}
+// Team sizes: every team changer bound to this mode's ticket manager reports its team's size.
+static void SeModeReadTeams(SeGameMode& m)
+{
+    void* tm = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(m.slot) + 0x438);
+    int sz[8] = {};
+    static SDK::UClass* tcc = nullptr;
+    if (!tcc) tcc = SDK::UObject::FindClassFast("TeamChangeComponent");
+    if (tm && tcc)
+        for (SDK::UObject* c : ClassObjects(tcc))
+        {
+            if (!c || c->IsDefaultObject()) continue;
+            const uintptr_t b = reinterpret_cast<uintptr_t>(c);
+            if (*reinterpret_cast<void**>(b + 0x508) != tm) continue;
+            const int team = *reinterpret_cast<int32_t*>(b + 0x524), size = *reinterpret_cast<int32_t*>(b + 0x4DC);
+            if (team >= 0 && team < 8 && size > sz[team]) sz[team] = size;
+        }
+    for (int t = 0; t < 8; ++t) m.teamSize[t] = sz[t];
+}
+static void SeModeEvent(SeGameMode& m, const std::string& ev, const std::string& arg)
+{
+    const std::string e = ev.substr(4);
+    auto teamArg = [&](int* team, int* val) {
+        const size_t c = arg.find(',');
+        *team = atoi(arg.c_str());
+        *val = c == std::string::npos ? 1 : atoi(arg.c_str() + c + 1);
+    };
+    if (e == "start") { if (m.state == "idle" || m.state == "ended") SeModeSetState(m, SeModeSettingInt(m, "countdown") > 0 ? "countdown" : "running"); }
+    else if (e == "startnow") { if (m.state != "running") SeModeSetState(m, "running"); }
+    else if (e == "end") SeModeEnd(m, atoi(arg.c_str()));
+    else if (e == "reset") { for (int t = 0; t < 8; ++t) { m.score[t] = 0; m.wins[t] = 0; } m.winner = 0; m.round = 0; m.state = ""; SeModeSetState(m, "idle"); }
+    else if (e == "score" || e == "setscore")
+    {
+        int team = 0, val = 0;
+        teamArg(&team, &val);
+        if (team < 1 || team > m.nTeams) return;
+        if (e == "score" && m.state != "running") return;       // points only count while a round is on
+        if (e == "score") m.score[team - 1] += val; else m.score[team - 1] = val;
+        SeModePushAll(m);
+        const int toWin = SeModeSettingInt(m, "score_to_win");
+        if (m.state == "running" && toWin > 0 && m.score[team - 1] >= toWin) SeModeEnd(m, team);
+    }
+    else if (e == "balls") SeModeBalls(m);                 // Rigel.resetBalls(): spawn / reset every ball-role spawner
+    else if (e == "set")                                   // "key=value": scripts can change a custom setting
+    {
+        const size_t q = arg.find('=');
+        if (q != std::string::npos && q > 0)
+        {
+            std::string val;
+            for (char c : arg.substr(q + 1, 200)) if (c != ';' && c != '~' && c != '=' && c != '|' && static_cast<unsigned char>(c) >= 0x20) val += c;
+            const std::string key = SeModeClean(arg.substr(0, q), 32);
+            if (!key.empty()) { m.settings["custom." + key] = val; SeModePushAll(m); }
+        }
+    }
+    HxLog("[HalcyonA2][GAMEMODE] %s: script event %s(%s)\n", m.name.c_str(), e.c_str(), arg.c_str());
+}
+// ---- game modes in saved levels / .a2level files ----
+// G <id> <name> <x,y,z> <teams> <names> <maxes> <settings hex>. Settings that name objects (role.<id>, controller)
+// are written as object NUMBERS of the level (#n) -- ids change every time a level loads -- and mapped back after.
+static std::string SeHexOf(const std::string& v)
+{
+    static const char* hx = "0123456789ABCDEF";
+    std::string o;
+    for (unsigned char c : v) { o += hx[c >> 4]; o += hx[c & 15]; }
+    return o;
+}
+static std::string SeUnhex(const std::string& h)
+{
+    std::string o;
+    for (size_t i = 0; i + 1 < h.size(); i += 2) o += static_cast<char>(strtoul(h.substr(i, 2).c_str(), nullptr, 16));
+    return o;
+}
+static std::string SeModesForLevel(const std::string& name, bool tag, const std::unordered_map<std::string, int>& ownedIdx)
+{
+    std::string t;
+    for (auto& m : g_seModes)
+    {
+        if (m.deleted) continue;
+        if (tag && !m.level.empty() && m.level != name) continue;
+        if (tag) m.level = name;
+        std::string sets, names, maxes;
+        for (auto& kv : m.settings)
+        {
+            std::string k = kv.first, v = kv.second;
+            if (k.rfind("role.", 0) == 0)
+            {
+                auto it = ownedIdx.find(k.substr(5));
+                if (it == ownedIdx.end()) continue;                 // an object that isn't part of the level
+                k = "role.#" + std::to_string(it->second);
+            }
+            if (k == "controller") { auto it = ownedIdx.find(v); if (it == ownedIdx.end()) continue; v = "#" + std::to_string(it->second); }
+            sets += (sets.empty() ? "" : "\x1F") + k + "\x1E" + v;
+        }
+        for (int i = 0; i < m.nTeams; ++i) { names += (i ? "," : "") + m.teamName[i]; maxes += (i ? "," : "") + std::to_string(m.teamMax[i]); }
+        char at[96];
+        snprintf(at, sizeof(at), "%.1f,%.1f,%.1f", m.at[0], m.at[1], m.at[2]);
+        t += "G\t" + m.id + "\t" + m.name + "\t" + at + "\t" + std::to_string(m.nTeams) + "\t" + names + "\t" + maxes + "\t" + SeHexOf(sets) + "\n";
+    }
+    return t;
+}
+static std::unordered_map<std::string, std::string> g_seModeLoadSets;   // mode id -> raw settings text, until fixup
+static void SeModesLoadCreate(const std::string& level, const std::vector<std::vector<std::string>>& lines)
+{
+    for (const auto& f : lines)
+    {
+        if (f[0] != "G" || f.size() < 8) continue;
+        double at[3];
+        if (!SeVec(f[3], at)) continue;
+        int maxes[8] = { 4, 4, 4, 4, 4, 4, 4, 4 };
+        std::string names[8];
+        { auto v = SeSplit(f[5], ',', 8); for (size_t i = 0; i < v.size(); ++i) names[i] = v[i]; }
+        { auto v = SeSplit(f[6], ',', 8); for (size_t i = 0; i < v.size(); ++i) maxes[i] = atoi(v[i].c_str()); }
+        SeGameMode* m = SeModeCreate(f[2], at, atoi(f[4].c_str()), maxes, names, level, std::string(), nullptr, false);
+        if (!m) continue;
+        g_seModeLoadSets[m->id] = SeUnhex(f[7]);
+    }
+}
+static void SeModesLoadFixup(const std::string& level, const std::unordered_map<int, std::string>& objIdx)
+{
+    for (auto& m : g_seModes)
+    {
+        if (m.deleted || m.level != level) continue;
+        auto raw = g_seModeLoadSets.find(m.id);
+        if (raw == g_seModeLoadSets.end()) continue;
+        for (const auto& kvs : SeSplit(raw->second, '\x1F', 512))
+        {
+            const size_t e = kvs.find('\x1E');
+            if (e == std::string::npos) continue;
+            std::string k = kvs.substr(0, e), v = kvs.substr(e + 1);
+            if (k.rfind("role.#", 0) == 0) { auto it = objIdx.find(atoi(k.c_str() + 6)); if (it == objIdx.end()) continue; k = "role." + it->second; }
+            if (k == "controller" && !v.empty() && v[0] == '#') { auto it = objIdx.find(atoi(v.c_str() + 1)); if (it == objIdx.end()) continue; v = it->second; }
+            m.settings[k] = v;
+        }
+        g_seModeLoadSets.erase(raw);
+        SeModePushAll(m);
+        HxLog("[HalcyonA2][GAMEMODE] '%s' loaded with level '%s' (%zu setting(s))\n", m.name.c_str(), level.c_str(), m.settings.size());
+    }
+    SeModeListTo(nullptr);
+}
+static void SeModesUnload(const std::string& level)
+{
+    bool any = false;
+    for (auto& m : g_seModes) if (!m.deleted && !level.empty() && m.level == level) { SeModeDelete(m); any = true; }
+    if (any) SeModeListTo(nullptr);
+}
+
+static void SeModeTick()
+{
+    static ULONGLONG s_last = 0;
+    const ULONGLONG now = GetTickCount64();
+    std::vector<std::pair<void*, std::pair<std::string, std::string>>> evs;
+    AcquireSRWLockExclusive(&g_seTextLock);
+    evs.swap(g_seModeEvents);
+    ReleaseSRWLockExclusive(&g_seTextLock);
+    for (auto& ev : evs)
+        if (SeGameMode* m = SeModeByApi(ev.first)) SeModeEvent(*m, ev.second.first, ev.second.second);
+    if (now - s_last < 250) return;
+    s_last = now;
+    for (auto& m : g_seModes)
+    {
+        if (m.deleted || !m.slot || !SeAlive(m.slot)) continue;
+        if (m.starterClearAt && now >= m.starterClearAt)
+        {
+            static std::unordered_map<std::string, int> s_tries;   // the project's objects appear a few seconds after the load
+            const int tries = ++s_tries[m.id];
+            const int n = SeModeClearStarters(m);
+            m.starterClearAt = (n == 0 && tries < 4) ? now + 6000ULL * tries : 0;
+            HxLog("[HalcyonA2][GAMEMODE] %s: %d starter object(s) parked, ticket manager %s\n", m.name.c_str(), n,
+                  *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(m.slot) + 0x438) ? "kept" : "GONE");
+        }
+        SeModeReadTeams(m);
+        int players = 0; bool everyTeam = true;
+        const int minP = (std::max)(1, SeModeSettingInt(m, "min_players"));
+        for (int t = 0; t < m.nTeams; ++t) { players += m.teamSize[t]; if (m.teamSize[t] < minP) everyTeam = false; }
+        const double el = (now - m.stateAt) / 1000.0;
+        const std::string mode = SeModeSetting(m, "start_mode");
+        if (m.state == "idle")
+        {
+            m.timeLeft = 0;
+            if (mode == "auto" && everyTeam && players > 0) SeModeSetState(m, SeModeSettingInt(m, "countdown") > 0 ? "countdown" : "running");
+        }
+        else if (m.state == "countdown")
+        {
+            const int cd = SeModeSettingInt(m, "countdown");
+            m.timeLeft = (std::max)(0, static_cast<int>(ceil(cd - el)));
+            if (el >= cd) SeModeSetState(m, "running");
+            else if (mode == "auto" && !everyTeam) SeModeSetState(m, "idle");      // someone left before it began
+        }
+        else if (m.state == "running")
+        {
+            const int rt = SeModeSettingInt(m, "round_time");
+            m.timeLeft = rt > 0 ? (std::max)(0, static_cast<int>(ceil(rt - el))) : 0;
+            if (rt > 0 && el >= rt) SeModeEnd(m, 0);
+            else if (SeModeSettingInt(m, "stop_when_empty") && players == 0 && el > 3.0) SeModeEnd(m, 0);
+        }
+        else if (m.state == "ended")
+        {
+            const int ed = SeModeSettingInt(m, "end_delay");
+            m.timeLeft = (std::max)(0, static_cast<int>(ceil(ed - el)));
+            if (el >= ed) SeModeSetState(m, (mode == "auto" && SeModeSettingInt(m, "auto_restart")) ? "idle" : "idle");
+        }
+        SeModePushAll(m);
+        // editors see the live status (once a second at most, and only when it changed)
+        const std::string rec = SeModeRecord(m);
+        static ULONGLONG s_stat = 0;
+        if (rec != m.statSent && now - s_stat > 900) { m.statSent = rec; s_stat = now; SeBroadcast("SE|GMSTAT|" + rec, nullptr); }
+    }
+}
 static void SeLvTick()
 {
     static bool s_started = false;
@@ -5669,8 +6638,22 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
     if (now - g_seLastCmd > 1000) { g_seLastCmd = now; g_seCmdsThisSecond = 0; }
     if (++g_seCmdsThisSecond > 60) return true;
 
-    const auto p = SeSplit(cmd, '|', 16);
+    auto p = SeSplit(cmd, '|', 16);
     const std::string op = p.size() > 1 ? p[1] : std::string();
+    // LOCAL TEST: a position field "@P" or "@Pdx,dy,dz" = the first other player's position (+ offset). Lets the
+    // tests put game modes / team changers where a real (unmodded) player stands.
+    if (g_seLocalTest)
+        for (size_t i = 2; i < p.size(); ++i)
+            if (p[i].rfind("@P", 0) == 0)
+            {
+                double at[3], off[3] = { 0, 0, 0 };
+                if (p[i].size() > 2) SeVec(p[i].substr(2), off);
+                if (!SeOtherPlayerPos(pawn, at)) { HxLog("[HalcyonA2][SPECEDIT] @P: no other player\n"); return true; }
+                char b[96];
+                snprintf(b, sizeof(b), "%.1f,%.1f,%.1f", at[0] + off[0], at[1] + off[1], at[2] + off[2]);
+                HxLog("[HalcyonA2][SPECEDIT] @P -> %s (%s)\n", b, op.c_str());
+                p[i] = b;
+            }
     g_seCaller = SeCallerIdOf(pawn);
     g_seCallerName = SeCallerNameOf(pawn);
     struct CallerReset { ~CallerReset() { g_seCaller.clear(); g_seCallerName.clear(); } } callerReset;
@@ -5734,6 +6717,130 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
     else if (op == "LUAUSRC" && p.size() >= 3) SeLuauUpdateAll(pawn, p[2]);
     else if (op == "LUAUREF" && p.size() >= 7) SeLuauRef(pawn, p[2], p[3], p[4], p[5], p[6]);
     else if (op == "REFKEY" && p.size() >= 3 && g_seLocalTest) g_seForceRefKey = p[2];
+    else if (op == "ALLOWTEAM" && p.size() >= 3 && g_seLocalTest) g_seAllowTeamChangers = p[2] == "1";
+    else if (op == "LOADSLOT" && p.size() >= 4 && g_seLocalTest) SeLoadMapSlot(p[2], p[3]);   // SE|LOADSLOT|<slot id>|<project>
+    // ---- game modes (the Game Modes window) ----
+    else if (op == "GMNEW" && p.size() >= 5)              // SE|GMNEW|name|x,y,z|teams|max csv|names csv
+    {
+        double at[3];
+        if (SeVec(p[3], at))
+        {
+            const int nT = atoi(p[4].c_str());
+            int maxes[8] = { 4, 4, 4, 4, 4, 4, 4, 4 };
+            std::string names[8];
+            if (p.size() >= 6) { auto v = SeSplit(p[5], ',', 8); for (size_t i = 0; i < v.size(); ++i) maxes[i] = atoi(v[i].c_str()); }
+            if (p.size() >= 7) { auto v = SeSplit(p[6], ',', 8); for (size_t i = 0; i < v.size(); ++i) names[i] = v[i]; }
+            SDK::UObject* pc = SeCallerPC(pawn);
+            if (SeGameMode* m = SeModeCreate(p[2], at, nT, maxes, names, SeCallerScene(), std::string(), pc))
+                if (pc) SeBroadcast("SE|NOTE|Game mode '" + m->name + "' created. Place its objects inside the orange box.", pc);
+            SeModeListTo(nullptr);
+        }
+    }
+    else if (op == "GMSET" && p.size() >= 5)              // SE|GMSET|id|key|value
+    {
+        if (SeGameMode* m = SeModeById(p[2]))
+        {
+            const std::string k = p[3];
+            if (k == "name") { const std::string n = SeModeClean(p[4], 32); if (!n.empty()) m->name = n; }
+            else if (k.rfind("team", 0) == 0 && k.find('.') != std::string::npos)      // teamN.name / teamN.max
+            {
+                const int t = atoi(k.c_str() + 4) - 1;
+                if (t >= 0 && t < m->nTeams)
+                {
+                    if (k.find(".name") != std::string::npos) m->teamName[t] = SeModeClean(p[4], 20);
+                    else if (k.find(".max") != std::string::npos)
+                    {
+                        m->teamMax[t] = (std::max)(1, (std::min)(64, atoi(p[4].c_str())));
+                        int32_t* arr = *reinterpret_cast<int32_t**>(reinterpret_cast<uintptr_t>(m->slot) + 0x428);
+                        if (arr && t < *reinterpret_cast<int32_t*>(reinterpret_cast<uintptr_t>(m->slot) + 0x430)) arr[t] = m->teamMax[t];
+                    }
+                }
+            }
+            else
+            {
+                // keys: role.<object id>, custom.<name>, the rules -- letters, digits, '.', '_', '-'
+                std::string key, val;
+                for (char c : k) if (isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '_' || c == '-') key += c;
+                for (char c : p[4]) if (c != ';' && c != '~' && c != '=' && c != '|' && static_cast<unsigned char>(c) >= 0x20) val += c;
+                key = key.substr(0, 64);
+                if (!key.empty()) { if (val.empty() && key.rfind("role.", 0) == 0) m->settings.erase(key); else m->settings[key] = val.substr(0, 200); }
+            }
+            SeModePushAll(*m);
+            SeModeListTo(nullptr);
+        }
+    }
+    else if (op == "GMCTL" && p.size() >= 4)              // SE|GMCTL|id|start|stop|reset|end[,winner]
+    {
+        if (SeGameMode* m = SeModeById(p[2]))
+        {
+            const std::string c = p[3];
+            if (c == "start") SeModeEvent(*m, "rgm:start", "");
+            else if (c == "startnow") SeModeEvent(*m, "rgm:startnow", "");
+            else if (c == "stop" || c == "end") SeModeEvent(*m, "rgm:end", p.size() >= 5 ? p[4] : std::string());
+            else if (c == "reset") SeModeEvent(*m, "rgm:reset", "");
+            SeModeListTo(nullptr);
+        }
+    }
+    else if (op == "GMDEL" && p.size() >= 3) { if (SeGameMode* m = SeModeById(p[2])) { SeModeDelete(*m); SeModeListTo(nullptr); } }
+    else if (op == "GMLIST") SeModeListTo(SeCallerPC(pawn));
+    else if (op == "GMTEAM" && p.size() >= 5)             // SE|GMTEAM|id|team (1-based)|x,y,z : a team changer for that team
+    {
+        SeGameMode* m = SeModeById(p[2]);
+        double at[3];
+        const int team = atoi(p[3].c_str());
+        if (m && SeVec(p[4], at) && team >= 1 && team <= m->nTeams)
+        {
+            SeGameMode* here = SeModeAt(at);
+            if (here != m) { if (SDK::UObject* pc = SeCallerPC(pawn)) SeBroadcast("SE|NOTE|Team changers for '" + m->name + "' go inside its area.", pc); }
+            else
+            {
+                const double rot[3] = { 0, 0, 0 }, scl[3] = { 1, 1, 1 };
+                const std::string prevLoading = g_lvLoading;
+                g_lvLoading = SeCallerScene();
+                const std::string idx = SeSandboxSpawn("teamChange", at, rot, scl);
+                g_lvLoading = prevLoading;
+                if (!idx.empty())
+                    if (SDK::AActor* a = SbActorForIdx(idx))
+                    {
+                        const std::string ident = SeLvIdent(a), ti = std::to_string(team - 1), mx = std::to_string(m->teamMax[team - 1]);
+                        SeSbSet(nullptr, ident, "sd/TeamIndex", "num", ti);
+                        SeSbSet(nullptr, ident, "gd/TeamIndex", "num", ti);
+                        SeSbSet(nullptr, ident, "sd/TeamMaxSize", "num", mx);
+                    }
+            }
+        }
+    }
+    else if (op == "CFGSET" && p.size() >= 5 && g_seLocalTest)                // SE|CFGSET|<slot id>|<name>|<value>
+    {
+        SDK::AActor* slot = nullptr;
+        for (SDK::AActor* fs : g_seFabSlots)
+            if (fs && SeAlive(fs) && FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(fs) + 0x390)) == p[2]) slot = fs;
+        if (!slot) slot = SeMapSlotById(p[2]);
+        const int r = SeModeConfigSet(slot, p[3], p[4]);
+        HxLog("[HalcyonA2][SPECEDIT] CFGSET %s.%s = '%s': %d\n", p[2].c_str(), p[3].c_str(), p[4].c_str(), r);
+    }
+    else if (op == "MKSLOTID" && p.size() >= 5 && g_seLocalTest) { double at[3]; const int ts[2] = { 4, 4 }; if (SeVec(p[2], at)) SbCreateSlotWithId(at, p[3], p[4], ts, 2); }
+    else if (op == "TEAMCHK" && g_seLocalTest)            // every TeamChangeComponent: arena / team / ticket manager
+    {
+        auto* tcc = SDK::UObject::FindClassFast("TeamChangeComponent");
+        const int32_t n = SDK::UObject::GObjects->Num();
+        for (int32_t i = 0; tcc && i < n; ++i)
+        {
+            SDK::UObject* c = SDK::UObject::GObjects->GetByIndex(i);
+            if (!c || c->IsDefaultObject() || !c->IsA(tcc)) continue;
+            const uintptr_t b = reinterpret_cast<uintptr_t>(c);
+            SDK::UObject* owner = c->Outer;
+            SDK::UObject* tm = *reinterpret_cast<SDK::UObject**>(b + 0x508);
+            SDK::AActor* oa = static_cast<SDK::AActor*>(owner);
+            const SDK::FVector l = oa ? oa->K2_GetActorLocation() : SDK::FVector{};
+            SDK::UObject* pc = oa ? SbPrefabOf(oa) : nullptr;
+            SDK::UObject* lgm = pc ? *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(pc) + 0x440) : nullptr;
+            HxLog("[HalcyonA2][SPECEDIT] TEAMCHK %s at (%.0f,%.0f,%.0f) gm=%s arena=%d team=%d size=%d max=%d tm=%s\n",
+                  owner ? owner->GetName().c_str() : "?", l.X, l.Y, l.Z, lgm ? lgm->GetName().c_str() : "-",
+                  *reinterpret_cast<int32_t*>(b + 0x4D8), *reinterpret_cast<int32_t*>(b + 0x524), *reinterpret_cast<int32_t*>(b + 0x4DC),
+                  *reinterpret_cast<int32_t*>(b + 0x4E0), tm ? tm->GetName().c_str() : "none");
+        }
+    }
     else if (op == "GMVAR" && p.size() >= 4 && g_seLocalTest)                 // SE|GMVAR|<object>|<name> (local test)
     {
         std::string v;

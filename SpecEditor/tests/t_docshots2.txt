@@ -1,0 +1,15 @@
+log DOCSHOTS2 start
+enter
+setres 1600x900w
+mousepark 1
+wait 4
+scene open ScoreboardRace
+wait 20
+gmwin ScoreboardRace
+wait 2
+gmscroll 1050
+wait 1
+gmpopup popup:gm_example
+wait 2
+shot gm_example_popup
+log DOCSHOTS2 done

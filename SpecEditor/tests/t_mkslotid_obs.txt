@@ -1,0 +1,5 @@
+log MIO start
+enter
+wait 40
+slots
+log MIO done

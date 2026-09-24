@@ -13,9 +13,10 @@ READY = {"07_light_switch.luau": "LightSwitch.luau", "08_vanishing_platform.luau
 def stage(game_root: str) -> None:
     kit = os.path.join(game_root, "RigelLuau")
     os.makedirs(kit, exist_ok=True)
-    for f in ("README.md", "Rigel-Luau-Guide.pdf", "Rigel-Quest-Guide.pdf", ".luaurc"):
+    for f in ("README.md", "GAMEMODES.md", "Rigel-Luau-Guide.pdf", "Rigel-Quest-Guide.pdf", "Rigel-GameModes-Guide.pdf",
+              "Rigel-MCP-Guide.pdf", ".luaurc"):
         shutil.copy2(os.path.join(ROOT, f), os.path.join(kit, f))
-    for d in ("types", "examples", ".vscode"):
+    for d in ("types", "examples", ".vscode", "levels", "mcp", "doc-images"):
         shutil.copytree(os.path.join(ROOT, d), os.path.join(kit, d), dirs_exist_ok=True)
     shutil.copytree(os.path.join(ROOT, "vendor"), os.path.join(kit, "tools"), dirs_exist_ok=True)   # luau-compile.exe
     for src, dst in READY.items():                          # ready-to-attach copies at the top level

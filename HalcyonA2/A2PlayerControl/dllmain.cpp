@@ -122,6 +122,9 @@ static bool Pressed(int vk, bool& prev)
 // system's per-tick velocity + idle BRAKE fought that movement and made real players feel slow.
 // Enabled only with -HalcyonWASD (the headless desktop test clients pass it) or F2 in-game.
 static bool          g_wasdEnabled = false;
+static SDK::FVector    g_cmdTarget{};                 // [CMDFILE] where the test command file sends the pawn
+static bool          g_cmdActive = false;
+static bool          g_cmdThrow = false;                // [CMDFILE] "throw": the F4 throw, once
 static constexpr uintptr_t kRootCollisionOff = 0x5D8;   // AVRPawn::rootCollision (USphereComponent*)
 static bool          g_prevF1 = false, g_prevF2 = false;
 static ULONGLONG     g_lastTickMs = 0;
@@ -648,8 +651,9 @@ static void Tick()
         pc->GetPlayerViewPoint(&vl, &vr);
         const SDK::FVector vf = SDK::UKismetMathLibrary::GetForwardVector(vr);
         if (Pressed(VK_F3, g_prevF3)) SpawnBallInFront(pc->Pawn, vf);
-        if (Pressed(VK_F4, g_prevF4))
+        if (Pressed(VK_F4, g_prevF4) || g_cmdThrow)
         {
+            g_cmdThrow = false;
             double d = 0.0;
             g_throwBall = NearestArenaBall(pc->Pawn->K2_GetActorLocation(), d);
             if (g_throwBall)
@@ -667,6 +671,58 @@ static void Tick()
     {
         g_wasdEnabled = !g_wasdEnabled;
         Log("[A2PlayerControl] F2: WASD movement %s\n", g_wasdEnabled ? "ON" : "OFF");
+    }
+    // [CMDFILE] Tests steer the pawn without touching the keyboard: %TEMP%\A2PlayerControl.cmd holds lines
+    //   move <dx> <dy> <dz>   /   goto <x> <y> <z>
+    // read once (the file is deleted), then the pawn flies to the target through the same velocity + server
+    // push path as WASD, and stops within 60 cm.
+    {
+        static ULONGLONG s_cmdPoll = 0;
+        const ULONGLONG nc = GetTickCount64();
+        if (pc->Pawn && nc - s_cmdPoll > 250)
+        {
+            s_cmdPoll = nc;
+            wchar_t tmp[MAX_PATH] = {};
+            GetTempPathW(MAX_PATH, tmp);
+            const std::wstring cmdPath = std::wstring(tmp) + L"A2PlayerControl.cmd";
+            FILE* f = nullptr;
+            if (!_wfopen_s(&f, cmdPath.c_str(), L"r") && f)
+            {
+                char line[256];
+                while (fgets(line, sizeof(line), f))
+                {
+                    double x = 0, y = 0, z = 0;
+                    const SDK::FVector p = pc->Pawn->K2_GetActorLocation();
+                    if (sscanf_s(line, "move %lf %lf %lf", &x, &y, &z) == 3) { g_cmdTarget = { p.X + x, p.Y + y, p.Z + z }; g_cmdActive = true; }
+                    else if (sscanf_s(line, "goto %lf %lf %lf", &x, &y, &z) == 3) { g_cmdTarget = { x, y, z }; g_cmdActive = true; }
+                    else if (!strncmp(line, "throw", 5)) g_cmdThrow = true;
+                    else if (!strncmp(line, "balls", 5))
+                    {
+                        double d = 0.0;
+                        SDK::AActor* b = NearestArenaBall(p, d);
+                        const SDK::FVector bp = b ? b->K2_GetActorLocation() : SDK::FVector{};
+                        Log("[A2PlayerControl][CMD] nearest ball %s at (%.0f, %.0f, %.0f), %.0f away\n", b ? b->GetName().c_str() : "(none)", bp.X, bp.Y, bp.Z, d);
+                    }
+                    if (g_cmdActive) Log("[A2PlayerControl][CMD] %s -> target (%.0f, %.0f, %.0f) from (%.0f, %.0f, %.0f)\n", line,
+                                         g_cmdTarget.X, g_cmdTarget.Y, g_cmdTarget.Z, p.X, p.Y, p.Z);
+                }
+                fclose(f);
+                _wremove(cmdPath.c_str());
+            }
+        }
+        if (g_cmdActive && pc->Pawn)
+        {
+            SDK::APawn* pw = pc->Pawn;
+            const SDK::FVector p = pw->K2_GetActorLocation();
+            const SDK::FVector d{ g_cmdTarget.X - p.X, g_cmdTarget.Y - p.Y, g_cmdTarget.Z - p.Z };
+            const double dist = sqrt(d.X * d.X + d.Y * d.Y + d.Z * d.Z);
+            SDK::FVector v{};
+            if (dist < 60.0) { g_cmdActive = false; Log("[A2PlayerControl][CMD] arrived at (%.0f, %.0f, %.0f)\n", p.X, p.Y, p.Z); }
+            else { const double s = (std::min)(400.0, dist * 2.0) / dist; v = { d.X * s, d.Y * s, d.Z * s }; }
+            SetPawnVelocity(pw, v, false);
+            PushToServer(pw, p, v, g_cmdActive);
+            return;
+        }
     }
     if (!g_wasdEnabled) return;
 
