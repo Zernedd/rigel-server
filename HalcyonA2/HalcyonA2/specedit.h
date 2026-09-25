@@ -6707,6 +6707,43 @@ static void SeModesUnload(const std::string& level)
     if (any) SeModeListTo(nullptr);
 }
 
+// SE|SIMSEATS -- what the ball-sim reconcile (0x545BD80) sees for every arena: it walks the TicketManagers, reads
+// TM+0x328 (module slot) -> slot+0x440 (X) and slot+0x2FA (flag), keeps X+0x2A0's DiscEntity entries and builds that
+// arena's sim only when there is exactly ONE (its ball). Diagnostic.
+static bool SeSeatRead(uintptr_t p, size_t off, uintptr_t* out) { __try { *out = *reinterpret_cast<uintptr_t*>(p + off); return true; } __except (EXCEPTION_EXECUTE_HANDLER) { return false; } }
+static void SeSimSeatsDump()
+{
+    static SDK::UClass* tmCls = nullptr;
+    if (!tmCls) tmCls = SDK::UObject::FindClassFast("TicketManager");
+    static SDK::UClass* disc = nullptr;
+    if (!disc) disc = SDK::UObject::FindClassFast("DiscEntity");
+    if (!tmCls) { HxLog("[HalcyonA2][SIMSEATS] no TicketManager class\n"); return; }
+    for (SDK::UObject* tm : ClassObjects(tmCls))
+    {
+        if (!tm || tm->IsDefaultObject() || !SeAlive(tm)) continue;
+        uintptr_t slot = 0, x = 0, arr = 0, n = 0;
+        SeSeatRead(reinterpret_cast<uintptr_t>(tm), 0x328, &slot);
+        if (slot) SeSeatRead(slot, 0x440, &x);
+        uint8_t flag = 0;
+        if (slot) { uintptr_t w = 0; if (SeSeatRead(slot, 0x2FA, &w)) flag = static_cast<uint8_t>(w & 0xFF); }
+        if (x) { SeSeatRead(x, 0x2A0, &arr); SeSeatRead(x, 0x2A8, &n); }
+        const int cnt = static_cast<int>(n & 0xFFFFFFFF);
+        std::string xs = x ? reinterpret_cast<SDK::UObject*>(x)->GetName() + " (" + reinterpret_cast<SDK::UObject*>(x)->Class->GetName() + ")" : "null";
+        std::string slotName = slot ? reinterpret_cast<SDK::UObject*>(slot)->GetName() : "null";
+        std::string list; int discs = 0;
+        for (int i = 0; arr && i < cnt && i < 64; ++i)
+        {
+            uintptr_t e = 0;
+            if (!SeSeatRead(arr, 8 * i, &e) || !e) continue;
+            auto* o = reinterpret_cast<SDK::UObject*>(e);
+            const bool isDisc = disc && o->IsA(disc);
+            discs += isDisc;
+            if (list.size() < 700) list += (list.empty() ? "" : ", ") + o->GetName() + (isDisc ? "*" : "");
+        }
+        HxLog("[HalcyonA2][SIMSEATS] %s slot=%s flag2FA=%d X=%s entries=%d discs=%d [%s]\n", tm->GetName().c_str(), slotName.c_str(),
+              flag, xs.c_str(), cnt, discs, list.c_str());
+    }
+}
 static void SeModeTick()
 {
     static ULONGLONG s_last = 0;
@@ -6724,6 +6761,24 @@ static void SeModeTick()
     for (auto& m : g_seModes)
     {
         if (m.deleted || !m.slot || !SeAlive(m.slot)) continue;
+        // Ball sim seating, as the station's Jakeball arenas have it. The game's reconcile (0x545BD80) builds an arena's
+        // ball sim -- the one that seats the team's players and the arena's ball, so a player's carry and hits drive
+        // the server's ball -- only for a TicketManager whose module slot has bUseRollbackNetcode (AModuleSlot+0x2FA)
+        // and whose loaded game mode lists exactly one ball. The Jakeball slot classes set the flag; our runtime slot
+        // (BP_ModuleSlotWithImportanceVolume_C) doesn't, so a mode's ball stayed in no sim and a VR carry never moved
+        // the server's copy (no ring start, no goals). Turn it on for modes with a ball, then let the reconcile run.
+        {
+            bool hasBall = false;
+            for (const auto& kv : m.settings) if (kv.first.rfind("role.", 0) == 0 && kv.second.rfind("ball", 0) == 0) { hasBall = true; break; }
+            auto* flag = reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(m.slot) + 0x2FA);   // AModuleSlot::bUseRollbackNetcode
+            if (hasBall && !*flag)
+            {
+                *flag = 1;
+                g_reconcileWanted = 8;
+                HxLog("[HalcyonA2][GAMEMODE] %s: rollback netcode on for its slot %s -- the ball sim gets seated like a Jakeball arena's\n",
+                      m.name.c_str(), m.slot->GetName().c_str());
+            }
+        }
         if (m.starterClearAt && now >= m.starterClearAt)
         {
             static std::unordered_map<std::string, int> s_tries;   // the project's objects appear a few seconds after the load
@@ -7153,6 +7208,7 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
     }
     else if (op == "XFORM"  && p.size() >= 6) SeTransform(SeResolveIdent(p[2]), p[3], p[4], p[5]);
     else if (op == "BALLPUT" && p.size() >= 5) SeBallPut(p[2], p[3], p[4]);
+    else if (op == "SIMSEATS") SeSimSeatsDump();
     else if (op == "DELETE" && p.size() >= 3) SeDelete(SeResolveIdent(p[2]));
     else if (op == "PROP"   && p.size() >= 5) SeSetProp(p[2], p[3], p[4]);
     else if (op == "AUDIT"  && p.size() >= 3) SeAudit(pawn, p[2]);

@@ -182,7 +182,10 @@ for team, s in ((1, 1), (2, -1)):          # team 1 (Blue) scores in the +u goal
     box(NAVY, k0, k1, -GOAL_GAP / 2 - T, GOAL_GAP / 2 + T, 0, GOAL_H + T, f"goal {team} back")
     box(NAVY, b0, b1, -GOAL_GAP / 2 - T, GOAL_GAP / 2 + T, GOAL_H, GOAL_H + T, f"goal {team} roof")
     # the goal itself: the station's Jakeball goal trigger (1.5x), in the box
-    goals[team] = put("BP_GoalJakeBall_C", s * (hl + T + DEPTH / 2), 0, GOAL_H / 2 - 20, yaw=90 * s, scale=(1.5, 1.5, 1.5),
+    # (its trigger is a thin plane along the goal's local X: yaw 0 / 180 lays it ACROSS the mouth, as in the station's
+    # arenas -- at yaw 90 it ran along the pitch through the middle of the box and real shots missed it)
+    goals[team] = put("BP_GoalJakeBall_C", s * (hl + T + DEPTH / 2), 0, GOAL_H / 2 - 20, yaw=0 if s > 0 else 180,
+                      scale=(1.5 * GOAL_GAP / 636.0, 1.5, 1.5),   # a 1.5x goal is 6.36 m wide: stretch it across the whole mouth
                       label=f"goal: {'Blue' if team == 1 else 'Orange'} scores here")
     # a scoreboard over each goal, facing the pitch (its screen faces its local Y), like the station's arena
     put("BP_ScoreboardA_C", s * (hl + T / 2), 0, H + 330, yaw=180 if s > 0 else 0, label=f"scoreboard over goal {team}")
