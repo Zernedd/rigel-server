@@ -51,3 +51,13 @@ a level reload; flagging the culling cubes in `search_palette`; warning about ex
 | Luau defs | The types listed members the runtime never binds (212 of VRPawn's 218, BasicButton `setButtonText`/`setOnCooldown`, `isNetworkReady`). | **fixed**: pruned to runtime-verified members. |
 | Events | `onOverlapEndByPlayerSimple` never fires; player overlaps fire once per body part; `onOverlapByPlayerServer` fires only on the server. | **doc**: in GAMEMODES.md (events table, polling pattern). |
 | Rift | spec29 shipped the dev DLL (no login, UI on). | **fixed**: upload only `build.ps1 -Rift` output. |
+
+## Going live (2026-09-25)
+
+| Area | What happened | Status |
+|---|---|---|
+| Live levels | After the server restart it auto-loaded a server-side level, `cockballs` (42 objects, a red-coin run). It runs along the same wall: an 84 m slab 5.6 m above the pitch, a block hanging over midfield, coin frames about 7.8 m up, and its start platform over the -u goal's roof. It's someone else's level, so the arena was left overlapping it. | **decision for the user**: move MiniJakeball, or move / unload that course. **fix?**: `gamemode_create` / the builder could warn when another loaded level's objects are inside the area (list_objects + id prefixes). |
+| Release editor | The UI is hidden by default, and ops that go through the UI (`level_open`, `level_close`, anything `ui(...)`) silently do nothing until it's shown (F12). `editor_op enter` starts editing. | **fix**: the MCP should say "the editor UI is hidden (F12)" instead of an empty result. **doc**: in MCP.md setup. |
+| Editor restarts | Windows kept `dsound.dll` "user-mapped" after every editor process was gone, so it couldn't be overwritten. Renaming it aside works. | internal: rename, then copy. |
+| Editor crashes | The editor hung the GPU twice ("GPU timeout ... 3D queue", then the render thread timed out after 120 s): once after the server restart dropped it back to login, once at startup. The same fatal error happened 2026-09-24 10:26 and 22:46 on older builds, so it recurs on this PC and isn't from this change. A relaunch worked. | **investigate**: whether our Present / ExecuteCommandLists hooks are part of it (they are the only thing we add to the render path). |
+| My mistake | `Get-Process ... | Where Path -like` returned nothing for the Horizon install (Path unreadable), so the "close the editor" step did nothing and a second copy started. | internal: use `Get-CimInstance Win32_Process` and ExecutablePath. |
