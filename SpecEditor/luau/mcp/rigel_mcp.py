@@ -187,23 +187,56 @@ def defs_text() -> str:
         return ""
 
 
+_event_sigs = None
+
+
+def event_sig(cls: str, name: str) -> str:
+    """An event's payload from the definitions (the index has none): `onOverlapByPlayerServer: Event<(number)>`."""
+    global _event_sigs
+    if _event_sigs is None:
+        _event_sigs = {}
+        cur = None
+        for ln in defs_text().splitlines():
+            m = re.match(r"declare extern type (\w+)", ln)
+            if m:
+                cur = m.group(1)
+                continue
+            m = re.match(r"\t(\w+): (Event<.*>)\s*$", ln)
+            if cur and m:
+                _event_sigs[(cur, m.group(1))] = m.group(2)
+    return _event_sigs.get((cls, name), "")
+
+
 def api_search(query: str, limit: int = 40):
-    q = query.lower().strip()
+    # Every word has to match (in any order), so "overlap player" finds onOverlapByPlayer and "vrpawn name" finds
+    # VRPawn.getPlayerName. A method matches on its own name + signature + its class's name.
+    terms = [t for t in re.split(r"[\s,.:]+", query.lower()) if t]
+    if not terms:
+        return []
+
+    def hit(*texts):
+        h = " ".join(t.lower() for t in texts if t)
+        return all(t in h for t in terms)
+
     hits = []
     for cname, c in api_index().get("classes", {}).items():
-        if q in cname.lower():
+        if hit(cname):
             hits.append({"class": cname, "parent": c.get("parent"), "why": c.get("why", "")})
         for kind in ("methods", "events", "properties", "static"):
             for m in c.get(kind, []) or []:
                 name = m.get("name", "") if isinstance(m, dict) else str(m)
                 sig = m.get("sig", "") if isinstance(m, dict) else ""
-                if q in name.lower() or (sig and q in sig.lower()):
+                if not sig and kind == "events":
+                    sig = event_sig(cname, name)
+                if hit(name, sig, cname):
                     hits.append({"class": cname, "kind": kind[:-1] if kind != "static" else "static", "name": name, "signature": sig,
                                  "cpp": m.get("cpp", "") if isinstance(m, dict) else ""})
     # globals / Rigel library in the definitions file
     for ln in defs_text().splitlines():
-        if q and q in ln.lower() and (ln.startswith("declare") or ln.startswith("\t") and ":" in ln and "->" in ln):
+        if hit(ln) and (ln.startswith("declare") or ln.startswith("\t") and ":" in ln and "->" in ln):
             hits.append({"definition": ln.strip()})
+    # exact-name hits first, then shorter names
+    hits.sort(key=lambda h: (0 if h.get("name", "").lower() == query.lower().strip() else 1, len(h.get("name", h.get("class", "")) or "")))
     return hits[:limit]
 
 
@@ -267,15 +300,20 @@ def rigel_traps(src: str, gamemode_code: bool = False):
                                 f"editor property, and only number/string/boolean/<Something>Component can be one. This type CRASHES "
                                 f"the server and every client. Drop the annotation (local {m.group(1)} = ...) or use a supported type."})
                 elif t.rstrip("?") in ("number", "string", "boolean") and m.group(3) == "=":
-                    rest = line.split("=", 1)[1].strip()
-                    if rest == "nil" or rest == "":
-                        out.append({"line": i, "severity": "warning", "message":
-                                    f"'{m.group(1)}: {t}' is an editor property; its value comes from the editor (Details) -- a literal "
-                                    f"here is only the default. Set a real default (not nil)."})
-        if re.search(r"\bspawnBall\s*\(|\bspawnBallWithParameters\s*\(", line) and gamemode_code:
+                    out.append({"line": i, "severity": "warning", "message":
+                                f"'{m.group(1)}: {t}' is an editor property: its value comes from the editor (Details), and the "
+                                f"literal here is NOT applied -- it runs as nil until set there. For a constant drop the annotation "
+                                f"(local {m.group(1)} = ...)."})
+        if re.search(r"\bspawn(Ball|BallWithParameters|PersonalBall|SinglePersonalBall|HeartBall)\s*\(|\bserver_SpawnBall\s*\(", line):
+            out.append({"line": i, "severity": "error" if gamemode_code else "warning", "message":
+                        "Don't spawn balls from a script: it runs on every machine and each makes its own client-only ball that "
+                        "nobody else sees. Give the spawner the game mode 'Ball spawner' role (the server spawns/resets it) and "
+                        "call Rigel.resetBalls(); or use getSpawnedBall() / resetBall() on a spawner's own ball."})
+        if gamemode_code and re.match(r"\s*function\s+BeginPlay\s*\(", line):
             out.append({"line": i, "severity": "error", "message":
-                        "Don't spawn balls from game mode code: it runs on every machine and each makes its own client-only ball. "
-                        "Give the spawner the 'Ball spawner' role (the server spawns/resets it) and call Rigel.resetBalls()."})
+                        "Game mode code must not define BeginPlay: the generated controller owns it (yours would replace it and "
+                        "the mode stops working). Use the hooks: OnLobby, OnCountdown, OnRoundStart, OnRoundEnd, OnScore, OnTime, "
+                        "OnTeamChanged -- or run setup at the top level."})
         if re.search(r"\bwhile\s+true\s+do\b", line) and "wait" not in src:
             out.append({"line": i, "severity": "warning", "message":
                         "An endless loop with no yield freezes the game thread. Use LuauClock.createTimer / LuauClock.timeout instead."})
@@ -596,8 +634,10 @@ def t_attach(a):
     mark, seq = log_mark(), BR.call("status").get("logSeq", 0)
     BR.call("luau_attach", a["handle"], name, a["source"])
     time.sleep(float(a.get("wait_seconds", 4)))
+    # the editor's periodic "[repl]" object dumps are noise here (hundreds of lines of the station's objects)
+    elog = [l for l in BR.call("logs", seq, "", 200)["lines"] if not l.startswith("[repl]")][:80]
     return {"attached": True, "check": chk, "gameLog": read_game_log(mark, "", False, 120)["lines"],
-            "editorLog": BR.call("logs", seq, "", 80)["lines"], "problems": BR.call("problems")}
+            "editorLog": elog, "problems": BR.call("problems")}
 
 
 @tool("update_script", "Send new source to every object running this script (by name).",
@@ -627,10 +667,21 @@ def t_ref(a):
     return BR.call("luau_ref", a["handle"], re.sub(r"\.luau$", "", a["script"]) + ".luau", a["slot"], a["type"], a["target"])
 
 
-@tool("find_reference_targets", "Objects that have a given Luau component type (e.g. BasicButtonComponent) -- valid slot targets.",
-      {"type": {"type": "string"}}, ["type"])
+@tool("find_reference_targets", "Objects that have a given Luau component type (e.g. BasicButtonComponent) -- valid slot targets. "
+      "Each has handle, component, and for placed objects class + location. The station has many (golf holes, arena parts): "
+      "pass near (+ radius) to get the ones around a spot, nearest first.",
+      {"type": {"type": "string"}, "near": V3, "radius": {"type": "number", "description": "cm, with near (default 3000)"},
+       "limit": {"type": "integer", "default": 40}}, ["type"])
 def t_slotcands(a):
-    return BR.call("slot_candidates", a["type"], timeout=8)
+    cands = BR.call("slot_candidates", a["type"], timeout=8)
+    if isinstance(cands, list) and a.get("near"):
+        n, rad = a["near"], float(a.get("radius", 3000))
+
+        def dist(c):
+            L = c.get("location")
+            return ((L[0] - n[0]) ** 2 + (L[1] - n[1]) ** 2 + (L[2] - n[2]) ** 2) ** 0.5 if L else 1e18
+        cands = sorted((dict(c, distance=round(dist(c))) for c in cands if dist(c) <= rad), key=lambda c: c["distance"])
+    return cands[:int(a.get("limit", 40))] if isinstance(cands, list) else cands
 
 
 @tool("script_logs", "Recent Luau output from the editor's game log: log()/warn(), runtime errors ([RigelError] ...), compile errors. "
@@ -754,11 +805,15 @@ def t_gmdel(a):
 
 @tool("gamemode_team_changer", "Place a team changer for team N (1-based) inside the mode. Walking into it puts a player on that team. "
       "(If a player stands on the spot it's built beside it and moves in when they step off -- a changer spawned on a player "
-      "would crash them.)", {"mode": {"type": "string"}, "team": {"type": "integer"}, "location": V3}, ["mode", "team", "location"])
+      "would crash them.) It's a door: the server stands it on the floor under `location` (its middle is 1.5 m up) and "
+      "turns it to `yaw` -- players walk through it along that direction (0 = along +X, 90 = along +Y).",
+      {"mode": {"type": "string"}, "team": {"type": "integer"}, "location": V3,
+       "yaw": {"type": "number", "description": "degrees; the direction players walk through the door (default 0)"}},
+      ["mode", "team", "location"])
 def t_gmteam(a):
     m = find_mode(a["mode"])
     L = a["location"]
-    return BR.call("raw", f"SE|GMTEAM|{m['id']}|{a['team']}|{L[0]:.0f},{L[1]:.0f},{L[2]:.0f}")
+    return BR.call("raw", f"SE|GMTEAM|{m['id']}|{a['team']}|{L[0]:.0f},{L[1]:.0f},{L[2]:.0f}|{float(a.get('yaw', 0)):.0f}")
 
 
 ROLES = {"start": "BasicButton: starts a round", "score:N": "BasicButton: +1 for team N while running",

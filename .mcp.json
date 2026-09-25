@@ -3,6 +3,11 @@
     "ida-pro-mcp": {
       "type": "http",
       "url": "http://127.0.0.1:13337/mcp"
+    },
+    "rigel": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["C:/Users/Zern/Documents/OrionDriftStuff/SpecEditor/luau/mcp/rigel_mcp.py"]
     }
   }
 }

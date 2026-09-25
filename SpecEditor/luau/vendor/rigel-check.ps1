@@ -118,6 +118,21 @@ function Test-File([string]$path) {
         }
         $i++
     }
+    # Line rules (comments stripped): ball spawns from scripts, BeginPlay in game mode code.
+    $isMode = $path -match '\\GameModes\\'
+    $ln = 0
+    foreach ($raw in ($s -split "`n")) {
+        $ln++
+        $line = $raw -replace '--.*$', ''
+        if ($line -match '\b(spawn(Ball|BallWithParameters|PersonalBall|SinglePersonalBall|HeartBall)|server_SpawnBall)\s*\(') {
+            $out.Add((("{0}:{1}:1: warning: Rigel: don't spawn balls from a script - it runs on every machine and each makes its own " +
+                      "ball nobody else sees. Give the spawner the game mode 'Ball spawner' role and call Rigel.resetBalls().") -f $path, $ln))
+        }
+        if ($isMode -and $line -match '^\s*function\s+BeginPlay\s*\(') {
+            $out.Add((("{0}:{1}:1: warning: Rigel: game mode code must not define BeginPlay (the generated controller owns it). " +
+                      "Use the hooks: OnLobby, OnCountdown, OnRoundStart, OnRoundEnd, OnScore, OnTime, OnTeamChanged.") -f $path, $ln))
+        }
+    }
     return $out
 }
 

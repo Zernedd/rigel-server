@@ -101,9 +101,19 @@ std::string McpObjJson(const SceneObject& o)
     if (o.lockedByMe) s += ",\"lockedByMe\":true";
     return s + "}";
 }
+// A sandbox object's handle is its GUID; attaching a script, wiring a slot or moving it REBUILDS the object, and the
+// rebuilt actor is named "<GUID>_<n>". So a handle an agent got earlier keeps working: match on the GUID part.
+std::string McpHandleBase(const std::string& h)
+{
+    const size_t u = h.find('_');
+    return (u == 36 && h.size() > 36 && h[8] == '-') ? h.substr(0, 36) : h;
+}
 const SceneObject* McpFind(const Snapshot& snap, const std::string& handle)
 {
     for (const auto& o : snap.objects) if (o.handle == handle) return &o;
+    const std::string base = McpHandleBase(handle);
+    if (base.size() != 36 || base[8] != '-') return nullptr;
+    for (const auto& o : snap.objects) if (McpHandleBase(o.handle) == base) return &o;
     return nullptr;
 }
 double McpArg(const McpReq& r, size_t i, double def) { return i < r.a.size() && !r.a[i].empty() ? atof(r.a[i].c_str()) : def; }
@@ -185,7 +195,21 @@ void McpHandle(const Snapshot& snap, const McpReq& r)
         const PaletteItem* it = nullptr;
         for (const auto& p : snap.palette) if (p.name == want || p.path == want) { it = &p; break; }
         if (!it) for (const auto& p : snap.palette) if (p.name.find(want) != std::string::npos) { it = &p; break; }
-        if (!it) { McpErr(r, "No palette item matches '" + want + "' (search with palette)."); return; }
+        if (!it)                            // case-insensitive, name OR path: the sandbox id ("PrimitiveCubeBlue") lives in the path
+        {
+            auto low = [](std::string s) { for (char& ch : s) ch = static_cast<char>(tolower(static_cast<unsigned char>(ch))); return s; };
+            const std::string w = low(want);
+            for (const auto& p : snap.palette)
+                if (low(p.name).find(w) != std::string::npos || low(p.path).find(w) != std::string::npos) { it = &p; break; }
+        }
+        if (!it)                            // a sandbox id ("PrimitiveCubeBlue", what saved levels use) -> its class
+            for (const auto& sp : SandboxPrefabs())
+                if (_stricmp(sp.uniqueId.c_str(), want.c_str()) == 0)
+                {
+                    for (const auto& p : snap.palette) if (p.name == sp.cls) { it = &p; break; }
+                    break;
+                }
+        if (!it) { McpErr(r, "No palette item matches '" + want + "' (look it up with search_palette)."); return; }
         if (!it->blocked.empty()) { McpErr(r, it->name + " can't be placed: " + it->blocked); return; }
         Command cmd{ CmdType::SpawnItem };
         cmd.str = it->path;
@@ -430,7 +454,12 @@ void McpFinish(const Snapshot& snap)
             {
                 std::string s = "[";
                 for (size_t k = 0; k < snap.slotCands.size(); ++k)
-                    s += (k ? "," : "") + std::string("{\"handle\":") + J(snap.slotCands[k].handle) + ",\"component\":" + J(snap.slotCands[k].comp) + "}";
+                {
+                    s += (k ? "," : "") + std::string("{\"handle\":") + J(snap.slotCands[k].handle) + ",\"component\":" + J(snap.slotCands[k].comp);
+                    if (const SceneObject* o = McpFind(snap, snap.slotCands[k].handle))   // placed objects: where / what they are
+                        s += ",\"class\":" + J(o->className) + ",\"location\":" + JV(o->location);
+                    s += "}";
+                }
                 McpOk(p.r, s + "]");
                 done = true;
             }
