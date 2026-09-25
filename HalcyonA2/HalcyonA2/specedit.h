@@ -3186,6 +3186,22 @@ static ULONGLONG    g_seEditorSlotAt = 0;
 static ULONGLONG    g_seEditorSlotClearAt = 0;   // when to remove the project's starter objects
 static wchar_t      g_seEditorSlotPath[96] = L"";  // persistent: the slot's FString points at it
 static const double kSlotBoxOffset[3] = { -38.0, 340.0, 434.0 };   // default box centre relative to the slot (measured)
+// The station is a cylinder spinning about the world Y axis (x = 0, z = 0): its floor is the inside of the hull, and
+// "up" anywhere on it points at the axis -- +Z on the bottom floor (x ~ 0), +X on the wall at x ~ -28600. Game mode
+// areas and team doors are turned to that up, so a mode can sit on any part of the floor, walls included.
+static void SeStationUp(const double* at, double up[3])
+{
+    const double r = sqrt(at[0] * at[0] + at[2] * at[2]);
+    if (r < 1000.0) { up[0] = 0; up[1] = 0; up[2] = 1; return; }   // near the axis: no floor to stand on, keep +Z
+    up[0] = -at[0] / r; up[1] = 0; up[2] = -at[2] / r;
+}
+static SDK::FQuat SeStationUpQuat(const double* at)       // turns +Z to the local up (about the world Y axis)
+{
+    double up[3]; SeStationUp(at, up);
+    const double a = atan2(up[0], up[2]);
+    return SDK::FQuat{ 0.0, sin(a * 0.5), 0.0, cos(a * 0.5) };
+}
+static SDK::FRotator SeStationUpRot(const double* at) { return SDK::UKismetMathLibrary::Quat_Rotator(SeStationUpQuat(at)); }
 static SDK::UObject* SbGamemodesManager()
 {
     static SDK::UClass* cls = nullptr;
@@ -3248,8 +3264,9 @@ static SDK::AActor* SbCreateSlotWithId(const double* at, const std::string& path
     SDK::UObject* mgr = SbGamemodesManager();
     if (!cls || !world || !mgr) return nullptr;
     SDK::FTransform xf{};
-    xf.Rotation = SDK::FQuat{ 0, 0, 0, 1 };
-    xf.Translation = SDK::FVector{ at[0] - kSlotBoxOffset[0], at[1] - kSlotBoxOffset[1], at[2] - kSlotBoxOffset[2] };
+    xf.Rotation = SeStationUpQuat(at);                                 // the area stands on the local floor (walls too)
+    const SDK::FVector off = SDK::UKismetMathLibrary::Quat_RotateVector(xf.Rotation, SDK::FVector{ kSlotBoxOffset[0], kSlotBoxOffset[1], kSlotBoxOffset[2] });
+    xf.Translation = SDK::FVector{ at[0] - off.X, at[1] - off.Y, at[2] - off.Z };
     xf.Scale3D = SDK::FVector{ 1, 1, 1 };
     SDK::AActor* slot = SDK::UGameplayStatics::BeginDeferredActorSpawnFromClass(world, cls, xf, SDK::ESpawnActorCollisionHandlingMethod::AlwaysSpawn,
                                                                               nullptr, SDK::ESpawnActorScaleMethod::MultiplyWithRoot);
@@ -7200,17 +7217,35 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
                 // sit 150 cm over the floor; the door's collision reaches 151 cm below the origin). Placed with the
                 // origin ON the floor -- as game modes did -- the door was sunk into the ground and all but vanished.
                 // So: find the floor under the spot and stand the door on it. Yaw = the way players walk through it.
+                // "down" is along the station's local up (toward the hull): straight down on the bottom floor, sideways
+                // on the walls. The door stands on what it hits, upright for that floor, turned `yaw` about its up.
+                double up[3]; SeStationUp(at, up);
                 double door[3] = { at[0], at[1], at[2] };
                 {
                     SDK::FHitResult hit{};
                     SDK::TArray<SDK::AActor*> ignore{};
-                    const bool ok = SDK::UKismetSystemLibrary::LineTraceSingle(SDK::UWorld::GetWorld(), SDK::FVector{ at[0], at[1], at[2] + 100.0 },
-                        SDK::FVector{ at[0], at[1], at[2] - 3000.0 }, SDK::ETraceTypeQuery::TraceTypeQuery1, false, ignore,
-                        SDK::EDrawDebugTrace::None, &hit, true, SDK::FLinearColor{}, SDK::FLinearColor{}, 0.0f);
-                    if (ok && hit.bBlockingHit) door[2] = hit.Location.Z;
-                    door[2] += 150.0;
+                    const bool ok = SDK::UKismetSystemLibrary::LineTraceSingle(SDK::UWorld::GetWorld(),
+                        SDK::FVector{ at[0] + up[0] * 100.0, at[1] + up[1] * 100.0, at[2] + up[2] * 100.0 },
+                        SDK::FVector{ at[0] - up[0] * 3000.0, at[1] - up[1] * 3000.0, at[2] - up[2] * 3000.0 }, SDK::ETraceTypeQuery::TraceTypeQuery1,
+                        false, ignore, SDK::EDrawDebugTrace::None, &hit, true, SDK::FLinearColor{}, SDK::FLinearColor{}, 0.0f);
+                    if (ok && hit.bBlockingHit) { door[0] = hit.Location.X; door[1] = hit.Location.Y; door[2] = hit.Location.Z; }
+                    for (int k = 0; k < 3; ++k) door[k] += up[k] * 150.0;
                 }
-                const double rot[3] = { 0, p.size() >= 6 ? atof(p[5].c_str()) : 0.0, 0 }, scl[3] = { 1, 1, 1 };
+                // Yaw: walking through along the door's +X joins its team, walking back out clears it (measured with a
+                // real player). With no yaw given the door faces the mode's centre, so walking IN joins and walking out
+                // leaves -- a door can't end up backwards.
+                double yaw = 0.0;
+                if (p.size() >= 6 && !p[5].empty()) yaw = atof(p[5].c_str());
+                else
+                {
+                    const SDK::FQuat q = SeStationUpQuat(at);
+                    const SDK::FVector lx = SDK::UKismetMathLibrary::Quat_RotateVector(q, SDK::FVector{ 1, 0, 0 });
+                    const SDK::FVector ly = SDK::UKismetMathLibrary::Quat_RotateVector(q, SDK::FVector{ 0, 1, 0 });
+                    const double d[3] = { m->at[0] - door[0], m->at[1] - door[1], m->at[2] - door[2] };
+                    yaw = atan2(d[0] * ly.X + d[1] * ly.Y + d[2] * ly.Z, d[0] * lx.X + d[1] * lx.Y + d[2] * lx.Z) * 57.29577951308232;
+                }
+                const SDK::FRotator dr = SDK::UKismetMathLibrary::ComposeRotators(SDK::FRotator{ 0.0, yaw, 0.0 }, SeStationUpRot(at));
+                const double rot[3] = { dr.Pitch, dr.Yaw, dr.Roll }, scl[3] = { 1, 1, 1 };
                 const std::string prevLoading = g_lvLoading;
                 g_lvLoading = SeCallerScene();
                 const std::string idx = SeSandboxSpawn("teamChange", door, rot, scl);

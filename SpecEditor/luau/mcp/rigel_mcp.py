@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import glob
 import json
+import math
 import os
 import re
 import socket
@@ -48,6 +49,8 @@ class Bridge:
         self.lock = threading.Lock()
 
     def _ports(self):
+        if os.environ.get("RIGEL_MCP_PORT"):        # pin one editor (several can run: tests next to the user's own)
+            return [int(os.environ["RIGEL_MCP_PORT"])]
         ports = []
         try:
             with open(os.path.join(tempfile.gettempdir(), "rigel_mcp_port.txt")) as fh:
@@ -454,14 +457,60 @@ def t_palette(a):
 
 
 # ---- build
-@tool("place_object", "Place a palette item at a world location (cm; Z is up in the local frame -- look at nearby objects' Z for "
-      "the floor height). Needs an open level (level_new / level_open). Returns the new object (with its handle) once it exists.",
-      {"item": {"type": "string", "description": "palette name (exact or substring), e.g. BP_BasicButton_C"},
-       "location": V3, "rotation": {**V3, "description": "pitch, yaw, roll (degrees)"}, "scale": V3}, ["item", "location"])
+# ---- the station's floor: a cylinder spinning about the world Y axis (x = 0, z = 0). "Up" anywhere on it points at the
+# axis: +Z on the bottom floor, +X on the wall at x ~ -28600. (The server turns game mode areas and team doors the same way.)
+def station_up(L):
+    r = math.hypot(L[0], L[2])
+    return (0.0, 0.0, 1.0) if r < 1000 else (-L[0] / r, 0.0, -L[2] / r)
+
+
+def _q_from_rot(p, y, r):                 # FRotator -> FQuat (UE's own formula)
+    p, y, r = (math.radians(v) * 0.5 for v in (p, y, r))
+    sp, cp, sy, cy, sr, cr = math.sin(p), math.cos(p), math.sin(y), math.cos(y), math.sin(r), math.cos(r)
+    return (cr * sp * sy - sr * cp * cy, -cr * sp * cy - sr * cp * sy, cr * cp * sy - sr * sp * cy, cr * cp * cy + sr * sp * sy)
+
+
+def _q_mul(a, b):                         # a * b (apply b, then a)
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return (aw * bx + ax * bw + ay * bz - az * by, aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw, aw * bw - ax * bx - ay * by - az * bz)
+
+
+def _rot_from_q(q):                       # FQuat -> FRotator (UE's FQuat::Rotator, singularities included)
+    x, y, z, w = q
+    st = z * x - w * y
+    yaw = math.degrees(math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z)))
+    norm = lambda d: (d + 180.0) % 360.0 - 180.0
+    if st < -0.4999995:
+        return [-90.0, yaw, norm(-yaw - 2 * math.degrees(math.atan2(x, w)))]
+    if st > 0.4999995:
+        return [90.0, yaw, norm(yaw - 2 * math.degrees(math.atan2(x, w)))]
+    return [math.degrees(math.asin(2 * st)), yaw, math.degrees(math.atan2(-2 * (w * x + y * z), 1 - 2 * (x * x + y * y)))]
+
+
+def floor_rotation(L, rot):
+    """`rot` as seen standing on the local floor at L -> the world rotation (identity tilt on the bottom floor)."""
+    up = station_up(L)
+    a = math.atan2(up[0], up[2])
+    tilt = (0.0, math.sin(a / 2), 0.0, math.cos(a / 2))
+    return [round(v, 3) for v in _rot_from_q(_q_mul(tilt, _q_from_rot(*(rot or [0, 0, 0]))))]
+
+
+@tool("place_object", "Place a palette item at a world location (cm). Needs an open level (level_new / level_open). Returns the "
+      "new object (with its handle) once it exists. The station's floor is the inside of a cylinder about the world Y axis: on "
+      "the bottom floor up is +Z, on a wall it points at the axis (x ~ -28600: up is +X). By default the object is stood "
+      "upright on the local floor and `rotation` is relative to that floor (yaw = turn about its up); align_to_floor=false "
+      "takes `rotation` as a plain world rotation. Look at nearby objects for the floor's height.",
+      {"item": {"type": "string", "description": "palette name (exact or substring) or sandbox id, e.g. BP_BasicButton_C"},
+       "location": V3, "rotation": {**V3, "description": "pitch, yaw, roll (degrees)"}, "scale": V3,
+       "align_to_floor": {"type": "boolean", "default": True}}, ["item", "location"])
 def t_place(a):
-    r = a.get("rotation") or [0, 0, 0]
-    s = a.get("scale") or [1, 1, 1]
     L = a["location"]
+    r = a.get("rotation") or [0, 0, 0]
+    if a.get("align_to_floor", True):
+        r = floor_rotation(L, r)
+    s = a.get("scale") or [1, 1, 1]
     return BR.call("place", a["item"], *L, *r, *s, timeout=20)
 
 
@@ -808,15 +857,17 @@ def t_gmdel(a):
 
 @tool("gamemode_team_changer", "Place a team changer for team N (1-based) inside the mode. Walking into it puts a player on that team. "
       "(If a player stands on the spot it's built beside it and moves in when they step off -- a changer spawned on a player "
-      "would crash them.) It's a door: the server stands it on the floor under `location` (its middle is 1.5 m up) and "
-      "turns it to `yaw` -- players walk through it along that direction (0 = along +X, 90 = along +Y).",
+      "would crash them.) It's a door with two sides: walking through one way JOINS the team, walking back out LEAVES it. "
+      "The server stands it on the local floor under `location` (walls included; its middle is 1.5 m up) and, with no "
+      "yaw, turns it to face the mode's centre -- walk in to join, walk out to leave. Give yaw only to override that.",
       {"mode": {"type": "string"}, "team": {"type": "integer"}, "location": V3,
-       "yaw": {"type": "number", "description": "degrees; the direction players walk through the door (default 0)"}},
+       "yaw": {"type": "number", "description": "optional: degrees about the local up; walking along it joins (default: face the centre)"}},
       ["mode", "team", "location"])
 def t_gmteam(a):
     m = find_mode(a["mode"])
     L = a["location"]
-    return BR.call("raw", f"SE|GMTEAM|{m['id']}|{a['team']}|{L[0]:.0f},{L[1]:.0f},{L[2]:.0f}|{float(a.get('yaw', 0)):.0f}")
+    yaw = f"|{float(a['yaw']):.0f}" if a.get("yaw") is not None else ""
+    return BR.call("raw", f"SE|GMTEAM|{m['id']}|{a['team']}|{L[0]:.0f},{L[1]:.0f},{L[2]:.0f}{yaw}")
 
 
 ROLES = {"start": "BasicButton: starts a round", "score:N": "BasicButton: +1 for team N while running",
