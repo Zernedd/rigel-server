@@ -1132,7 +1132,11 @@ void HandleCommands()
         {
             const std::string id = IdentFor(c.str);
             const std::string tid = c.str5.empty() ? std::string("-") : IdentFor(c.str5);
-            if (id.empty() || tid.empty()) break;
+            if (id.empty() || tid.empty())
+            {
+                Log("[luau] slot %s.%s NOT set: %s not found", c.str2.c_str(), c.str3.c_str(), id.empty() ? c.str.c_str() : c.str5.c_str());
+                break;
+            }
             SendToServer("SE|LUAUREF|" + id + "|" + c.str2 + "|" + c.str3 + "|" + c.str4 + "|" + tid);
             Log("[luau] slot %s.%s -> %s", c.str2.c_str(), c.str3.c_str(), tid.c_str());
             break;

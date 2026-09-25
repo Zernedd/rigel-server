@@ -68,8 +68,10 @@ so text is set through a **template** instead:
 The server fills `{score}` into every Text object that uses it, for every player (Quest too). Use as many
 `{names}` as you like; one not set yet is shown as written. The saved level keeps the template.
 
-`VRPawn.getPlayerName(id)` falls back to the player's own name when the game's lookup says `"None"`.
-A desktop spectator (and the server) has no local player, so there it is still `"None"`.
+`VRPawn.getPlayerName(id)` gives a player's name on every machine: the server, the player's own game and everyone
+else's (tested with a joining player, a rejoin with a new index and a team change). It's `"None"` only for an id
+nobody has -- and for `VRPawn.getLocalPlayerIndex()` on the server or a desktop spectator, which is `-1`.
+Players are ids: the pawn from `VRPawn.getPlayerByID(id)` has almost no methods a script can call.
 
 ### Rigel checks (the traps IntelliSense can't see)
 
@@ -85,6 +87,10 @@ Every save is re-checked and findings appear in the **Problems** panel, underlin
 * **`local Name: number = 5` starts as nil.** A typed `number`/`string`/`boolean` is a property, so its
   value comes from the editor, not from the `= 5`. Drop the type to keep the value.
 * **`defaultEnabledValue`** is in the definitions but errors at runtime.
+* **Ball spawns from a script** (`spawnBall`, `spawnBallWithParameters`, ...): every machine makes its own ball
+  that nobody else sees. Give the spawner the game mode *Ball spawner* role and call `Rigel.resetBalls()`.
+* **`BeginPlay` in game mode code** (`RigelScripts\GameModes\*.luau`): the generated controller owns it. Use the
+  hooks (`OnLobby`, `OnCountdown`, `OnRoundStart`, `OnRoundEnd`, `OnScore`, `OnTime`, `OnTeamChanged`).
 
 Run it by hand: `powershell -File tools/rigel-check.ps1` (add `-Watch` to keep checking).
 In the game, the editor also warns about these when a script is attached, and every problem popup has a

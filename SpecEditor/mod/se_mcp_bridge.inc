@@ -216,6 +216,7 @@ void McpHandle(const Snapshot& snap, const McpReq& r)
         cmd.loc = { McpArg(r, 1, 0), McpArg(r, 2, 0), McpArg(r, 3, 0) };
         cmd.rot = { McpArg(r, 4, 0), McpArg(r, 5, 0), McpArg(r, 6, 0) };
         cmd.scale = { McpArg(r, 7, 1), McpArg(r, 8, 1), McpArg(r, 9, 1) };
+        RequestUiSelect("!undonew Place");  // undo removes it again
         State().Push(cmd);
         McpPending p; p.r = r; p.kind = "place"; p.deadline = now + 12000; p.cls = it->name; p.loc = cmd.loc;
         for (const auto& o : snap.objects) p.before.push_back(o.handle);
@@ -232,6 +233,12 @@ void McpHandle(const Snapshot& snap, const McpReq& r)
         cmd.loc = { McpArg(r, 1, o->location.x), McpArg(r, 2, o->location.y), McpArg(r, 3, o->location.z) };
         cmd.rot = { McpArg(r, 4, o->rotation.pitch), McpArg(r, 5, o->rotation.yaw), McpArg(r, 6, o->rotation.roll) };
         cmd.scale = { McpArg(r, 7, o->scale.x), McpArg(r, 8, o->scale.y), McpArg(r, 9, o->scale.z) };
+        {
+            char ub[400];
+            snprintf(ub, sizeof(ub), "!undomove %s %.3f %.3f %.3f %.3f %.3f %.3f %.4f %.4f %.4f", o->handle.c_str(), cmd.loc.x, cmd.loc.y, cmd.loc.z,
+                     cmd.rot.pitch, cmd.rot.yaw, cmd.rot.roll, cmd.scale.x, cmd.scale.y, cmd.scale.z);
+            RequestUiSelect(ub);            // on the undo stack like the user's own moves
+        }
         State().Push(cmd);
         McpOk(r, "{\"handle\":" + J(o->handle) + ",\"location\":" + JV(cmd.loc) + ",\"rotation\":" + JR(cmd.rot) + ",\"scale\":" + JV(cmd.scale) + "}");
         return;
@@ -240,7 +247,12 @@ void McpHandle(const Snapshot& snap, const McpReq& r)
     {
         const SceneObject* o = McpFind(snap, McpStr(r, 0));
         if (!o) { McpErr(r, "No object with that handle."); return; }
-        if (c == "delete") { if (o->lockedByOther) { McpErr(r, "Locked by " + o->lockOwner + "."); return; } State().Push({ CmdType::DeleteObject, o->handle }); }
+        if (c == "delete")
+        {
+            if (o->lockedByOther) { McpErr(r, "Locked by " + o->lockOwner + "."); return; }
+            RequestUiSelect("!undodel " + o->handle);   // undo brings it back
+            State().Push({ CmdType::DeleteObject, o->handle });
+        }
         else if (c == "select") RequestUiSelect(o->handle);
         else { Command cmd{ CmdType::FocusCamera }; cmd.loc = o->location; State().Push(cmd); }
         McpOk(r, "{\"handle\":" + J(o->handle) + "}");
@@ -255,6 +267,7 @@ void McpHandle(const Snapshot& snap, const McpReq& r)
         for (const auto& p : snap.palette) if (p.name == o->className) { cmd.str2 = p.path; break; }
         cmd.loc = { McpArg(r, 1, o->location.x + 200), McpArg(r, 2, o->location.y), McpArg(r, 3, o->location.z) };
         cmd.rot = o->rotation; cmd.scale = o->scale;
+        RequestUiSelect("!undonew Duplicate");
         State().Push(cmd);
         McpPending p; p.r = r; p.kind = "place"; p.deadline = now + 12000; p.cls = o->className; p.loc = cmd.loc;
         for (const auto& ob : snap.objects) p.before.push_back(ob.handle);
@@ -327,7 +340,16 @@ void McpHandle(const Snapshot& snap, const McpReq& r)
             if (!o) { McpErr(r, "No object with that handle."); return; }
             cmd.str = o->handle; cmd.str2 = McpStr(r, 1);
             if (c == "luau_attach") cmd.str3 = McpStr(r, 2);
-            if (c == "luau_ref") { cmd.str3 = McpStr(r, 2); cmd.str4 = McpStr(r, 3); cmd.str5 = McpStr(r, 4); }
+            if (c == "luau_ref")
+            {
+                cmd.str3 = McpStr(r, 2); cmd.str4 = McpStr(r, 3); cmd.str5 = McpStr(r, 4);
+                if (!cmd.str5.empty())      // the TARGET's handle may be from before a rebuild too
+                {
+                    const SceneObject* t = McpFind(snap, cmd.str5);
+                    if (!t) { McpErr(r, "No target object with that handle (find_reference_targets lists them)."); return; }
+                    cmd.str5 = t->handle;
+                }
+            }
         }
         State().Push(cmd);
         McpOk(r, "{\"ok\":true,\"logSeq\":" + std::to_string(LogRingSeq()) + "}");

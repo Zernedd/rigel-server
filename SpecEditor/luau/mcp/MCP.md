@@ -117,17 +117,58 @@ at the object itself (`target` = its own handle).
 
 | Component | Methods | Events |
 |---|---|---|
-| `BasicButtonComponent` (buttons) | `luaEnableButton()`, `luaDisableButton()`, `setButtonText(s)`, `setOnCooldown(b)` | `onButtonPressEvent()` |
+| `BasicButtonComponent` (buttons) | `luaEnableButton()`, `luaDisableButton()` | `onButtonPressEvent()` |
 | `ToggleableComponent` (traps, switches, platforms) | `luaEnable()`, `luaDisable()` | `blueprintOnEnabled()`, `blueprintOnDisabled()`; field `isEnabled` |
-| `PhysicalComponent` (almost any placed piece) | `hideLua()`, `showLua()`, `disableCollisionLua()`, `setDefaultCollision()`, `setTriggerCollision()`, `hideLuaClientside()` | `onOverlapByPlayerServer(playerId)`, `onOverlapByPlayerClientside()`, `onOverlapByDisc(disc)`, `onHitByDisc(disc)`, `onOverlapEndByPlayerSimple()` |
+| `PhysicalComponent` (almost any placed piece) | `hideLua()`, `showLua()`, `disableCollisionLua()`, `setDefaultCollision()`, `setTriggerCollision()`, `hideLuaClientside()` | `onOverlapByPlayerServer(playerId)`, `onOverlapByPlayerClientside()`, `onOverlapByDisc(disc)`, `onHitByDisc(disc)` (no "player left" event: see below) |
 | `TimerComponent` (Timer) | `start(seconds)`, `startCountUpFromZero()`, `stopAndResetTimer()` | `finished()` |
 | `BallSpawnerComponent` (ball spawners) | `getSpawnedBall()`, `resetBall()`, `smoothResetBall()` -- **not** `spawnBall` | `discWasSpawnedWithDiscArg(disc)`, `onBallGrounded()` |
 | `DiscEntity` (a ball) | `freeze(hideOutline)`, `unFreeze(b)`, `setVelocity(v)`, `getDiscVelocity()`, `getDiscPosition()`, `getGravityDirection()` | `onGoToSleep()` |
 | `ScoreComponent` (the classic Score board) | `setTeamPoints(team0based, n)`, `getTeamPoints(t)`, `resetScore()` | `onScored(goalInfo)` |
 | `DataTableComponent` (Score table) | `beginDataTransaction()`, `setCellText(text, row, col)`, `endDataTransaction()` | |
-| `VRPawn` (statics) | `getLocalPlayerIndex()` (-1 on the server), `getPlayerName(id)`, `getTeamIndexByID(id)`, `getPositionByID(id)`, `getPlayerByID(id)` | |
+| `VRPawn` (statics) | `getLocalPlayerIndex()` (-1 on the server), `getPlayerName(id)`, `getTeamIndexByID(id)`, `getPositionByID(id)`, `getPlayerByID(id)` -- that's all of them | |
 | `Quests` (statics) | `event(playerId, eventId)`, `eventNumber(...)`, `complete(playerId, questId)` (-1 = local player) | |
 | `Gamemode` (the area's game mode) | `getStringConfigVariable(k)`, `broadcastEventString(name, value)`, `setTeamScore(team0, n)`, `setTeamRoundsWon`, `startGame()`, `stopGame()` | `onConfigChanged` (doesn't fire -- poll) |
+
+**A player is an id.** Work with players through the `VRPawn` statics above, by id. The pawn object that
+`getPlayerByID` returns exposes almost nothing to scripts (`client_EmitStatEvent`, `client_SetQuestCompleted` and
+the `...FromLocalClient` variants): no `getPlayerIndex`, team, velocity or name methods -- use the statics with the
+id instead. The definitions only list what the game really binds (every member was probed at runtime), so
+`check_luau` rejects anything else.
+
+**Where each player event fires** (measured with a real player walking through a trigger):
+
+| Event | Fires on |
+|---|---|
+| `onOverlapByPlayerServer(id)` | the server only -- use this for anything shared (scores, text, doors) |
+| `onOverlapByPlayer(id)`, `onOverlapByPlayerSimple()`, `onOverlapByPlayerClientside()` | only the game of the player who touched it |
+| `onOverlapEndByPlayerSimple()` | **never** -- leaving isn't reported. Poll positions instead (below). |
+
+```lua
+-- "who is in the zone": enter from the server event, leave by distance (centre = the zone's location)
+local CENTRE_X, CENTRE_Y, RADIUS = 0, 1500, 300
+local inside = {} :: { [number]: boolean }
+Zone.onOverlapByPlayerServer.Listen(function(id: number) inside[id] = true end)
+LuauClock.createTimer(0.5, function()
+    for id in inside do
+        local p = VRPawn.getPositionByID(id)
+        if math.sqrt((p.x - CENTRE_X) ^ 2 + (p.y - CENTRE_Y) ^ 2) > RADIUS then inside[id] = nil end
+    end
+end)
+```
+
+**Player overlap events fire once per body part.** One step onto a trigger fires `onOverlapByPlayerServer` (and
+the other player overlap events) several times in the same instant -- once for each part of the player that touches
+it (body, head, hands): measured 3 at once, 6 for one walk across. Count a player once with a short cooldown:
+
+```lua
+local lastSeen = {} :: { [number]: number }
+Pad.onOverlapByPlayerServer.Listen(function(id: number)
+    local now = LuauClock.getTime()
+    if lastSeen[id] and now - lastSeen[id] < 1 then return end   -- the same step
+    lastSeen[id] = now
+    -- ... once per step ...
+end)
+```
 
 There is no `TextComponent` from scripts (a slot of that type stays nil). Text goes through **templates**: set a
 Text object's text to `Score: {score}` (tool `set_text`), then any script calls
@@ -267,9 +308,10 @@ to the given yaw (players walk through along it). Frame it so players find it --
 3.5 m opening and a beam over the top, in the team's colour, never across the doorway -- and put a Text sign above
 reading `{<mode>.team1.name} team`. The example levels do exactly this.
 
-**Balls.** A ball is made at run time; its spawner is what's placed. Moving a ball (transform tool on the ball)
-moves its spawner by the same amount and the ball comes along; moving the spawner does too. Balls can't be
-resized: keep ball spawners at scale 1 (the game draws a scaled spawner's ball smaller).
+**Balls.** A ball is made at run time; its spawner is what's placed. `move_object` on a ball moves its spawner by
+the same amount and the ball comes along. Scaling a ball (0.25-4) sets its spawner to 1/that scale -- the game sizes
+a spawner's ball at 1 / the spawner's scale on every machine. Rotating a ball does nothing (it rolls). Any spawner
+edit rebuilds it with a fresh ball.
 
 **Monitor countdown.** Scoreboard monitors show the countdown seconds (round clock waiting) once someone is on a
 team, then the clock and scores. Keep `countdown` above 0 for a visible count.

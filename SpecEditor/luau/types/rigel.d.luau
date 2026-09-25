@@ -350,8 +350,6 @@ end
 
 -- ULuauBehavior (SandboxEngine)
 declare extern type LuauBehavior with
-	-- C++: bool IsNetworkReady();
-	function isNetworkReady(self): boolean
 end
 
 -- UA2Object (SandboxEngine)
@@ -372,10 +370,6 @@ declare extern type BallSpawnerComponent extends LuauBehavior with
 	function addSmoothOffset(self, offset: Vector): ()
 	-- C++: void BeginListeningForBallGrounded();
 	function beginListeningForBallGrounded(self): ()
-	-- C++: void CheckForDeletedBalls();
-	function checkForDeletedBalls(self): ()
-	-- C++: void CheckIfBallGroundedUponHit(const struct FHitResult& Hit, const struct FVector& OldVelocity);
-	function checkIfBallGroundedUponHit(self, hit: any, oldVelocity: Vector): ()
 	-- C++: void DestroyBall(class ADiscEntity* Entity);
 	function destroyBall(self, entity: DiscEntity): ()
 	-- C++: void DiscWasHit();
@@ -398,14 +392,10 @@ declare extern type BallSpawnerComponent extends LuauBehavior with
 	function placeBallOneUnitAboveFloor(self): ()
 	-- C++: void PlaceBallOnFloor();
 	function placeBallOnFloor(self): ()
-	-- C++: void ProcessQueuedGrounding();
-	function processQueuedGrounding(self): ()
 	-- C++: void ResetBall();
 	function resetBall(self): ()
 	-- C++: void ResetBallTo(const struct FVector& position);
 	function resetBallTo(self, position: Vector): ()
-	-- C++: void ResetHeartBall_Server();
-	function resetHeartBall_Server(self): ()
 	-- C++: void SetIfShouldFreezeBallUponReset(bool bShould);
 	function setIfShouldFreezeBallUponReset(self, bShould: boolean): ()
 	-- C++: void SmoothResetBall();
@@ -416,8 +406,6 @@ declare extern type BallSpawnerComponent extends LuauBehavior with
 	function spawnBallTest(self, parameters: {BallSpawnParameters}): ()
 	-- C++: class ADiscEntity* SpawnBallWithParameters(const struct FBallSpawnParameters& Parameters);
 	function spawnBallWithParameters(self, parameters: BallSpawnParameters): Promise<DiscEntity>
-	-- C++: class ADiscEntity* SpawnHeartBall(const struct FVector& HandLocation);
-	function spawnHeartBall(self, handLocation: Vector): DiscEntity
 	-- C++: class ADiscEntity* SpawnPersonalBall(const struct FBallSpawnParameters& PlayerIndex, bool bShouldKillOtherPersonalBalls, bool bCanSpawnMany);
 	function spawnPersonalBall(self, playerIndex: BallSpawnParameters, bShouldKillOtherPersonalBalls: boolean, bCanSpawnMany: boolean): DiscEntity
 	-- C++: void SpawnSinglePersonalBall(int32 PlayerIndex);
@@ -434,22 +422,9 @@ declare extern type BallSpawnerComponent extends LuauBehavior with
 	OnBallGrounded: Event<()>
 	playerHitLuau: Event<(DiscEntity, LuauPhysicsObjectData)>
 	PlayerHitLuau: Event<(DiscEntity, LuauPhysicsObjectData)>
-	bShouldSpawnBallFrozen: boolean
-	bIsRunningGamemodeTests: boolean
-	spawnedBalls: {any}
-	preResetPosition: Vector
-	preOffsetPosition: Vector
 	disc: DiscEntity
 	listenForBallGrounded: boolean
-	bBallWasGrounded: boolean
 	bListeningToBallRolling: boolean
-	bSmoothlyResetting: boolean
-	bSmoothlyOffsetting: boolean
-	smoothOffsetDestination: Vector
-	bWaitingForBallNetGUID: boolean
-	smoothResetStartTime: number
-	smoothOffsetStartTime: number
-	bShouldFreezeBallUponReset: boolean
 end
 
 -- UBallLauncherComponent (A2)
@@ -488,10 +463,6 @@ declare extern type BasicButtonComponent extends LuauBehavior with
 	function luaDisableButton(self): ()
 	-- C++: void LuaEnableButton();
 	function luaEnableButton(self): ()
-	-- C++: void SetButtonText(const class FString& newText);
-	function setButtonText(self, newText: string): ()
-	-- C++: void SetOnCooldown(bool newBool);
-	function setOnCooldown(self, newBool: boolean): ()
 	onButtonPressEvent: Event<()>
 	OnButtonPressEvent: Event<()>
 end
@@ -508,8 +479,6 @@ declare extern type DataTableComponent extends LuauBehavior with
 	function endDataTransaction(self): ()
 	-- C++: int32 GetIndex(const class FString& Test);
 	function getIndex(self, test: string): number
-	-- C++: class UDataTableWidget* GetTest();
-	function getTest(self): any
 	-- C++: void SetCellBackgroundColor(const struct FLinearColor& Text, int32 Row, int32 Col);
 	function setCellBackgroundColor(self, text: LinearColor, row: number, col: number): ()
 	-- C++: void SetCellText(const class FString& Text, int32 Row, int32 Col);
@@ -526,8 +495,6 @@ declare extern type DataTableComponent extends LuauBehavior with
 	function setSharedStyles(self, styles: {StyleOverRange}): ()
 	test3: {StyleOverRange}
 	test2: StyleOverRange
-	hostTable: DataTableComponent
-	tablesToCopyToo: {DataTableComponent}
 	isInDataTransaction: boolean
 end
 
@@ -877,12 +844,6 @@ declare extern type PhysicalComponent extends LuauBehavior with
 	function hideLua(self): ()
 	-- C++: void HideLuaClientside();
 	function hideLuaClientside(self): ()
-	-- C++: void OnHit(class UPrimitiveComponent* HitComponent, class AActor* OtherActor, class UPrimitiveComponent* OtherComp, const struct FVector& NormalImpulse, const struct FHitResult& Hit);
-	function onHit(self, hitComponent: any, otherActor: any, otherComp: any, normalImpulse: Vector, hit: any): ()
-	-- C++: void OverlapBegin(class UPrimitiveComponent* OverlappedComponent, class AActor* OtherActor, class UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool FromSweep, const struct FHitResult& SweepResult);
-	function overlapBegin(self, overlappedComponent: any, otherActor: any, otherComp: any, otherBodyIndex: number, fromSweep: boolean, sweepResult: any): ()
-	-- C++: void OverlapEnd(class UPrimitiveComponent* OverlappedComp, class AActor* OtherActor, class UPrimitiveComponent* OtherComp, int32 OtherBodyIndex);
-	function overlapEnd(self, overlappedComp: any, otherActor: any, otherComp: any, otherBodyIndex: number): ()
 	-- C++: void SetDefaultCollision();
 	function setDefaultCollision(self): ()
 	-- C++: void SetTriggerCollision();
@@ -911,8 +872,6 @@ declare extern type PhysicalComponent extends LuauBehavior with
 	OnOverlapEndByPlayerSimple: Event<()>
 	onOverlapByPlayerServer: Event<(number)>
 	OnOverlapByPlayerServer: Event<(number)>
-	bIsVisibleClientside: boolean
-	bClientsideOverride: boolean
 end
 
 -- UProgressionButtonComponent (A2)
@@ -993,27 +952,6 @@ declare extern type ScoreComponent extends LuauBehavior with
 	UpdateBouncesGoal: Event<(number, string, number)>
 	updatePassesGoal: Event<(number, string, number)>
 	UpdatePassesGoal: Event<(number, string, number)>
-	bCombineScores: boolean
-	lastGoalLocation: Vector
-	lastGoalSpeed: Vector
-	fastestGoalSpeed: Vector
-	lastPoints: number
-	lastPasses: number
-	lastBounces: number
-	mostBounces: number
-	mostPasses: number
-	lastGoalDistance: number
-	longestGoalDistance: number
-	scoringTeam: number
-	lastPlayerScoredTeam: number
-	lastPlayerScored: string
-	lastPlayerScoredID: number
-	fastestPlayerScored: string
-	longestPlayerScored: string
-	bouncesPlayerScored: string
-	passesPlayerScored: string
-	teamPoints: {number}
-	teamCount: number
 end
 
 -- UShootingTrainingComponent (A2)
@@ -1141,8 +1079,6 @@ declare extern type TimerComponent extends LuauBehavior with
 	Finished: Event<()>
 	finished2: Event<()>
 	Finished2: Event<()>
-	timerTextArrayToUpdate: {any}
-	bTextIncludeMilliseconds: boolean
 end
 
 -- UToggleableComponent (A2)
@@ -1155,7 +1091,6 @@ declare extern type ToggleableComponent extends LuauBehavior with
 	BlueprintOnDisabled: Event<()>
 	blueprintOnEnabled: Event<()>
 	BlueprintOnEnabled: Event<()>
-	defaultEnabledValue: boolean
 	isEnabled: boolean
 end
 
@@ -1165,76 +1100,26 @@ end
 
 -- ADiscEntity (A2)
 declare extern type DiscEntity with
-	-- C++: void ballStolen(const struct FVector& ballLocation);
-	function ballStolen(self, ballLocation: Vector): ()
-	-- C++: void Client_SetVisibilityOfDiscComponents(bool NewVisibility, class AVRPawn* Pawn);
-	function client_SetVisibilityOfDiscComponents(self, newVisibility: boolean, pawn: VRPawn): ()
-	-- C++: void ClientUnreliablePlayerHit(const float AccelerationMagnitude);
-	function clientUnreliablePlayerHit(self, accelerationMagnitude: number): ()
-	-- C++: void ForceUpdate();
-	function forceUpdate(self): ()
 	-- C++: void Freeze(bool hideOutline);
 	function freeze(self, hideOutline: boolean): ()
-	-- C++: class UA2CosmeticLoadout* GetCosmeticLoadout();
-	function getCosmeticLoadout(self): any
-	-- C++: int32 GetDiscBounces();
-	function getDiscBounces(self): number
-	-- C++: int32 GetDiscPasses();
-	function getDiscPasses(self): number
 	-- C++: struct FVector GetDiscPosition() const;
 	function getDiscPosition(self): Vector
 	-- C++: struct FVector GetDiscVelocity();
 	function getDiscVelocity(self): Vector
 	-- C++: struct FVector GetForwardVectorLuau();
 	function getForwardVectorLuau(self): Vector
-	-- C++: void GetGameSoundManagerEvent(class FName SlotID);
-	function getGameSoundManagerEvent(self, slotID: string): ()
 	-- C++: struct FVector GetGravityDirection();
 	function getGravityDirection(self): Vector
-	-- C++: class AVRPawn* GetPlayerWhoSpawnedThisBall() const;
-	function getPlayerWhoSpawnedThisBall(self): VRPawn
-	-- C++: bool GetTrailVisibility() const;
-	function getTrailVisibility(self): boolean
-	-- C++: void interceptionEvent(int32 TeamIndex, const class FString& newSlotID);
-	function interceptionEvent(self, teamIndex: number, newSlotID: string): ()
-	-- C++: void Multicast_UnreliablePlayerHit(const float AccelerationMagnitude);
-	function multicast_UnreliablePlayerHit(self, accelerationMagnitude: number): ()
-	-- C++: void NewHitEvent(const struct FReplicatedPhysicsObjectData& data, bool bIsLeftHand);
-	function newHitEvent(self, data: ReplicatedPhysicsObjectData, bIsLeftHand: boolean): ()
-	-- C++: void OnGrabbedCallback(class UGrabComponent* GrabComponent);
-	function onGrabbedCallback(self, grabComponent: any): ()
-	-- C++: void OnReleasedCallback(class UGrabComponent* GrabComponent);
-	function onReleasedCallback(self, grabComponent: any): ()
-	-- C++: void PassEventServer(int32 TeamIndex, int32 passCount);
-	function passEventServer(self, teamIndex: number, passCount: number): ()
-	-- C++: void PlayerHitOnServerLuau(class ADiscEntity* Disc, const struct FReplicatedPhysicsObjectData& data, bool bIsLeftHand);
-	function playerHitOnServerLuau(self, disc: DiscEntity, data: ReplicatedPhysicsObjectData, bIsLeftHand: boolean): ()
-	-- C++: void ResetHeartBall();
-	function resetHeartBall(self): ()
-	-- C++: void ResetMainBodyColor();
-	function resetMainBodyColor(self): ()
 	-- C++: void Server_SetVelocity(const struct FVector& vel);
 	function server_SetVelocity(self, vel: Vector): ()
-	-- C++: void ServerDiscGrabbed();
-	function serverDiscGrabbed(self): ()
-	-- C++: void ServerDiscReleased();
-	function serverDiscReleased(self): ()
 	-- C++: void SetAngularVelocity(const struct FVector& vel);
 	function setAngularVelocity(self, vel: Vector): ()
 	-- C++: void SetEnableHUDIndicator(bool Enable);
 	function setEnableHUDIndicator(self, enable: boolean): ()
 	-- C++: void SetEnableHUDIndicator2(bool Enable);
 	function setEnableHUDIndicator2(self, enable: boolean): ()
-	-- C++: void SetIgnorePawn(class AVRPawn* Actor, bool bShouldIgnore);
-	function setIgnorePawn(self, actor: VRPawn, bShouldIgnore: boolean): ()
-	-- C++: void SetMainBodyColor(const struct FLinearColor& Color);
-	function setMainBodyColor(self, color: LinearColor): ()
 	-- C++: void SetOwnerServer();
 	function setOwnerServer(self): ()
-	-- C++: void SetPlayerWhoSpawnedThisBall(class AVRPawn* InPlayerWhoSpawnedThisBall);
-	function setPlayerWhoSpawnedThisBall(self, inPlayerWhoSpawnedThisBall: VRPawn): ()
-	-- C++: void SetTrailVisibility(const bool bVisible) const;
-	function setTrailVisibility(self, bVisible: boolean): ()
 	-- C++: void SetVelocity(const struct FVector& vel);
 	function setVelocity(self, vel: Vector): ()
 	-- C++: void SetVisibilityOfDiscComponents(bool NewVisibility);
@@ -1243,411 +1128,22 @@ declare extern type DiscEntity with
 	function unFreeze(self, reenableSimulation: boolean): ()
 	onGoToSleep: Event<()>
 	OnGoToSleep: Event<()>
-	playerHit: Event<(DiscEntity, ReplicatedPhysicsObjectData)>
-	PlayerHit: Event<(DiscEntity, ReplicatedPhysicsObjectData)>
-	timeLastUsedByPoolingManager: number
-	basePushbackPercentage: number
-	bHasBallBegunShrinking: boolean
-	bIsFrozen: boolean
-	bIsPersonalBall: boolean
-	networkedReleasePosition: Vector
 	rollbackRecentPlayerHit: number
 	rollbackPreviousPlayerHit: number
-	spawner: BallSpawnerComponent
-	spawnerIndex: number
-	bIsHeartBall: boolean
 end
 
 -- AVRPawn (A2)
 declare extern type VRPawn with
-	-- C++: void AddImpulse(const struct FVector& move, bool bAddToPushOffMomentum);
-	function addImpulse(self, move: Vector, bAddToPushOffMomentum: boolean): ()
-	-- C++: int32 AddItemToInventoryByGameplayTag(EA2ItemType InItemType, const struct FGameplayTag& InGameplayTag);
-	function addItemToInventoryByGameplayTag(self, inItemType: any, inGameplayTag: any): number
-	-- C++: int32 AddItemToInventoryById(class FName InItemId);
-	function addItemToInventoryById(self, inItemId: string): number
-	-- C++: void AddTicketSystemCooldown(float Seconds);
-	function addTicketSystemCooldown(self, seconds: number): ()
-	-- C++: void ArenaSignUpReadyAlert();
-	function arenaSignUpReadyAlert(self): ()
-	-- C++: void AttemptTakeOwnershipProp(class AActor* Actor, class AActor* previousOwner, double lastSeenTimestamp, bool isHolding, bool isLeftHandHolding);
-	function attemptTakeOwnershipProp(self, actor: any, previousOwner: any, lastSeenTimestamp: number, isHolding: boolean, isLeftHandHolding: boolean): ()
-	-- C++: void BroadcastHighFive(const struct FVector& position, float relativeSpeed) const;
-	function broadcastHighFive(self, position: Vector, relativeSpeed: number): ()
-	-- C++: void ChangeCollisionType(class FName NewType);
-	function changeCollisionType(self, newType: string): ()
-	-- C++: void ClearTeam();
-	function clearTeam(self): ()
-	-- C++: void Client_ArenaSignUpAlertReceived(bool bDroneIncluded, const struct FVector& ArenaSignUpActorLocation, TSubclassOf<class AArenaSignUpDrone> DroneClass);
-	function client_ArenaSignUpAlertReceived(self, bDroneIncluded: boolean, arenaSignUpActorLocation: Vector, droneClass: any): ()
-	-- C++: void Client_DoSeparation(class AVRPawn* separatingFrom, const struct FVector& separationVector);
-	function client_DoSeparation(self, separatingFrom: VRPawn, separationVector: Vector): ()
-	-- C++: void Client_DoTackle(const struct FVector& momentumTransferImpulse, bool ForceRelease, int8 tackleGeneration);
-	function client_DoTackle(self, momentumTransferImpulse: Vector, forceRelease: boolean, tackleGeneration: number): ()
 	-- C++: void Client_EmitStatEvent(const class FString& String, int32 I);
 	function client_EmitStatEvent(self, string: string, i: number): ()
-	-- C++: void Client_ExitLoadingScreen();
-	function client_ExitLoadingScreen(self): ()
-	-- C++: void Client_GrabHeartBall();
-	function client_GrabHeartBall(self): ()
-	-- C++: void Client_HitProp_Response(class AActor* Actor, bool Success);
-	function client_HitProp_Response(self, actor: any, success: boolean): ()
-	-- C++: void Client_OnClimbActorResponse(class AActor* grabbedActor, bool predictedTackleToGrabbed, bool appliedTackleToGrabbed, int8 expectedTackleGeneration);
-	function client_OnClimbActorResponse(self, grabbedActor: any, predictedTackleToGrabbed: boolean, appliedTackleToGrabbed: boolean, expectedTackleGeneration: number): ()
-	-- C++: void Client_OnClimbedByOther(class AActor* Actor);
-	function client_OnClimbedByOther(self, actor: any): ()
-	-- C++: void Client_OnHeartBallReset();
-	function client_OnHeartBallReset(self): ()
-	-- C++: void Client_QueueReady();
-	function client_QueueReady(self): ()
-	-- C++: void Client_ReportOtherPlayer(const class FString& PlayerReportingMothershipID, const class FString& PlayerBeingReportedMothershipID, const uint8& Category);
-	function client_ReportOtherPlayer(self, playerReportingMothershipID: string, playerBeingReportedMothershipID: string, category: number): ()
-	-- C++: void Client_ReportRollbackAvgWorstRemainingTime(double AvgWorstRemainingTime);
-	function client_ReportRollbackAvgWorstRemainingTime(self, avgWorstRemainingTime: number): ()
-	-- C++: void Client_SendServerSimResults(const struct FBallSimState& State, const TArray<uint8>& Players, const TArray<struct FBallSimPlayerInputs>& Inputs, int8 MissedInputs, int8 MissedInputsCaughtInBuffer);
-	function client_SendServerSimResults(self, state: BallSimState, players: {number}, inputs: {BallSimPlayerInputs}, missedInputs: number, missedInputsCaughtInBuffer: number): ()
 	-- C++: void Client_SetQuestCompleted(const class FString& String);
 	function client_SetQuestCompleted(self, string: string): ()
-	-- C++: void Client_SetQueueTimer(bool Value);
-	function client_SetQueueTimer(self, value: boolean): ()
-	-- C++: void Client_SetVerifiedTimer(bool Value);
-	function client_SetVerifiedTimer(self, value: boolean): ()
-	-- C++: void Client_StartQueueTimer();
-	function client_StartQueueTimer(self): ()
-	-- C++: void Client_StartVerifiedTimer();
-	function client_StartVerifiedTimer(self): ()
-	-- C++: void Client_TakeOwnership_Response(class AActor* Actor, bool Success, bool isLeftHand);
-	function client_TakeOwnership_Response(self, actor: any, success: boolean, isLeftHand: boolean): ()
-	-- C++: void Client_TeamClearSuccess(bool bResetCurrentTicket, bool bFireSuccessEvent, bool bResetCollisionType);
-	function client_TeamClearSuccess(self, bResetCurrentTicket: boolean, bFireSuccessEvent: boolean, bResetCollisionType: boolean): ()
-	-- C++: void Client_TicketCheckFailure(int8 TeamIndex, const class FString& TeamChangeSlotID, class AModuleSlot* Slot);
-	function client_TicketCheckFailure(self, teamIndex: number, teamChangeSlotID: string, slot: any): ()
-	-- C++: void Client_TicketCheckSuccess(int32 CurrentTicket, const struct FTeamColor& TeamColor, int8 TeamIndex, class AModuleSlot* Slot, bool bSilent);
-	function client_TicketCheckSuccess(self, currentTicket: number, teamColor: TeamColor, teamIndex: number, slot: any, bSilent: boolean): ()
-	-- C++: void Client_TicketGiveFailure();
-	function client_TicketGiveFailure(self): ()
-	-- C++: void Client_TicketGiveSuccess(int32 CurrentTicket, bool bSilent);
-	function client_TicketGiveSuccess(self, currentTicket: number, bSilent: boolean): ()
-	-- C++: void Client_UpdateBallIndicators(bool bEnable, class ADiscEntity* Ball);
-	function client_UpdateBallIndicators(self, bEnable: boolean, ball: DiscEntity): ()
-	-- C++: void Client_UpdatePersonalBallIndicator(bool bEnable, class ADiscEntity* Ball);
-	function client_UpdatePersonalBallIndicator(self, bEnable: boolean, ball: DiscEntity): ()
-	-- C++: void Client_UpdateTeamChangeComponents(bool onTeam, int32 TeamIndex);
-	function client_UpdateTeamChangeComponents(self, onTeam: boolean, teamIndex: number): ()
-	-- C++: void Client_UpdateTeamColors(const struct FTeamColor& TeamColor, int8 TeamIndex);
-	function client_UpdateTeamColors(self, teamColor: TeamColor, teamIndex: number): ()
-	-- C++: void Client_UpdateWorldTime(double clientTimestamp, double serverTimestamp);
-	function client_UpdateWorldTime(self, clientTimestamp: number, serverTimestamp: number): ()
-	-- C++: bool ClientEquipItemById(class FName InItemId, EA2ItemSlot InItemSlot);
-	function clientEquipItemById(self, inItemId: string, inItemSlot: any): boolean
-	-- C++: void ClientSetCosmeticCustomTeamColor(const struct FTeamColor& NewCustomColor);
-	function clientSetCosmeticCustomTeamColor(self, newCustomColor: TeamColor): ()
-	-- C++: void ClientSetCosmeticMaterialMetadata(const struct FA2CosmeticMaterialMetadata& NewCosmeticMaterialMetadata);
-	function clientSetCosmeticMaterialMetadata(self, newCosmeticMaterialMetadata: A2CosmeticMaterialMetadata): ()
-	-- C++: void ClientSetCosmeticMeshMetadataByName(const class FName& NewCosmeticMeshMetadataName);
-	function clientSetCosmeticMeshMetadataByName(self, newCosmeticMeshMetadataName: string): ()
-	-- C++: void ClientSetCosmeticPreferredTeamColor(const struct FTeamColor& NewPreferredColor);
-	function clientSetCosmeticPreferredTeamColor(self, newPreferredColor: TeamColor): ()
-	-- C++: bool ClientUnequipItemById(class FName InItemId);
-	function clientUnequipItemById(self, inItemId: string): boolean
-	-- C++: bool ClientUnequipItemBySlot(EA2ItemSlot InItemSlot);
-	function clientUnequipItemBySlot(self, inItemSlot: any): boolean
-	-- C++: void ClientWriteInventoryPersistentDataThrottled();
-	function clientWriteInventoryPersistentDataThrottled(self): ()
-	-- C++: void ClientWriteSettingsAndSafetyPersistentDataThrottled();
-	function clientWriteSettingsAndSafetyPersistentDataThrottled(self): ()
-	-- C++: void DisableGrabbingFor(float Time);
-	function disableGrabbingFor(self, time: number): ()
-	-- C++: void DoTackle(const struct FVector& momentumTransferImpulse, bool ForceRelease);
-	function doTackle(self, momentumTransferImpulse: Vector, forceRelease: boolean): ()
 	-- C++: void EmitStatEventFromLocalClient(const class FString& String, int32 I);
 	function emitStatEventFromLocalClient(self, string: string, i: number): ()
-	-- C++: void FinishLoadingScreen();
-	function finishLoadingScreen(self): ()
-	-- C++: struct FVector GetCameraForward();
-	function getCameraForward(self): Vector
-	-- C++: const struct FA2CosmeticMaterialMetadata GetCosmeticMaterialMetadata() const;
-	function getCosmeticMaterialMetadata(self): A2CosmeticMaterialMetadata
-	-- C++: struct FLinearColor GetCurrentPlayerColor();
-	function getCurrentPlayerColor(self): LinearColor
-	-- C++: double GetDiffFromServerTime(double Timestamp) const;
-	function getDiffFromServerTime(self, timestamp: number): number
-	-- C++: bool GetEnableSoccerChin() const;
-	function getEnableSoccerChin(self): boolean
-	-- C++: bool GetEquippedColorPreset(struct FLinearColor* OutPrimaryColor, struct FLinearColor* OutSecondaryColor) const;
-	function getEquippedColorPreset(self): (boolean, LinearColor, LinearColor)
-	-- C++: bool GetEquippedItemAtSlot(EA2ItemSlot InItemSlot, struct FA2ItemState* OutItem) const;
-	function getEquippedItemAtSlot(self, inItemSlot: any): (boolean, A2ItemState)
-	-- C++: bool GetEquippedItemIdAtSlot(EA2ItemSlot InItemSlot, class FName* OutItemId) const;
-	function getEquippedItemIdAtSlot(self, inItemSlot: any): (boolean, string)
-	-- C++: class UA2GravityComponent* GetGravityComponent() const;
-	function getGravityComponent(self): any
-	-- C++: struct FVector GetHeadLocation() const;
-	function getHeadLocation(self): Vector
-	-- C++: class UStaticMeshComponent* GetHeartBallProxy() const;
-	function getHeartBallProxy(self): any
-	-- C++: bool GetInTransitionZone() const;
-	function getInTransitionZone(self): boolean
-	-- C++: int32 GetItemsFromInventoryBySlot(EA2ItemSlot InItemSlot, TArray<struct FA2ItemState>* OutItems) const;
-	function getItemsFromInventoryBySlot(self, inItemSlot: any): (number, {A2ItemState})
-	-- C++: int32 GetItemsFromInventoryByType(EA2ItemType InItemType, TArray<struct FA2ItemState>* OutItems) const;
-	function getItemsFromInventoryByType(self, inItemType: any): (number, {A2ItemState})
-	-- C++: class UGrabComponent* GetLeftGrabber() const;
-	function getLeftGrabber(self): any
-	-- C++: struct FTeamColor GetPawnCurrentTeamColor();
-	function getPawnCurrentTeamColor(self): TeamColor
-	-- C++: int32 GetPawnCurrentTicket();
-	function getPawnCurrentTicket(self): number
-	-- C++: struct FTeamColor GetPawnPreferredTeam() const;
-	function getPawnPreferredTeam(self): TeamColor
-	-- C++: int8 GetPawnTeamIndex() const;
-	function getPawnTeamIndex(self): number
-	-- C++: int32 GetPawnTeamIndexBlueprint();
-	function getPawnTeamIndexBlueprint(self): number
-	-- C++: int32 GetPlayerIndex() const;
-	function getPlayerIndex(self): number
-	-- C++: class FString GetPlayerNameDecorated();
-	function getPlayerNameDecorated(self): string
-	-- C++: class FString GetPlayerNameDecoration();
-	function getPlayerNameDecoration(self): string
-	-- C++: class APlayerRenderer* GetRenderer() const;
-	function getRenderer(self): any
-	-- C++: class UGrabComponent* GetRightGrabber() const;
-	function getRightGrabber(self): any
-	-- C++: double GetServerWorldTime() const;
-	function getServerWorldTime(self): number
-	-- C++: double GetServerWorldTimeDelta() const;
-	function getServerWorldTimeDelta(self): number
-	-- C++: class FString GetStoredName();
-	function getStoredName(self): string
-	-- C++: void GetTicketManagerAndClearTeam(const bool bPawnBeingDestroyed, const bool bResetPawnCollision);
-	function getTicketManagerAndClearTeam(self, bPawnBeingDestroyed: boolean, bResetPawnCollision: boolean): ()
-	-- C++: struct FVector GetVRPawnVelocity() const;
-	function getVRPawnVelocity(self): Vector
-	-- C++: void GripBroken_0(bool isLeftHand);
-	function gripBroken_0(self, isLeftHand: boolean): ()
-	-- C++: void HandleGamemodeBegun();
-	function handleGamemodeBegun(self): ()
-	-- C++: void HandleGamemodeStopped();
-	function handleGamemodeStopped(self): ()
-	-- C++: void HandleSpawnPointOverride();
-	function handleSpawnPointOverride(self): ()
-	-- C++: bool IsCameraAlignedWithVector(const struct FVector& Vector, float DesiredDot);
-	function isCameraAlignedWithVector(self, vector: Vector, desiredDot: number): boolean
-	-- C++: bool IsInMyParty() const;
-	function isInMyParty(self): boolean
-	-- C++: bool IsItemEquippedAtSlot(EA2ItemSlot InItemSlot) const;
-	function isItemEquippedAtSlot(self, inItemSlot: any): boolean
-	-- C++: bool IsPointNearCenterOfCamera(const struct FVector& position, float DesiredDot);
-	function isPointNearCenterOfCamera(self, position: Vector, desiredDot: number): boolean
-	-- C++: bool LocalUnequipItemById(class FName InItemId);
-	function localUnequipItemById(self, inItemId: string): boolean
-	-- C++: bool LocalUnequipItemBySlot(EA2ItemSlot InItemSlot);
-	function localUnequipItemBySlot(self, inItemSlot: any): boolean
-	-- C++: void Multicast_DiscInteractionEvent(const struct FVector& Pos, const class FString& initiatedPlayer, double lastTimestamp, double newTimestamp, const class FString& Reason);
-	function multicast_DiscInteractionEvent(self, pos: Vector, initiatedPlayer: string, lastTimestamp: number, newTimestamp: number, reason: string): ()
-	-- C++: void OnControllerChanged(class APawn* Pawn, class AController* OldController, class AController* NewController);
-	function onControllerChanged(self, pawn: any, oldController: any, newController: any): ()
-	-- C++: void OnDebugMovementToggled(bool IsActive);
-	function onDebugMovementToggled(self, isActive: boolean): ()
-	-- C++: void OnGrabBoosted(bool isLeftHand);
-	function onGrabBoosted(self, isLeftHand: boolean): ()
-	-- C++: void OnHeadImpact(const struct FVector& ImpactVelocity);
-	function onHeadImpact(self, impactVelocity: Vector): ()
-	-- C++: void OnLeftHandBeginOverlap(class UPrimitiveComponent* OverlappedComp, class AActor* OtherActor, class UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const struct FHitResult& SweepResult);
-	function onLeftHandBeginOverlap(self, overlappedComp: any, otherActor: any, otherComp: any, otherBodyIndex: number, bFromSweep: boolean, sweepResult: any): ()
-	-- C++: void OnLeftUIBeginOverlap(class UPrimitiveComponent* OverlappedComp, class AActor* OtherActor, class UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const struct FHitResult& SweepResult);
-	function onLeftUIBeginOverlap(self, overlappedComp: any, otherActor: any, otherComp: any, otherBodyIndex: number, bFromSweep: boolean, sweepResult: any): ()
-	-- C++: void OnLeftUIEndOverlap(class UPrimitiveComponent* OverlappedComp, class AActor* OtherActor, class UPrimitiveComponent* OtherComp, int32 OtherBodyIndex);
-	function onLeftUIEndOverlap(self, overlappedComp: any, otherActor: any, otherComp: any, otherBodyIndex: number): ()
-	-- C++: void OnLeftUIHoverBeginOverlap(class UPrimitiveComponent* OverlappedComp, class AActor* OtherActor, class UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const struct FHitResult& SweepResult);
-	function onLeftUIHoverBeginOverlap(self, overlappedComp: any, otherActor: any, otherComp: any, otherBodyIndex: number, bFromSweep: boolean, sweepResult: any): ()
-	-- C++: void OnPlayerTackled(const struct FVector& Impulse, bool ForceRelease);
-	function onPlayerTackled(self, impulse: Vector, forceRelease: boolean): ()
-	-- C++: void OnProperBeginBlueprint();
-	function onProperBeginBlueprint(self): ()
-	-- C++: void OnRightHandBeginOverlap(class UPrimitiveComponent* OverlappedComp, class AActor* OtherActor, class UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const struct FHitResult& SweepResult);
-	function onRightHandBeginOverlap(self, overlappedComp: any, otherActor: any, otherComp: any, otherBodyIndex: number, bFromSweep: boolean, sweepResult: any): ()
-	-- C++: void OnRightUIBeginOverlap(class UPrimitiveComponent* OverlappedComp, class AActor* OtherActor, class UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const struct FHitResult& SweepResult);
-	function onRightUIBeginOverlap(self, overlappedComp: any, otherActor: any, otherComp: any, otherBodyIndex: number, bFromSweep: boolean, sweepResult: any): ()
-	-- C++: void OnRightUIEndOverlap(class UPrimitiveComponent* OverlappedComp, class AActor* OtherActor, class UPrimitiveComponent* OtherComp, int32 OtherBodyIndex);
-	function onRightUIEndOverlap(self, overlappedComp: any, otherActor: any, otherComp: any, otherBodyIndex: number): ()
-	-- C++: void OnRightUIHoverBeginOverlap(class UPrimitiveComponent* OverlappedComp, class AActor* OtherActor, class UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const struct FHitResult& SweepResult);
-	function onRightUIHoverBeginOverlap(self, overlappedComp: any, otherActor: any, otherComp: any, otherBodyIndex: number, bFromSweep: boolean, sweepResult: any): ()
-	-- C++: void PlayerConfigNetVarsChanged();
-	function playerConfigNetVarsChanged(self): ()
-	-- C++: void ReEnableDebugBoost();
-	function reEnableDebugBoost(self): ()
-	-- C++: void RefreshOnlineInventory();
-	function refreshOnlineInventory(self): ()
-	-- C++: void ReleaseMagnetHands(bool bLeftHand, bool bRightHand, bool bStartDisableMagnetHandsTimer);
-	function releaseMagnetHands(self, bLeftHand: boolean, bRightHand: boolean, bStartDisableMagnetHandsTimer: boolean): ()
-	-- C++: bool RemoveItemFromInventoryByGameplayTag(EA2ItemType InItemType, const struct FGameplayTag& InGameplayTag);
-	function removeItemFromInventoryByGameplayTag(self, inItemType: any, inGameplayTag: any): boolean
-	-- C++: bool RemoveItemFromInventoryById(class FName InItemId);
-	function removeItemFromInventoryById(self, inItemId: string): boolean
-	-- C++: void ResetRotationMode();
-	function resetRotationMode(self): ()
-	-- C++: void Server_ApplyParty(class APartyBoxActor* PartyBox);
-	function server_ApplyParty(self, partyBox: any): ()
-	-- C++: void Server_AttemptTakeOwnership(class AActor* Actor, class AActor* previousOwner, double lastSeenTimestamp, bool isHolding, bool isLeftHandHeld, double Timestamp);
-	function server_AttemptTakeOwnership(self, actor: any, previousOwner: any, lastSeenTimestamp: number, isHolding: boolean, isLeftHandHeld: boolean, timestamp: number): ()
-	-- C++: void Server_AttemptTakeOwnershipOfLevelEditor(class AVRPlayerController* avrPlayerController);
-	function server_AttemptTakeOwnershipOfLevelEditor(self, avrPlayerController: any): ()
-	-- C++: void Server_AttemptTakeOwnershipOfSpectatorManager(class AVRPlayerController* avrPlayerController);
-	function server_AttemptTakeOwnershipOfSpectatorManager(self, avrPlayerController: any): ()
-	-- C++: void Server_ClearPawnTeam();
-	function server_ClearPawnTeam(self): ()
-	-- C++: void Server_DoDebugDiscMovement();
-	function server_DoDebugDiscMovement(self): ()
-	-- C++: void Server_HandleQueueTimerEnded();
-	function server_HandleQueueTimerEnded(self): ()
-	-- C++: void Server_HandleVerifiedTimerEnded();
-	function server_HandleVerifiedTimerEnded(self): ()
-	-- C++: void Server_HitProp(class AActor* Actor, class AActor* previousOwner, double lastSeenTimestamp, double Timestamp, const struct FVector& position, const struct FVector& Force);
-	function server_HitProp(self, actor: any, previousOwner: any, lastSeenTimestamp: number, timestamp: number, position: Vector, force: Vector): ()
-	-- C++: void Server_KillHeartBall();
-	function server_KillHeartBall(self): ()
-	-- C++: void Server_NotifyPlayerEnteredArena(const class FString& newSlotID);
-	function server_NotifyPlayerEnteredArena(self, newSlotID: string): ()
-	-- C++: void Server_NotifyPlayerLeftArena(const class FString& newSlotID);
-	function server_NotifyPlayerLeftArena(self, newSlotID: string): ()
-	-- C++: void Server_OnClimbActor(class AActor* grabbedActor, bool Success, bool predictedSeparation, bool predictedTackle, bool predictedTackleInitiator, bool predictedForceRelease);
-	function server_OnClimbActor(self, grabbedActor: any, success: boolean, predictedSeparation: boolean, predictedTackle: boolean, predictedTackleInitiator: boolean, predictedForceRelease: boolean): ()
-	-- C++: void Server_ReportOtherPlayer(class AVRPawn* PlayerBeingReported, const uint8& Category);
-	function server_ReportOtherPlayer(self, playerBeingReported: VRPawn, category: number): ()
-	-- C++: void Server_RequestExitLoadingScreen();
-	function server_RequestExitLoadingScreen(self): ()
-	-- C++: void Server_RequestWorldTime(double clientTimestamp);
-	function server_RequestWorldTime(self, clientTimestamp: number): ()
-	-- C++: void Server_SendPhysicsPropData(class AActor* Actor, const struct FReplicatedPhysicsObjectData& data);
-	function server_SendPhysicsPropData(self, actor: any, data: ReplicatedPhysicsObjectData): ()
-	-- C++: void Server_SetHeartCoreProxyVisibility(const bool bIsVisible);
-	function server_SetHeartCoreProxyVisibility(self, bIsVisible: boolean): ()
-	-- C++: void Server_SetOptimizedPathToFollow(const TArray<struct FVector_NetQuantize>& NewPathToFollow);
-	function server_SetOptimizedPathToFollow(self, newPathToFollow: {Vector}): ()
-	-- C++: void Server_SetPawnCurrentGameModeSlot(class AModuleSlot* newGameModeSlot);
-	function server_SetPawnCurrentGameModeSlot(self, newGameModeSlot: any): ()
-	-- C++: void Server_SetPawnCurrentSlotID(const class FString& currentSlotID);
-	function server_SetPawnCurrentSlotID(self, currentSlotID: string): ()
-	-- C++: void Server_SetPawnCurrentTicket(const int32 CurrentTicket);
-	function server_SetPawnCurrentTicket(self, currentTicket: number): ()
-	-- C++: void Server_SetPlayerName(const class FString& Name_0);
-	function server_SetPlayerName(self, name: string): ()
-	-- C++: void Server_SetPlayerNameDecoration(const class FString& nameDecoration);
-	function server_SetPlayerNameDecoration(self, nameDecoration: string): ()
-	-- C++: void Server_SocketGrabbable(class UGrabbableSocketComponent* Socket, class UGrabbableComponent* GrabbableComponent);
-	function server_SocketGrabbable(self, socket: any, grabbableComponent: any): ()
-	-- C++: void Server_SpawnBall(TSubclassOf<class ADiscEntity> BallClass, const struct FVector& Location, const struct FVector& StartingVelocity, const struct FVector& AngularVelocity);
-	function server_SpawnBall(self, ballClass: any, location: Vector, startingVelocity: Vector, angularVelocity: Vector): ()
-	-- C++: void Server_SpawnHeartBall(const struct FVector& Location);
-	function server_SpawnHeartBall(self, location: Vector): ()
-	-- C++: void Server_SubmitInputs(const TArray<struct FBallSimPlayerInputs>& Inputs, int32 SimIndex);
-	function server_SubmitInputs(self, inputs: {BallSimPlayerInputs}, simIndex: number): ()
-	-- C++: void Server_ToolTaken(class AA2ToolBase* Tool);
-	function server_ToolTaken(self, tool: any): ()
-	-- C++: void Server_ToolTriggerAction(class AA2ToolBase* Tool, class AVRPawn* OwnerPawn, class UGrabComponent* Grabber, bool ActionState, EControllerHand Hand);
-	function server_ToolTriggerAction(self, tool: any, ownerPawn: VRPawn, grabber: any, actionState: boolean, hand: any): ()
-	-- C++: void Server_UpdateDiscLastTouchedPosition(class AActor* Actor);
-	function server_UpdateDiscLastTouchedPosition(self, actor: any): ()
-	-- C++: void ServerBroadcastGrabbed(class UGrabbableComponent* GrabbableComponent, bool bIsLeftHand);
-	function serverBroadcastGrabbed(self, grabbableComponent: any, bIsLeftHand: boolean): ()
-	-- C++: void ServerBroadcastReleased(class UGrabbableComponent* GrabbableComponent, bool bIsLeftHand);
-	function serverBroadcastReleased(self, grabbableComponent: any, bIsLeftHand: boolean): ()
-	-- C++: void ServerBroadcastThrown(class UGrabbableComponent* GrabbableComponent, const struct FVector& ThrowVelocity, const struct FVector& ThrowAngularVelocity, bool bIsLeftHand);
-	function serverBroadcastThrown(self, grabbableComponent: any, throwVelocity: Vector, throwAngularVelocity: Vector, bIsLeftHand: boolean): ()
-	-- C++: void SetColorAndTeamIndex(const struct FTeamColor& NewCurrentColor, const int8 NewTeamIndex);
-	function setColorAndTeamIndex(self, newCurrentColor: TeamColor, newTeamIndex: number): ()
-	-- C++: void SetEnableSoccerChin(bool bNewEnableSoccerChin);
-	function setEnableSoccerChin(self, bNewEnableSoccerChin: boolean): ()
-	-- C++: void SetHandReorientationParams(const struct FHandReorientationParams& newParams);
-	function setHandReorientationParams(self, newParams: HandReorientationParams): ()
-	-- C++: void SetHeartBall(class ADiscEntity* Ball);
-	function setHeartBall(self, ball: DiscEntity): ()
-	-- C++: void SetIgnoreActorWhileMoving(class AActor* Actor, bool shouldIgnore);
-	function setIgnoreActorWhileMoving(self, actor: any, shouldIgnore: boolean): ()
-	-- C++: void SetIgnoreComponentWhileMoving(class UPrimitiveComponent* mesh, bool shouldIgnore);
-	function setIgnoreComponentWhileMoving(self, mesh: any, shouldIgnore: boolean): ()
-	-- C++: void SetInTransitionZone(bool bNewInTransitionZone);
-	function setInTransitionZone(self, bNewInTransitionZone: boolean): ()
-	-- C++: void SetLaserActive(bool State, bool isLeft);
-	function setLaserActive(self, state: boolean, isLeft: boolean): ()
-	-- C++: void SetManualReorientationScale(float newManualReorientationScale);
-	function setManualReorientationScale(self, newManualReorientationScale: number): ()
-	-- C++: void SetPawnCurrentTicket(int32 CurrentTicket);
-	function setPawnCurrentTicket(self, currentTicket: number): ()
-	-- C++: void SetPlayerNameDecoration(const class FString& InNameDecoration);
-	function setPlayerNameDecoration(self, inNameDecoration: string): ()
 	-- C++: void SetQuestCompletedFromLocalClient(const class FString& String);
 	function setQuestCompletedFromLocalClient(self, string: string): ()
-	-- C++: void SetReorientationSpeed(float newReorientationSpeed);
-	function setReorientationSpeed(self, newReorientationSpeed: number): ()
-	-- C++: void SetRotationMode(ERotationMode newRotationMode, bool bSetAsDefault, bool bSetRotationModeAfterNextTouch);
-	function setRotationMode(self, newRotationMode: any, bSetAsDefault: boolean, bSetRotationModeAfterNextTouch: boolean): ()
-	-- C++: void SetVelocity(const struct FVector& vel, bool ignoreLimit);
-	function setVelocity(self, vel: Vector, ignoreLimit: boolean): ()
-	-- C++: void SetWasWaiting(bool isWaiting);
-	function setWasWaiting(self, isWaiting: boolean): ()
-	-- C++: void SpawnTestBall();
-	function spawnTestBall(self): ()
-	-- C++: void TeamClearSuccess();
-	function teamClearSuccess(self): ()
-	-- C++: void TicketCheckSuccess();
-	function ticketCheckSuccess(self): ()
-	-- C++: void TurnOffAndDisableDebugBoost();
-	function turnOffAndDisableDebugBoost(self): ()
-	-- C++: void UpdateAllBallIndicatorsInGamemode(bool bEnable);
-	function updateAllBallIndicatorsInGamemode(self, bEnable: boolean): ()
-	-- C++: void UpdateBallIndicators(bool bEnable, class ADiscEntity* Ball);
-	function updateBallIndicators(self, bEnable: boolean, ball: DiscEntity): ()
-	onHighFive: Event<(Vector, number)>
-	OnHighFive: Event<(Vector, number)>
 	onBeforeDestroy: Event<()>
 	OnBeforeDestroy: Event<()>
-	fLaserStateUpdatedForBlueprint: Event<()>
-	FLaserStateUpdatedForBlueprint: Event<()>
-	initialPlayerEnteredArena: Event<(string)>
-	InitialPlayerEnteredArena: Event<(string)>
-	lastPlayerLeftArena: Event<(string)>
-	LastPlayerLeftArena: Event<(string)>
-	gripBroken: Event<(boolean)>
-	GripBroken: Event<(boolean)>
-	onGripAction: Event<(VRPawn, any, boolean)>
-	OnGripAction: Event<(VRPawn, any, boolean)>
-	onTriggerAction: Event<(VRPawn, any, boolean, any)>
-	OnTriggerAction: Event<(VRPawn, any, boolean, any)>
-	ticketCheckFailure: Event<()>
-	TicketCheckFailure: Event<()>
-	ticketGiveSuccess: Event<()>
-	TicketGiveSuccess: Event<()>
-	ticketGiveFailure: Event<()>
-	TicketGiveFailure: Event<()>
-	queueReady: Event<()>
-	QueueReady: Event<()>
-	onClientCosmeticsCustomizationUpdated: Event<()>
-	OnClientCosmeticsCustomizationUpdated: Event<()>
-	onSettingsAndSafetyUpdated: Event<(A2SettingsAndSafety)>
-	OnSettingsAndSafetyUpdated: Event<(A2SettingsAndSafety)>
-	onRefreshOnlineInventoryComplete: Event<()>
-	OnRefreshOnlineInventoryComplete: Event<()>
-	onChanged: Event<()>
-	OnChanged: Event<()>
-	onItemAdded: Event<(A2ItemState)>
-	OnItemAdded: Event<(A2ItemState)>
-	onItemChanged: Event<(A2ItemState, A2ItemState)>
-	OnItemChanged: Event<(A2ItemState, A2ItemState)>
-	onItemRemoved: Event<(A2ItemState)>
-	OnItemRemoved: Event<(A2ItemState)>
-	personalBallSpawner: BallSpawnerComponent
-	bQueuedToUpdateRotationMode: boolean
-	playerIndex: number
-	notifiedQueueReady: boolean
-	bWasWaiting: boolean
-	teamChangeComponents: {any}
-	slotID: string
-	pawnCurrentTicket: number
-	settingsAndSafetyData: A2SettingsAndSafety
-	vivoxParticipantID: string
 end
 
 -- UModuleStateLuaAPI (SandboxEngine)
@@ -2070,18 +1566,8 @@ end
 -- ---------------------------------------------------------------------------------------------
 
 declare VRPawn: {
-	-- C++: static class AVRPawn* GetLocalInstance();
-	getLocalInstance: () -> VRPawn,
-	-- C++: static class AVRPawn* GetLocalInstanceWithWorld(class UWorld* World);
-	getLocalInstanceWithWorld: () -> VRPawn,
-	-- C++: static class AVRPawn* GetLocalPlayer(class UWorld* World);
-	getLocalPlayer: () -> VRPawn,
 	-- C++: static int32 GetLocalPlayerIndex(class UWorld* World);
 	getLocalPlayerIndex: () -> number,
-	-- C++: static class AVRPawn* GetLocalVRPawn(class UObject* WorldContextObject);
-	getLocalVRPawn: () -> VRPawn,
-	-- C++: static class AVRPawn* GetPlayer(class UObject* WorldContextObject, int32 ID);
-	getPlayer: (id: number) -> VRPawn,
 	-- C++: static class AVRPawn* GetPlayerByID(class UWorld* World, int32 ID);
 	getPlayerByID: (id: number) -> VRPawn,
 	-- C++: static class FString GetPlayerName(class UWorld* World, int32 ID);

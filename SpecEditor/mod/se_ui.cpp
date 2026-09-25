@@ -5541,6 +5541,22 @@ void DrawEditorUI()
             Log("[ui] %s -> %s", req.c_str() + 1, ok ? "applied" : "nothing to do");
         }
         else if (req == "!del") DeleteSelected();
+        // Edits made through the MCP (an agent) go on the same undo stack as the user's own, so undo / redo
+        // (the tool and Ctrl+Z) work on them too. The bridge sends these BEFORE its command runs.
+        else if (req.rfind("!undodel ", 0) == 0) UndoRecordDelete({ req.substr(9) });
+        else if (req.rfind("!undonew ", 0) == 0) UndoExpectNew(1, req.substr(9).c_str());
+        else if (req.rfind("!undomove ", 0) == 0)       // handle x y z pitch yaw roll sx sy sz
+        {
+            char h[160] = {};
+            UndoXf a;
+            if (sscanf_s(req.c_str() + 10, "%159s %lf %lf %lf %lf %lf %lf %lf %lf %lf", h, (unsigned)sizeof(h), &a.loc.x, &a.loc.y, &a.loc.z,
+                         &a.rot.pitch, &a.rot.yaw, &a.rot.roll, &a.scl.x, &a.scl.y, &a.scl.z) == 10)
+            {
+                const UndoXf b = UndoXfOf(h);
+                a.handle = b.handle; a.cls = b.cls; a.path = b.path;
+                UndoRecordMove({ b }, { a }, false);
+            }
+        }
         else if (req.rfind("!scene ", 0) == 0)
         {
             const std::string rest = req.substr(7);

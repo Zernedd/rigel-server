@@ -5,13 +5,7 @@
    "package": "SandboxEngine",
    "parent": null,
    "why": "LuauBehavior component",
-   "methods": [
-    {
-     "name": "isNetworkReady",
-     "sig": "isNetworkReady(self): boolean",
-     "cpp": "bool IsNetworkReady();"
-    }
-   ],
+   "methods": [],
    "events": [],
    "properties": [],
    "static": []
@@ -63,16 +57,6 @@
      "name": "beginListeningForBallGrounded",
      "sig": "beginListeningForBallGrounded(self): ()",
      "cpp": "void BeginListeningForBallGrounded();"
-    },
-    {
-     "name": "checkForDeletedBalls",
-     "sig": "checkForDeletedBalls(self): ()",
-     "cpp": "void CheckForDeletedBalls();"
-    },
-    {
-     "name": "checkIfBallGroundedUponHit",
-     "sig": "checkIfBallGroundedUponHit(self, hit: any, oldVelocity: Vector): ()",
-     "cpp": "void CheckIfBallGroundedUponHit(const struct FHitResult& Hit, const struct FVector& OldVelocity);"
     },
     {
      "name": "destroyBall",
@@ -130,11 +114,6 @@
      "cpp": "void PlaceBallOnFloor();"
     },
     {
-     "name": "processQueuedGrounding",
-     "sig": "processQueuedGrounding(self): ()",
-     "cpp": "void ProcessQueuedGrounding();"
-    },
-    {
      "name": "resetBall",
      "sig": "resetBall(self): ()",
      "cpp": "void ResetBall();"
@@ -143,11 +122,6 @@
      "name": "resetBallTo",
      "sig": "resetBallTo(self, position: Vector): ()",
      "cpp": "void ResetBallTo(const struct FVector& position);"
-    },
-    {
-     "name": "resetHeartBall_Server",
-     "sig": "resetHeartBall_Server(self): ()",
-     "cpp": "void ResetHeartBall_Server();"
     },
     {
      "name": "setIfShouldFreezeBallUponReset",
@@ -173,11 +147,6 @@
      "name": "spawnBallWithParameters",
      "sig": "spawnBallWithParameters(self, parameters: BallSpawnParameters): Promise<DiscEntity>",
      "cpp": "class ADiscEntity* SpawnBallWithParameters(const struct FBallSpawnParameters& Parameters);"
-    },
-    {
-     "name": "spawnHeartBall",
-     "sig": "spawnHeartBall(self, handLocation: Vector): DiscEntity",
-     "cpp": "class ADiscEntity* SpawnHeartBall(const struct FVector& HandLocation);"
     },
     {
      "name": "spawnPersonalBall",
@@ -231,26 +200,6 @@
    ],
    "properties": [
     {
-     "name": "bShouldSpawnBallFrozen",
-     "type": "boolean"
-    },
-    {
-     "name": "bIsRunningGamemodeTests",
-     "type": "boolean"
-    },
-    {
-     "name": "spawnedBalls",
-     "type": "{any}"
-    },
-    {
-     "name": "preResetPosition",
-     "type": "Vector"
-    },
-    {
-     "name": "preOffsetPosition",
-     "type": "Vector"
-    },
-    {
      "name": "disc",
      "type": "DiscEntity"
     },
@@ -259,39 +208,7 @@
      "type": "boolean"
     },
     {
-     "name": "bBallWasGrounded",
-     "type": "boolean"
-    },
-    {
      "name": "bListeningToBallRolling",
-     "type": "boolean"
-    },
-    {
-     "name": "bSmoothlyResetting",
-     "type": "boolean"
-    },
-    {
-     "name": "bSmoothlyOffsetting",
-     "type": "boolean"
-    },
-    {
-     "name": "smoothOffsetDestination",
-     "type": "Vector"
-    },
-    {
-     "name": "bWaitingForBallNetGUID",
-     "type": "boolean"
-    },
-    {
-     "name": "smoothResetStartTime",
-     "type": "number"
-    },
-    {
-     "name": "smoothOffsetStartTime",
-     "type": "number"
-    },
-    {
-     "name": "bShouldFreezeBallUponReset",
      "type": "boolean"
     }
    ],
@@ -413,16 +330,6 @@
      "name": "luaEnableButton",
      "sig": "luaEnableButton(self): ()",
      "cpp": "void LuaEnableButton();"
-    },
-    {
-     "name": "setButtonText",
-     "sig": "setButtonText(self, newText: string): ()",
-     "cpp": "void SetButtonText(const class FString& newText);"
-    },
-    {
-     "name": "setOnCooldown",
-     "sig": "setOnCooldown(self, newBool: boolean): ()",
-     "cpp": "void SetOnCooldown(bool newBool);"
     }
    ],
    "events": [
@@ -465,11 +372,6 @@
      "name": "getIndex",
      "sig": "getIndex(self, test: string): number",
      "cpp": "int32 GetIndex(const class FString& Test);"
-    },
-    {
-     "name": "getTest",
-     "sig": "getTest(self): any",
-     "cpp": "class UDataTableWidget* GetTest();"
     },
     {
      "name": "setCellBackgroundColor",
@@ -516,14 +418,6 @@
     {
      "name": "test2",
      "type": "StyleOverRange"
-    },
-    {
-     "name": "hostTable",
-     "type": "DataTableComponent"
-    },
-    {
-     "name": "tablesToCopyToo",
-     "type": "{DataTableComponent}"
     },
     {
      "name": "isInDataTransaction",
@@ -1535,21 +1429,6 @@
      "cpp": "void HideLuaClientside();"
     },
     {
-     "name": "onHit",
-     "sig": "onHit(self, hitComponent: any, otherActor: any, otherComp: any, normalImpulse: Vector, hit: any): ()",
-     "cpp": "void OnHit(class UPrimitiveComponent* HitComponent, class AActor* OtherActor, class UPrimitiveComponent* OtherComp, const struct FVector& NormalImpulse, const struct FHitResult& Hit);"
-    },
-    {
-     "name": "overlapBegin",
-     "sig": "overlapBegin(self, overlappedComponent: any, otherActor: any, otherComp: any, otherBodyIndex: number, fromSweep: boolean, sweepResult: any): ()",
-     "cpp": "void OverlapBegin(class UPrimitiveComponent* OverlappedComponent, class AActor* OtherActor, class UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool FromSweep, const struct FHitResult& SweepResult);"
-    },
-    {
-     "name": "overlapEnd",
-     "sig": "overlapEnd(self, overlappedComp: any, otherActor: any, otherComp: any, otherBodyIndex: number): ()",
-     "cpp": "void OverlapEnd(class UPrimitiveComponent* OverlappedComp, class AActor* OtherActor, class UPrimitiveComponent* OtherComp, int32 OtherBodyIndex);"
-    },
-    {
      "name": "setDefaultCollision",
      "sig": "setDefaultCollision(self): ()",
      "cpp": "void SetDefaultCollision();"
@@ -1632,16 +1511,7 @@
      ]
     }
    ],
-   "properties": [
-    {
-     "name": "bIsVisibleClientside",
-     "type": "boolean"
-    },
-    {
-     "name": "bClientsideOverride",
-     "type": "boolean"
-    }
-   ],
+   "properties": [],
    "static": []
   },
   "ProgressionButtonComponent": {
@@ -1877,92 +1747,7 @@
      ]
     }
    ],
-   "properties": [
-    {
-     "name": "bCombineScores",
-     "type": "boolean"
-    },
-    {
-     "name": "lastGoalLocation",
-     "type": "Vector"
-    },
-    {
-     "name": "lastGoalSpeed",
-     "type": "Vector"
-    },
-    {
-     "name": "fastestGoalSpeed",
-     "type": "Vector"
-    },
-    {
-     "name": "lastPoints",
-     "type": "number"
-    },
-    {
-     "name": "lastPasses",
-     "type": "number"
-    },
-    {
-     "name": "lastBounces",
-     "type": "number"
-    },
-    {
-     "name": "mostBounces",
-     "type": "number"
-    },
-    {
-     "name": "mostPasses",
-     "type": "number"
-    },
-    {
-     "name": "lastGoalDistance",
-     "type": "number"
-    },
-    {
-     "name": "longestGoalDistance",
-     "type": "number"
-    },
-    {
-     "name": "scoringTeam",
-     "type": "number"
-    },
-    {
-     "name": "lastPlayerScoredTeam",
-     "type": "number"
-    },
-    {
-     "name": "lastPlayerScored",
-     "type": "string"
-    },
-    {
-     "name": "lastPlayerScoredID",
-     "type": "number"
-    },
-    {
-     "name": "fastestPlayerScored",
-     "type": "string"
-    },
-    {
-     "name": "longestPlayerScored",
-     "type": "string"
-    },
-    {
-     "name": "bouncesPlayerScored",
-     "type": "string"
-    },
-    {
-     "name": "passesPlayerScored",
-     "type": "string"
-    },
-    {
-     "name": "teamPoints",
-     "type": "{number}"
-    },
-    {
-     "name": "teamCount",
-     "type": "number"
-    }
-   ],
+   "properties": [],
    "static": []
   },
   "ShootingTrainingComponent": {
@@ -2342,16 +2127,7 @@
      "args": []
     }
    ],
-   "properties": [
-    {
-     "name": "timerTextArrayToUpdate",
-     "type": "{any}"
-    },
-    {
-     "name": "bTextIncludeMilliseconds",
-     "type": "boolean"
-    }
-   ],
+   "properties": [],
    "static": []
   },
   "ToggleableComponent": {
@@ -2385,10 +2161,6 @@
    ],
    "properties": [
     {
-     "name": "defaultEnabledValue",
-     "type": "boolean"
-    },
-    {
      "name": "isEnabled",
      "type": "boolean"
     }
@@ -2412,44 +2184,9 @@
    "why": "used by the game scripts",
    "methods": [
     {
-     "name": "ballStolen",
-     "sig": "ballStolen(self, ballLocation: Vector): ()",
-     "cpp": "void ballStolen(const struct FVector& ballLocation);"
-    },
-    {
-     "name": "client_SetVisibilityOfDiscComponents",
-     "sig": "client_SetVisibilityOfDiscComponents(self, newVisibility: boolean, pawn: VRPawn): ()",
-     "cpp": "void Client_SetVisibilityOfDiscComponents(bool NewVisibility, class AVRPawn* Pawn);"
-    },
-    {
-     "name": "clientUnreliablePlayerHit",
-     "sig": "clientUnreliablePlayerHit(self, accelerationMagnitude: number): ()",
-     "cpp": "void ClientUnreliablePlayerHit(const float AccelerationMagnitude);"
-    },
-    {
-     "name": "forceUpdate",
-     "sig": "forceUpdate(self): ()",
-     "cpp": "void ForceUpdate();"
-    },
-    {
      "name": "freeze",
      "sig": "freeze(self, hideOutline: boolean): ()",
      "cpp": "void Freeze(bool hideOutline);"
-    },
-    {
-     "name": "getCosmeticLoadout",
-     "sig": "getCosmeticLoadout(self): any",
-     "cpp": "class UA2CosmeticLoadout* GetCosmeticLoadout();"
-    },
-    {
-     "name": "getDiscBounces",
-     "sig": "getDiscBounces(self): number",
-     "cpp": "int32 GetDiscBounces();"
-    },
-    {
-     "name": "getDiscPasses",
-     "sig": "getDiscPasses(self): number",
-     "cpp": "int32 GetDiscPasses();"
     },
     {
      "name": "getDiscPosition",
@@ -2467,84 +2204,14 @@
      "cpp": "struct FVector GetForwardVectorLuau();"
     },
     {
-     "name": "getGameSoundManagerEvent",
-     "sig": "getGameSoundManagerEvent(self, slotID: string): ()",
-     "cpp": "void GetGameSoundManagerEvent(class FName SlotID);"
-    },
-    {
      "name": "getGravityDirection",
      "sig": "getGravityDirection(self): Vector",
      "cpp": "struct FVector GetGravityDirection();"
     },
     {
-     "name": "getPlayerWhoSpawnedThisBall",
-     "sig": "getPlayerWhoSpawnedThisBall(self): VRPawn",
-     "cpp": "class AVRPawn* GetPlayerWhoSpawnedThisBall() const;"
-    },
-    {
-     "name": "getTrailVisibility",
-     "sig": "getTrailVisibility(self): boolean",
-     "cpp": "bool GetTrailVisibility() const;"
-    },
-    {
-     "name": "interceptionEvent",
-     "sig": "interceptionEvent(self, teamIndex: number, newSlotID: string): ()",
-     "cpp": "void interceptionEvent(int32 TeamIndex, const class FString& newSlotID);"
-    },
-    {
-     "name": "multicast_UnreliablePlayerHit",
-     "sig": "multicast_UnreliablePlayerHit(self, accelerationMagnitude: number): ()",
-     "cpp": "void Multicast_UnreliablePlayerHit(const float AccelerationMagnitude);"
-    },
-    {
-     "name": "newHitEvent",
-     "sig": "newHitEvent(self, data: ReplicatedPhysicsObjectData, bIsLeftHand: boolean): ()",
-     "cpp": "void NewHitEvent(const struct FReplicatedPhysicsObjectData& data, bool bIsLeftHand);"
-    },
-    {
-     "name": "onGrabbedCallback",
-     "sig": "onGrabbedCallback(self, grabComponent: any): ()",
-     "cpp": "void OnGrabbedCallback(class UGrabComponent* GrabComponent);"
-    },
-    {
-     "name": "onReleasedCallback",
-     "sig": "onReleasedCallback(self, grabComponent: any): ()",
-     "cpp": "void OnReleasedCallback(class UGrabComponent* GrabComponent);"
-    },
-    {
-     "name": "passEventServer",
-     "sig": "passEventServer(self, teamIndex: number, passCount: number): ()",
-     "cpp": "void PassEventServer(int32 TeamIndex, int32 passCount);"
-    },
-    {
-     "name": "playerHitOnServerLuau",
-     "sig": "playerHitOnServerLuau(self, disc: DiscEntity, data: ReplicatedPhysicsObjectData, bIsLeftHand: boolean): ()",
-     "cpp": "void PlayerHitOnServerLuau(class ADiscEntity* Disc, const struct FReplicatedPhysicsObjectData& data, bool bIsLeftHand);"
-    },
-    {
-     "name": "resetHeartBall",
-     "sig": "resetHeartBall(self): ()",
-     "cpp": "void ResetHeartBall();"
-    },
-    {
-     "name": "resetMainBodyColor",
-     "sig": "resetMainBodyColor(self): ()",
-     "cpp": "void ResetMainBodyColor();"
-    },
-    {
      "name": "server_SetVelocity",
      "sig": "server_SetVelocity(self, vel: Vector): ()",
      "cpp": "void Server_SetVelocity(const struct FVector& vel);"
-    },
-    {
-     "name": "serverDiscGrabbed",
-     "sig": "serverDiscGrabbed(self): ()",
-     "cpp": "void ServerDiscGrabbed();"
-    },
-    {
-     "name": "serverDiscReleased",
-     "sig": "serverDiscReleased(self): ()",
-     "cpp": "void ServerDiscReleased();"
     },
     {
      "name": "setAngularVelocity",
@@ -2562,29 +2229,9 @@
      "cpp": "void SetEnableHUDIndicator2(bool Enable);"
     },
     {
-     "name": "setIgnorePawn",
-     "sig": "setIgnorePawn(self, actor: VRPawn, bShouldIgnore: boolean): ()",
-     "cpp": "void SetIgnorePawn(class AVRPawn* Actor, bool bShouldIgnore);"
-    },
-    {
-     "name": "setMainBodyColor",
-     "sig": "setMainBodyColor(self, color: LinearColor): ()",
-     "cpp": "void SetMainBodyColor(const struct FLinearColor& Color);"
-    },
-    {
      "name": "setOwnerServer",
      "sig": "setOwnerServer(self): ()",
      "cpp": "void SetOwnerServer();"
-    },
-    {
-     "name": "setPlayerWhoSpawnedThisBall",
-     "sig": "setPlayerWhoSpawnedThisBall(self, inPlayerWhoSpawnedThisBall: VRPawn): ()",
-     "cpp": "void SetPlayerWhoSpawnedThisBall(class AVRPawn* InPlayerWhoSpawnedThisBall);"
-    },
-    {
-     "name": "setTrailVisibility",
-     "sig": "setTrailVisibility(self, bVisible: boolean): ()",
-     "cpp": "void SetTrailVisibility(const bool bVisible) const;"
     },
     {
      "name": "setVelocity",
@@ -2607,41 +2254,9 @@
      "name": "onGoToSleep",
      "type": "Event<()>",
      "args": []
-    },
-    {
-     "name": "playerHit",
-     "type": "Event<(DiscEntity, ReplicatedPhysicsObjectData)>",
-     "args": [
-      "Disc: DiscEntity",
-      "data: ReplicatedPhysicsObjectData"
-     ]
     }
    ],
    "properties": [
-    {
-     "name": "timeLastUsedByPoolingManager",
-     "type": "number"
-    },
-    {
-     "name": "basePushbackPercentage",
-     "type": "number"
-    },
-    {
-     "name": "bHasBallBegunShrinking",
-     "type": "boolean"
-    },
-    {
-     "name": "bIsFrozen",
-     "type": "boolean"
-    },
-    {
-     "name": "bIsPersonalBall",
-     "type": "boolean"
-    },
-    {
-     "name": "networkedReleasePosition",
-     "type": "Vector"
-    },
     {
      "name": "rollbackRecentPlayerHit",
      "type": "number"
@@ -2649,18 +2264,6 @@
     {
      "name": "rollbackPreviousPlayerHit",
      "type": "number"
-    },
-    {
-     "name": "spawner",
-     "type": "BallSpawnerComponent"
-    },
-    {
-     "name": "spawnerIndex",
-     "type": "number"
-    },
-    {
-     "name": "bIsHeartBall",
-     "type": "boolean"
     }
    ],
    "static": []
@@ -2672,119 +2275,9 @@
    "why": "used by the game scripts",
    "methods": [
     {
-     "name": "addImpulse",
-     "sig": "addImpulse(self, move: Vector, bAddToPushOffMomentum: boolean): ()",
-     "cpp": "void AddImpulse(const struct FVector& move, bool bAddToPushOffMomentum);"
-    },
-    {
-     "name": "addItemToInventoryByGameplayTag",
-     "sig": "addItemToInventoryByGameplayTag(self, inItemType: any, inGameplayTag: any): number",
-     "cpp": "int32 AddItemToInventoryByGameplayTag(EA2ItemType InItemType, const struct FGameplayTag& InGameplayTag);"
-    },
-    {
-     "name": "addItemToInventoryById",
-     "sig": "addItemToInventoryById(self, inItemId: string): number",
-     "cpp": "int32 AddItemToInventoryById(class FName InItemId);"
-    },
-    {
-     "name": "addTicketSystemCooldown",
-     "sig": "addTicketSystemCooldown(self, seconds: number): ()",
-     "cpp": "void AddTicketSystemCooldown(float Seconds);"
-    },
-    {
-     "name": "arenaSignUpReadyAlert",
-     "sig": "arenaSignUpReadyAlert(self): ()",
-     "cpp": "void ArenaSignUpReadyAlert();"
-    },
-    {
-     "name": "attemptTakeOwnershipProp",
-     "sig": "attemptTakeOwnershipProp(self, actor: any, previousOwner: any, lastSeenTimestamp: number, isHolding: boolean, isLeftHandHolding: boolean): ()",
-     "cpp": "void AttemptTakeOwnershipProp(class AActor* Actor, class AActor* previousOwner, double lastSeenTimestamp, bool isHolding, bool isLeftHandHolding);"
-    },
-    {
-     "name": "broadcastHighFive",
-     "sig": "broadcastHighFive(self, position: Vector, relativeSpeed: number): ()",
-     "cpp": "void BroadcastHighFive(const struct FVector& position, float relativeSpeed) const;"
-    },
-    {
-     "name": "changeCollisionType",
-     "sig": "changeCollisionType(self, newType: string): ()",
-     "cpp": "void ChangeCollisionType(class FName NewType);"
-    },
-    {
-     "name": "clearTeam",
-     "sig": "clearTeam(self): ()",
-     "cpp": "void ClearTeam();"
-    },
-    {
-     "name": "client_ArenaSignUpAlertReceived",
-     "sig": "client_ArenaSignUpAlertReceived(self, bDroneIncluded: boolean, arenaSignUpActorLocation: Vector, droneClass: any): ()",
-     "cpp": "void Client_ArenaSignUpAlertReceived(bool bDroneIncluded, const struct FVector& ArenaSignUpActorLocation, TSubclassOf<class AArenaSignUpDrone> DroneClass);"
-    },
-    {
-     "name": "client_DoSeparation",
-     "sig": "client_DoSeparation(self, separatingFrom: VRPawn, separationVector: Vector): ()",
-     "cpp": "void Client_DoSeparation(class AVRPawn* separatingFrom, const struct FVector& separationVector);"
-    },
-    {
-     "name": "client_DoTackle",
-     "sig": "client_DoTackle(self, momentumTransferImpulse: Vector, forceRelease: boolean, tackleGeneration: number): ()",
-     "cpp": "void Client_DoTackle(const struct FVector& momentumTransferImpulse, bool ForceRelease, int8 tackleGeneration);"
-    },
-    {
      "name": "client_EmitStatEvent",
      "sig": "client_EmitStatEvent(self, string: string, i: number): ()",
      "cpp": "void Client_EmitStatEvent(const class FString& String, int32 I);"
-    },
-    {
-     "name": "client_ExitLoadingScreen",
-     "sig": "client_ExitLoadingScreen(self): ()",
-     "cpp": "void Client_ExitLoadingScreen();"
-    },
-    {
-     "name": "client_GrabHeartBall",
-     "sig": "client_GrabHeartBall(self): ()",
-     "cpp": "void Client_GrabHeartBall();"
-    },
-    {
-     "name": "client_HitProp_Response",
-     "sig": "client_HitProp_Response(self, actor: any, success: boolean): ()",
-     "cpp": "void Client_HitProp_Response(class AActor* Actor, bool Success);"
-    },
-    {
-     "name": "client_OnClimbActorResponse",
-     "sig": "client_OnClimbActorResponse(self, grabbedActor: any, predictedTackleToGrabbed: boolean, appliedTackleToGrabbed: boolean, expectedTackleGeneration: number): ()",
-     "cpp": "void Client_OnClimbActorResponse(class AActor* grabbedActor, bool predictedTackleToGrabbed, bool appliedTackleToGrabbed, int8 expectedTackleGeneration);"
-    },
-    {
-     "name": "client_OnClimbedByOther",
-     "sig": "client_OnClimbedByOther(self, actor: any): ()",
-     "cpp": "void Client_OnClimbedByOther(class AActor* Actor);"
-    },
-    {
-     "name": "client_OnHeartBallReset",
-     "sig": "client_OnHeartBallReset(self): ()",
-     "cpp": "void Client_OnHeartBallReset();"
-    },
-    {
-     "name": "client_QueueReady",
-     "sig": "client_QueueReady(self): ()",
-     "cpp": "void Client_QueueReady();"
-    },
-    {
-     "name": "client_ReportOtherPlayer",
-     "sig": "client_ReportOtherPlayer(self, playerReportingMothershipID: string, playerBeingReportedMothershipID: string, category: number): ()",
-     "cpp": "void Client_ReportOtherPlayer(const class FString& PlayerReportingMothershipID, const class FString& PlayerBeingReportedMothershipID, const uint8& Category);"
-    },
-    {
-     "name": "client_ReportRollbackAvgWorstRemainingTime",
-     "sig": "client_ReportRollbackAvgWorstRemainingTime(self, avgWorstRemainingTime: number): ()",
-     "cpp": "void Client_ReportRollbackAvgWorstRemainingTime(double AvgWorstRemainingTime);"
-    },
-    {
-     "name": "client_SendServerSimResults",
-     "sig": "client_SendServerSimResults(self, state: BallSimState, players: {number}, inputs: {BallSimPlayerInputs}, missedInputs: number, missedInputsCaughtInBuffer: number): ()",
-     "cpp": "void Client_SendServerSimResults(const struct FBallSimState& State, const TArray<uint8>& Players, const TArray<struct FBallSimPlayerInputs>& Inputs, int8 MissedInputs, int8 MissedInputsCaughtInBuffer);"
     },
     {
      "name": "client_SetQuestCompleted",
@@ -2792,932 +2285,29 @@
      "cpp": "void Client_SetQuestCompleted(const class FString& String);"
     },
     {
-     "name": "client_SetQueueTimer",
-     "sig": "client_SetQueueTimer(self, value: boolean): ()",
-     "cpp": "void Client_SetQueueTimer(bool Value);"
-    },
-    {
-     "name": "client_SetVerifiedTimer",
-     "sig": "client_SetVerifiedTimer(self, value: boolean): ()",
-     "cpp": "void Client_SetVerifiedTimer(bool Value);"
-    },
-    {
-     "name": "client_StartQueueTimer",
-     "sig": "client_StartQueueTimer(self): ()",
-     "cpp": "void Client_StartQueueTimer();"
-    },
-    {
-     "name": "client_StartVerifiedTimer",
-     "sig": "client_StartVerifiedTimer(self): ()",
-     "cpp": "void Client_StartVerifiedTimer();"
-    },
-    {
-     "name": "client_TakeOwnership_Response",
-     "sig": "client_TakeOwnership_Response(self, actor: any, success: boolean, isLeftHand: boolean): ()",
-     "cpp": "void Client_TakeOwnership_Response(class AActor* Actor, bool Success, bool isLeftHand);"
-    },
-    {
-     "name": "client_TeamClearSuccess",
-     "sig": "client_TeamClearSuccess(self, bResetCurrentTicket: boolean, bFireSuccessEvent: boolean, bResetCollisionType: boolean): ()",
-     "cpp": "void Client_TeamClearSuccess(bool bResetCurrentTicket, bool bFireSuccessEvent, bool bResetCollisionType);"
-    },
-    {
-     "name": "client_TicketCheckFailure",
-     "sig": "client_TicketCheckFailure(self, teamIndex: number, teamChangeSlotID: string, slot: any): ()",
-     "cpp": "void Client_TicketCheckFailure(int8 TeamIndex, const class FString& TeamChangeSlotID, class AModuleSlot* Slot);"
-    },
-    {
-     "name": "client_TicketCheckSuccess",
-     "sig": "client_TicketCheckSuccess(self, currentTicket: number, teamColor: TeamColor, teamIndex: number, slot: any, bSilent: boolean): ()",
-     "cpp": "void Client_TicketCheckSuccess(int32 CurrentTicket, const struct FTeamColor& TeamColor, int8 TeamIndex, class AModuleSlot* Slot, bool bSilent);"
-    },
-    {
-     "name": "client_TicketGiveFailure",
-     "sig": "client_TicketGiveFailure(self): ()",
-     "cpp": "void Client_TicketGiveFailure();"
-    },
-    {
-     "name": "client_TicketGiveSuccess",
-     "sig": "client_TicketGiveSuccess(self, currentTicket: number, bSilent: boolean): ()",
-     "cpp": "void Client_TicketGiveSuccess(int32 CurrentTicket, bool bSilent);"
-    },
-    {
-     "name": "client_UpdateBallIndicators",
-     "sig": "client_UpdateBallIndicators(self, bEnable: boolean, ball: DiscEntity): ()",
-     "cpp": "void Client_UpdateBallIndicators(bool bEnable, class ADiscEntity* Ball);"
-    },
-    {
-     "name": "client_UpdatePersonalBallIndicator",
-     "sig": "client_UpdatePersonalBallIndicator(self, bEnable: boolean, ball: DiscEntity): ()",
-     "cpp": "void Client_UpdatePersonalBallIndicator(bool bEnable, class ADiscEntity* Ball);"
-    },
-    {
-     "name": "client_UpdateTeamChangeComponents",
-     "sig": "client_UpdateTeamChangeComponents(self, onTeam: boolean, teamIndex: number): ()",
-     "cpp": "void Client_UpdateTeamChangeComponents(bool onTeam, int32 TeamIndex);"
-    },
-    {
-     "name": "client_UpdateTeamColors",
-     "sig": "client_UpdateTeamColors(self, teamColor: TeamColor, teamIndex: number): ()",
-     "cpp": "void Client_UpdateTeamColors(const struct FTeamColor& TeamColor, int8 TeamIndex);"
-    },
-    {
-     "name": "client_UpdateWorldTime",
-     "sig": "client_UpdateWorldTime(self, clientTimestamp: number, serverTimestamp: number): ()",
-     "cpp": "void Client_UpdateWorldTime(double clientTimestamp, double serverTimestamp);"
-    },
-    {
-     "name": "clientEquipItemById",
-     "sig": "clientEquipItemById(self, inItemId: string, inItemSlot: any): boolean",
-     "cpp": "bool ClientEquipItemById(class FName InItemId, EA2ItemSlot InItemSlot);"
-    },
-    {
-     "name": "clientSetCosmeticCustomTeamColor",
-     "sig": "clientSetCosmeticCustomTeamColor(self, newCustomColor: TeamColor): ()",
-     "cpp": "void ClientSetCosmeticCustomTeamColor(const struct FTeamColor& NewCustomColor);"
-    },
-    {
-     "name": "clientSetCosmeticMaterialMetadata",
-     "sig": "clientSetCosmeticMaterialMetadata(self, newCosmeticMaterialMetadata: A2CosmeticMaterialMetadata): ()",
-     "cpp": "void ClientSetCosmeticMaterialMetadata(const struct FA2CosmeticMaterialMetadata& NewCosmeticMaterialMetadata);"
-    },
-    {
-     "name": "clientSetCosmeticMeshMetadataByName",
-     "sig": "clientSetCosmeticMeshMetadataByName(self, newCosmeticMeshMetadataName: string): ()",
-     "cpp": "void ClientSetCosmeticMeshMetadataByName(const class FName& NewCosmeticMeshMetadataName);"
-    },
-    {
-     "name": "clientSetCosmeticPreferredTeamColor",
-     "sig": "clientSetCosmeticPreferredTeamColor(self, newPreferredColor: TeamColor): ()",
-     "cpp": "void ClientSetCosmeticPreferredTeamColor(const struct FTeamColor& NewPreferredColor);"
-    },
-    {
-     "name": "clientUnequipItemById",
-     "sig": "clientUnequipItemById(self, inItemId: string): boolean",
-     "cpp": "bool ClientUnequipItemById(class FName InItemId);"
-    },
-    {
-     "name": "clientUnequipItemBySlot",
-     "sig": "clientUnequipItemBySlot(self, inItemSlot: any): boolean",
-     "cpp": "bool ClientUnequipItemBySlot(EA2ItemSlot InItemSlot);"
-    },
-    {
-     "name": "clientWriteInventoryPersistentDataThrottled",
-     "sig": "clientWriteInventoryPersistentDataThrottled(self): ()",
-     "cpp": "void ClientWriteInventoryPersistentDataThrottled();"
-    },
-    {
-     "name": "clientWriteSettingsAndSafetyPersistentDataThrottled",
-     "sig": "clientWriteSettingsAndSafetyPersistentDataThrottled(self): ()",
-     "cpp": "void ClientWriteSettingsAndSafetyPersistentDataThrottled();"
-    },
-    {
-     "name": "disableGrabbingFor",
-     "sig": "disableGrabbingFor(self, time: number): ()",
-     "cpp": "void DisableGrabbingFor(float Time);"
-    },
-    {
-     "name": "doTackle",
-     "sig": "doTackle(self, momentumTransferImpulse: Vector, forceRelease: boolean): ()",
-     "cpp": "void DoTackle(const struct FVector& momentumTransferImpulse, bool ForceRelease);"
-    },
-    {
      "name": "emitStatEventFromLocalClient",
      "sig": "emitStatEventFromLocalClient(self, string: string, i: number): ()",
      "cpp": "void EmitStatEventFromLocalClient(const class FString& String, int32 I);"
     },
     {
-     "name": "finishLoadingScreen",
-     "sig": "finishLoadingScreen(self): ()",
-     "cpp": "void FinishLoadingScreen();"
-    },
-    {
-     "name": "getCameraForward",
-     "sig": "getCameraForward(self): Vector",
-     "cpp": "struct FVector GetCameraForward();"
-    },
-    {
-     "name": "getCosmeticMaterialMetadata",
-     "sig": "getCosmeticMaterialMetadata(self): A2CosmeticMaterialMetadata",
-     "cpp": "const struct FA2CosmeticMaterialMetadata GetCosmeticMaterialMetadata() const;"
-    },
-    {
-     "name": "getCurrentPlayerColor",
-     "sig": "getCurrentPlayerColor(self): LinearColor",
-     "cpp": "struct FLinearColor GetCurrentPlayerColor();"
-    },
-    {
-     "name": "getDiffFromServerTime",
-     "sig": "getDiffFromServerTime(self, timestamp: number): number",
-     "cpp": "double GetDiffFromServerTime(double Timestamp) const;"
-    },
-    {
-     "name": "getEnableSoccerChin",
-     "sig": "getEnableSoccerChin(self): boolean",
-     "cpp": "bool GetEnableSoccerChin() const;"
-    },
-    {
-     "name": "getEquippedColorPreset",
-     "sig": "getEquippedColorPreset(self): (boolean, LinearColor, LinearColor)",
-     "cpp": "bool GetEquippedColorPreset(struct FLinearColor* OutPrimaryColor, struct FLinearColor* OutSecondaryColor) const;"
-    },
-    {
-     "name": "getEquippedItemAtSlot",
-     "sig": "getEquippedItemAtSlot(self, inItemSlot: any): (boolean, A2ItemState)",
-     "cpp": "bool GetEquippedItemAtSlot(EA2ItemSlot InItemSlot, struct FA2ItemState* OutItem) const;"
-    },
-    {
-     "name": "getEquippedItemIdAtSlot",
-     "sig": "getEquippedItemIdAtSlot(self, inItemSlot: any): (boolean, string)",
-     "cpp": "bool GetEquippedItemIdAtSlot(EA2ItemSlot InItemSlot, class FName* OutItemId) const;"
-    },
-    {
-     "name": "getGravityComponent",
-     "sig": "getGravityComponent(self): any",
-     "cpp": "class UA2GravityComponent* GetGravityComponent() const;"
-    },
-    {
-     "name": "getHeadLocation",
-     "sig": "getHeadLocation(self): Vector",
-     "cpp": "struct FVector GetHeadLocation() const;"
-    },
-    {
-     "name": "getHeartBallProxy",
-     "sig": "getHeartBallProxy(self): any",
-     "cpp": "class UStaticMeshComponent* GetHeartBallProxy() const;"
-    },
-    {
-     "name": "getInTransitionZone",
-     "sig": "getInTransitionZone(self): boolean",
-     "cpp": "bool GetInTransitionZone() const;"
-    },
-    {
-     "name": "getItemsFromInventoryBySlot",
-     "sig": "getItemsFromInventoryBySlot(self, inItemSlot: any): (number, {A2ItemState})",
-     "cpp": "int32 GetItemsFromInventoryBySlot(EA2ItemSlot InItemSlot, TArray<struct FA2ItemState>* OutItems) const;"
-    },
-    {
-     "name": "getItemsFromInventoryByType",
-     "sig": "getItemsFromInventoryByType(self, inItemType: any): (number, {A2ItemState})",
-     "cpp": "int32 GetItemsFromInventoryByType(EA2ItemType InItemType, TArray<struct FA2ItemState>* OutItems) const;"
-    },
-    {
-     "name": "getLeftGrabber",
-     "sig": "getLeftGrabber(self): any",
-     "cpp": "class UGrabComponent* GetLeftGrabber() const;"
-    },
-    {
-     "name": "getPawnCurrentTeamColor",
-     "sig": "getPawnCurrentTeamColor(self): TeamColor",
-     "cpp": "struct FTeamColor GetPawnCurrentTeamColor();"
-    },
-    {
-     "name": "getPawnCurrentTicket",
-     "sig": "getPawnCurrentTicket(self): number",
-     "cpp": "int32 GetPawnCurrentTicket();"
-    },
-    {
-     "name": "getPawnPreferredTeam",
-     "sig": "getPawnPreferredTeam(self): TeamColor",
-     "cpp": "struct FTeamColor GetPawnPreferredTeam() const;"
-    },
-    {
-     "name": "getPawnTeamIndex",
-     "sig": "getPawnTeamIndex(self): number",
-     "cpp": "int8 GetPawnTeamIndex() const;"
-    },
-    {
-     "name": "getPawnTeamIndexBlueprint",
-     "sig": "getPawnTeamIndexBlueprint(self): number",
-     "cpp": "int32 GetPawnTeamIndexBlueprint();"
-    },
-    {
-     "name": "getPlayerIndex",
-     "sig": "getPlayerIndex(self): number",
-     "cpp": "int32 GetPlayerIndex() const;"
-    },
-    {
-     "name": "getPlayerNameDecorated",
-     "sig": "getPlayerNameDecorated(self): string",
-     "cpp": "class FString GetPlayerNameDecorated();"
-    },
-    {
-     "name": "getPlayerNameDecoration",
-     "sig": "getPlayerNameDecoration(self): string",
-     "cpp": "class FString GetPlayerNameDecoration();"
-    },
-    {
-     "name": "getRenderer",
-     "sig": "getRenderer(self): any",
-     "cpp": "class APlayerRenderer* GetRenderer() const;"
-    },
-    {
-     "name": "getRightGrabber",
-     "sig": "getRightGrabber(self): any",
-     "cpp": "class UGrabComponent* GetRightGrabber() const;"
-    },
-    {
-     "name": "getServerWorldTime",
-     "sig": "getServerWorldTime(self): number",
-     "cpp": "double GetServerWorldTime() const;"
-    },
-    {
-     "name": "getServerWorldTimeDelta",
-     "sig": "getServerWorldTimeDelta(self): number",
-     "cpp": "double GetServerWorldTimeDelta() const;"
-    },
-    {
-     "name": "getStoredName",
-     "sig": "getStoredName(self): string",
-     "cpp": "class FString GetStoredName();"
-    },
-    {
-     "name": "getTicketManagerAndClearTeam",
-     "sig": "getTicketManagerAndClearTeam(self, bPawnBeingDestroyed: boolean, bResetPawnCollision: boolean): ()",
-     "cpp": "void GetTicketManagerAndClearTeam(const bool bPawnBeingDestroyed, const bool bResetPawnCollision);"
-    },
-    {
-     "name": "getVRPawnVelocity",
-     "sig": "getVRPawnVelocity(self): Vector",
-     "cpp": "struct FVector GetVRPawnVelocity() const;"
-    },
-    {
-     "name": "gripBroken_0",
-     "sig": "gripBroken_0(self, isLeftHand: boolean): ()",
-     "cpp": "void GripBroken_0(bool isLeftHand);"
-    },
-    {
-     "name": "handleGamemodeBegun",
-     "sig": "handleGamemodeBegun(self): ()",
-     "cpp": "void HandleGamemodeBegun();"
-    },
-    {
-     "name": "handleGamemodeStopped",
-     "sig": "handleGamemodeStopped(self): ()",
-     "cpp": "void HandleGamemodeStopped();"
-    },
-    {
-     "name": "handleSpawnPointOverride",
-     "sig": "handleSpawnPointOverride(self): ()",
-     "cpp": "void HandleSpawnPointOverride();"
-    },
-    {
-     "name": "isCameraAlignedWithVector",
-     "sig": "isCameraAlignedWithVector(self, vector: Vector, desiredDot: number): boolean",
-     "cpp": "bool IsCameraAlignedWithVector(const struct FVector& Vector, float DesiredDot);"
-    },
-    {
-     "name": "isInMyParty",
-     "sig": "isInMyParty(self): boolean",
-     "cpp": "bool IsInMyParty() const;"
-    },
-    {
-     "name": "isItemEquippedAtSlot",
-     "sig": "isItemEquippedAtSlot(self, inItemSlot: any): boolean",
-     "cpp": "bool IsItemEquippedAtSlot(EA2ItemSlot InItemSlot) const;"
-    },
-    {
-     "name": "isPointNearCenterOfCamera",
-     "sig": "isPointNearCenterOfCamera(self, position: Vector, desiredDot: number): boolean",
-     "cpp": "bool IsPointNearCenterOfCamera(const struct FVector& position, float DesiredDot);"
-    },
-    {
-     "name": "localUnequipItemById",
-     "sig": "localUnequipItemById(self, inItemId: string): boolean",
-     "cpp": "bool LocalUnequipItemById(class FName InItemId);"
-    },
-    {
-     "name": "localUnequipItemBySlot",
-     "sig": "localUnequipItemBySlot(self, inItemSlot: any): boolean",
-     "cpp": "bool LocalUnequipItemBySlot(EA2ItemSlot InItemSlot);"
-    },
-    {
-     "name": "multicast_DiscInteractionEvent",
-     "sig": "multicast_DiscInteractionEvent(self, pos: Vector, initiatedPlayer: string, lastTimestamp: number, newTimestamp: number, reason: string): ()",
-     "cpp": "void Multicast_DiscInteractionEvent(const struct FVector& Pos, const class FString& initiatedPlayer, double lastTimestamp, double newTimestamp, const class FString& Reason);"
-    },
-    {
-     "name": "onControllerChanged",
-     "sig": "onControllerChanged(self, pawn: any, oldController: any, newController: any): ()",
-     "cpp": "void OnControllerChanged(class APawn* Pawn, class AController* OldController, class AController* NewController);"
-    },
-    {
-     "name": "onDebugMovementToggled",
-     "sig": "onDebugMovementToggled(self, isActive: boolean): ()",
-     "cpp": "void OnDebugMovementToggled(bool IsActive);"
-    },
-    {
-     "name": "onGrabBoosted",
-     "sig": "onGrabBoosted(self, isLeftHand: boolean): ()",
-     "cpp": "void OnGrabBoosted(bool isLeftHand);"
-    },
-    {
-     "name": "onHeadImpact",
-     "sig": "onHeadImpact(self, impactVelocity: Vector): ()",
-     "cpp": "void OnHeadImpact(const struct FVector& ImpactVelocity);"
-    },
-    {
-     "name": "onLeftHandBeginOverlap",
-     "sig": "onLeftHandBeginOverlap(self, overlappedComp: any, otherActor: any, otherComp: any, otherBodyIndex: number, bFromSweep: boolean, sweepResult: any): ()",
-     "cpp": "void OnLeftHandBeginOverlap(class UPrimitiveComponent* OverlappedComp, class AActor* OtherActor, class UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const struct FHitResult& SweepResult);"
-    },
-    {
-     "name": "onLeftUIBeginOverlap",
-     "sig": "onLeftUIBeginOverlap(self, overlappedComp: any, otherActor: any, otherComp: any, otherBodyIndex: number, bFromSweep: boolean, sweepResult: any): ()",
-     "cpp": "void OnLeftUIBeginOverlap(class UPrimitiveComponent* OverlappedComp, class AActor* OtherActor, class UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const struct FHitResult& SweepResult);"
-    },
-    {
-     "name": "onLeftUIEndOverlap",
-     "sig": "onLeftUIEndOverlap(self, overlappedComp: any, otherActor: any, otherComp: any, otherBodyIndex: number): ()",
-     "cpp": "void OnLeftUIEndOverlap(class UPrimitiveComponent* OverlappedComp, class AActor* OtherActor, class UPrimitiveComponent* OtherComp, int32 OtherBodyIndex);"
-    },
-    {
-     "name": "onLeftUIHoverBeginOverlap",
-     "sig": "onLeftUIHoverBeginOverlap(self, overlappedComp: any, otherActor: any, otherComp: any, otherBodyIndex: number, bFromSweep: boolean, sweepResult: any): ()",
-     "cpp": "void OnLeftUIHoverBeginOverlap(class UPrimitiveComponent* OverlappedComp, class AActor* OtherActor, class UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const struct FHitResult& SweepResult);"
-    },
-    {
-     "name": "onPlayerTackled",
-     "sig": "onPlayerTackled(self, impulse: Vector, forceRelease: boolean): ()",
-     "cpp": "void OnPlayerTackled(const struct FVector& Impulse, bool ForceRelease);"
-    },
-    {
-     "name": "onProperBeginBlueprint",
-     "sig": "onProperBeginBlueprint(self): ()",
-     "cpp": "void OnProperBeginBlueprint();"
-    },
-    {
-     "name": "onRightHandBeginOverlap",
-     "sig": "onRightHandBeginOverlap(self, overlappedComp: any, otherActor: any, otherComp: any, otherBodyIndex: number, bFromSweep: boolean, sweepResult: any): ()",
-     "cpp": "void OnRightHandBeginOverlap(class UPrimitiveComponent* OverlappedComp, class AActor* OtherActor, class UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const struct FHitResult& SweepResult);"
-    },
-    {
-     "name": "onRightUIBeginOverlap",
-     "sig": "onRightUIBeginOverlap(self, overlappedComp: any, otherActor: any, otherComp: any, otherBodyIndex: number, bFromSweep: boolean, sweepResult: any): ()",
-     "cpp": "void OnRightUIBeginOverlap(class UPrimitiveComponent* OverlappedComp, class AActor* OtherActor, class UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const struct FHitResult& SweepResult);"
-    },
-    {
-     "name": "onRightUIEndOverlap",
-     "sig": "onRightUIEndOverlap(self, overlappedComp: any, otherActor: any, otherComp: any, otherBodyIndex: number): ()",
-     "cpp": "void OnRightUIEndOverlap(class UPrimitiveComponent* OverlappedComp, class AActor* OtherActor, class UPrimitiveComponent* OtherComp, int32 OtherBodyIndex);"
-    },
-    {
-     "name": "onRightUIHoverBeginOverlap",
-     "sig": "onRightUIHoverBeginOverlap(self, overlappedComp: any, otherActor: any, otherComp: any, otherBodyIndex: number, bFromSweep: boolean, sweepResult: any): ()",
-     "cpp": "void OnRightUIHoverBeginOverlap(class UPrimitiveComponent* OverlappedComp, class AActor* OtherActor, class UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const struct FHitResult& SweepResult);"
-    },
-    {
-     "name": "playerConfigNetVarsChanged",
-     "sig": "playerConfigNetVarsChanged(self): ()",
-     "cpp": "void PlayerConfigNetVarsChanged();"
-    },
-    {
-     "name": "reEnableDebugBoost",
-     "sig": "reEnableDebugBoost(self): ()",
-     "cpp": "void ReEnableDebugBoost();"
-    },
-    {
-     "name": "refreshOnlineInventory",
-     "sig": "refreshOnlineInventory(self): ()",
-     "cpp": "void RefreshOnlineInventory();"
-    },
-    {
-     "name": "releaseMagnetHands",
-     "sig": "releaseMagnetHands(self, bLeftHand: boolean, bRightHand: boolean, bStartDisableMagnetHandsTimer: boolean): ()",
-     "cpp": "void ReleaseMagnetHands(bool bLeftHand, bool bRightHand, bool bStartDisableMagnetHandsTimer);"
-    },
-    {
-     "name": "removeItemFromInventoryByGameplayTag",
-     "sig": "removeItemFromInventoryByGameplayTag(self, inItemType: any, inGameplayTag: any): boolean",
-     "cpp": "bool RemoveItemFromInventoryByGameplayTag(EA2ItemType InItemType, const struct FGameplayTag& InGameplayTag);"
-    },
-    {
-     "name": "removeItemFromInventoryById",
-     "sig": "removeItemFromInventoryById(self, inItemId: string): boolean",
-     "cpp": "bool RemoveItemFromInventoryById(class FName InItemId);"
-    },
-    {
-     "name": "resetRotationMode",
-     "sig": "resetRotationMode(self): ()",
-     "cpp": "void ResetRotationMode();"
-    },
-    {
-     "name": "server_ApplyParty",
-     "sig": "server_ApplyParty(self, partyBox: any): ()",
-     "cpp": "void Server_ApplyParty(class APartyBoxActor* PartyBox);"
-    },
-    {
-     "name": "server_AttemptTakeOwnership",
-     "sig": "server_AttemptTakeOwnership(self, actor: any, previousOwner: any, lastSeenTimestamp: number, isHolding: boolean, isLeftHandHeld: boolean, timestamp: number): ()",
-     "cpp": "void Server_AttemptTakeOwnership(class AActor* Actor, class AActor* previousOwner, double lastSeenTimestamp, bool isHolding, bool isLeftHandHeld, double Timestamp);"
-    },
-    {
-     "name": "server_AttemptTakeOwnershipOfLevelEditor",
-     "sig": "server_AttemptTakeOwnershipOfLevelEditor(self, avrPlayerController: any): ()",
-     "cpp": "void Server_AttemptTakeOwnershipOfLevelEditor(class AVRPlayerController* avrPlayerController);"
-    },
-    {
-     "name": "server_AttemptTakeOwnershipOfSpectatorManager",
-     "sig": "server_AttemptTakeOwnershipOfSpectatorManager(self, avrPlayerController: any): ()",
-     "cpp": "void Server_AttemptTakeOwnershipOfSpectatorManager(class AVRPlayerController* avrPlayerController);"
-    },
-    {
-     "name": "server_ClearPawnTeam",
-     "sig": "server_ClearPawnTeam(self): ()",
-     "cpp": "void Server_ClearPawnTeam();"
-    },
-    {
-     "name": "server_DoDebugDiscMovement",
-     "sig": "server_DoDebugDiscMovement(self): ()",
-     "cpp": "void Server_DoDebugDiscMovement();"
-    },
-    {
-     "name": "server_HandleQueueTimerEnded",
-     "sig": "server_HandleQueueTimerEnded(self): ()",
-     "cpp": "void Server_HandleQueueTimerEnded();"
-    },
-    {
-     "name": "server_HandleVerifiedTimerEnded",
-     "sig": "server_HandleVerifiedTimerEnded(self): ()",
-     "cpp": "void Server_HandleVerifiedTimerEnded();"
-    },
-    {
-     "name": "server_HitProp",
-     "sig": "server_HitProp(self, actor: any, previousOwner: any, lastSeenTimestamp: number, timestamp: number, position: Vector, force: Vector): ()",
-     "cpp": "void Server_HitProp(class AActor* Actor, class AActor* previousOwner, double lastSeenTimestamp, double Timestamp, const struct FVector& position, const struct FVector& Force);"
-    },
-    {
-     "name": "server_KillHeartBall",
-     "sig": "server_KillHeartBall(self): ()",
-     "cpp": "void Server_KillHeartBall();"
-    },
-    {
-     "name": "server_NotifyPlayerEnteredArena",
-     "sig": "server_NotifyPlayerEnteredArena(self, newSlotID: string): ()",
-     "cpp": "void Server_NotifyPlayerEnteredArena(const class FString& newSlotID);"
-    },
-    {
-     "name": "server_NotifyPlayerLeftArena",
-     "sig": "server_NotifyPlayerLeftArena(self, newSlotID: string): ()",
-     "cpp": "void Server_NotifyPlayerLeftArena(const class FString& newSlotID);"
-    },
-    {
-     "name": "server_OnClimbActor",
-     "sig": "server_OnClimbActor(self, grabbedActor: any, success: boolean, predictedSeparation: boolean, predictedTackle: boolean, predictedTackleInitiator: boolean, predictedForceRelease: boolean): ()",
-     "cpp": "void Server_OnClimbActor(class AActor* grabbedActor, bool Success, bool predictedSeparation, bool predictedTackle, bool predictedTackleInitiator, bool predictedForceRelease);"
-    },
-    {
-     "name": "server_ReportOtherPlayer",
-     "sig": "server_ReportOtherPlayer(self, playerBeingReported: VRPawn, category: number): ()",
-     "cpp": "void Server_ReportOtherPlayer(class AVRPawn* PlayerBeingReported, const uint8& Category);"
-    },
-    {
-     "name": "server_RequestExitLoadingScreen",
-     "sig": "server_RequestExitLoadingScreen(self): ()",
-     "cpp": "void Server_RequestExitLoadingScreen();"
-    },
-    {
-     "name": "server_RequestWorldTime",
-     "sig": "server_RequestWorldTime(self, clientTimestamp: number): ()",
-     "cpp": "void Server_RequestWorldTime(double clientTimestamp);"
-    },
-    {
-     "name": "server_SendPhysicsPropData",
-     "sig": "server_SendPhysicsPropData(self, actor: any, data: ReplicatedPhysicsObjectData): ()",
-     "cpp": "void Server_SendPhysicsPropData(class AActor* Actor, const struct FReplicatedPhysicsObjectData& data);"
-    },
-    {
-     "name": "server_SetHeartCoreProxyVisibility",
-     "sig": "server_SetHeartCoreProxyVisibility(self, bIsVisible: boolean): ()",
-     "cpp": "void Server_SetHeartCoreProxyVisibility(const bool bIsVisible);"
-    },
-    {
-     "name": "server_SetOptimizedPathToFollow",
-     "sig": "server_SetOptimizedPathToFollow(self, newPathToFollow: {Vector}): ()",
-     "cpp": "void Server_SetOptimizedPathToFollow(const TArray<struct FVector_NetQuantize>& NewPathToFollow);"
-    },
-    {
-     "name": "server_SetPawnCurrentGameModeSlot",
-     "sig": "server_SetPawnCurrentGameModeSlot(self, newGameModeSlot: any): ()",
-     "cpp": "void Server_SetPawnCurrentGameModeSlot(class AModuleSlot* newGameModeSlot);"
-    },
-    {
-     "name": "server_SetPawnCurrentSlotID",
-     "sig": "server_SetPawnCurrentSlotID(self, currentSlotID: string): ()",
-     "cpp": "void Server_SetPawnCurrentSlotID(const class FString& currentSlotID);"
-    },
-    {
-     "name": "server_SetPawnCurrentTicket",
-     "sig": "server_SetPawnCurrentTicket(self, currentTicket: number): ()",
-     "cpp": "void Server_SetPawnCurrentTicket(const int32 CurrentTicket);"
-    },
-    {
-     "name": "server_SetPlayerName",
-     "sig": "server_SetPlayerName(self, name: string): ()",
-     "cpp": "void Server_SetPlayerName(const class FString& Name_0);"
-    },
-    {
-     "name": "server_SetPlayerNameDecoration",
-     "sig": "server_SetPlayerNameDecoration(self, nameDecoration: string): ()",
-     "cpp": "void Server_SetPlayerNameDecoration(const class FString& nameDecoration);"
-    },
-    {
-     "name": "server_SocketGrabbable",
-     "sig": "server_SocketGrabbable(self, socket: any, grabbableComponent: any): ()",
-     "cpp": "void Server_SocketGrabbable(class UGrabbableSocketComponent* Socket, class UGrabbableComponent* GrabbableComponent);"
-    },
-    {
-     "name": "server_SpawnBall",
-     "sig": "server_SpawnBall(self, ballClass: any, location: Vector, startingVelocity: Vector, angularVelocity: Vector): ()",
-     "cpp": "void Server_SpawnBall(TSubclassOf<class ADiscEntity> BallClass, const struct FVector& Location, const struct FVector& StartingVelocity, const struct FVector& AngularVelocity);"
-    },
-    {
-     "name": "server_SpawnHeartBall",
-     "sig": "server_SpawnHeartBall(self, location: Vector): ()",
-     "cpp": "void Server_SpawnHeartBall(const struct FVector& Location);"
-    },
-    {
-     "name": "server_SubmitInputs",
-     "sig": "server_SubmitInputs(self, inputs: {BallSimPlayerInputs}, simIndex: number): ()",
-     "cpp": "void Server_SubmitInputs(const TArray<struct FBallSimPlayerInputs>& Inputs, int32 SimIndex);"
-    },
-    {
-     "name": "server_ToolTaken",
-     "sig": "server_ToolTaken(self, tool: any): ()",
-     "cpp": "void Server_ToolTaken(class AA2ToolBase* Tool);"
-    },
-    {
-     "name": "server_ToolTriggerAction",
-     "sig": "server_ToolTriggerAction(self, tool: any, ownerPawn: VRPawn, grabber: any, actionState: boolean, hand: any): ()",
-     "cpp": "void Server_ToolTriggerAction(class AA2ToolBase* Tool, class AVRPawn* OwnerPawn, class UGrabComponent* Grabber, bool ActionState, EControllerHand Hand);"
-    },
-    {
-     "name": "server_UpdateDiscLastTouchedPosition",
-     "sig": "server_UpdateDiscLastTouchedPosition(self, actor: any): ()",
-     "cpp": "void Server_UpdateDiscLastTouchedPosition(class AActor* Actor);"
-    },
-    {
-     "name": "serverBroadcastGrabbed",
-     "sig": "serverBroadcastGrabbed(self, grabbableComponent: any, bIsLeftHand: boolean): ()",
-     "cpp": "void ServerBroadcastGrabbed(class UGrabbableComponent* GrabbableComponent, bool bIsLeftHand);"
-    },
-    {
-     "name": "serverBroadcastReleased",
-     "sig": "serverBroadcastReleased(self, grabbableComponent: any, bIsLeftHand: boolean): ()",
-     "cpp": "void ServerBroadcastReleased(class UGrabbableComponent* GrabbableComponent, bool bIsLeftHand);"
-    },
-    {
-     "name": "serverBroadcastThrown",
-     "sig": "serverBroadcastThrown(self, grabbableComponent: any, throwVelocity: Vector, throwAngularVelocity: Vector, bIsLeftHand: boolean): ()",
-     "cpp": "void ServerBroadcastThrown(class UGrabbableComponent* GrabbableComponent, const struct FVector& ThrowVelocity, const struct FVector& ThrowAngularVelocity, bool bIsLeftHand);"
-    },
-    {
-     "name": "setColorAndTeamIndex",
-     "sig": "setColorAndTeamIndex(self, newCurrentColor: TeamColor, newTeamIndex: number): ()",
-     "cpp": "void SetColorAndTeamIndex(const struct FTeamColor& NewCurrentColor, const int8 NewTeamIndex);"
-    },
-    {
-     "name": "setEnableSoccerChin",
-     "sig": "setEnableSoccerChin(self, bNewEnableSoccerChin: boolean): ()",
-     "cpp": "void SetEnableSoccerChin(bool bNewEnableSoccerChin);"
-    },
-    {
-     "name": "setHandReorientationParams",
-     "sig": "setHandReorientationParams(self, newParams: HandReorientationParams): ()",
-     "cpp": "void SetHandReorientationParams(const struct FHandReorientationParams& newParams);"
-    },
-    {
-     "name": "setHeartBall",
-     "sig": "setHeartBall(self, ball: DiscEntity): ()",
-     "cpp": "void SetHeartBall(class ADiscEntity* Ball);"
-    },
-    {
-     "name": "setIgnoreActorWhileMoving",
-     "sig": "setIgnoreActorWhileMoving(self, actor: any, shouldIgnore: boolean): ()",
-     "cpp": "void SetIgnoreActorWhileMoving(class AActor* Actor, bool shouldIgnore);"
-    },
-    {
-     "name": "setIgnoreComponentWhileMoving",
-     "sig": "setIgnoreComponentWhileMoving(self, mesh: any, shouldIgnore: boolean): ()",
-     "cpp": "void SetIgnoreComponentWhileMoving(class UPrimitiveComponent* mesh, bool shouldIgnore);"
-    },
-    {
-     "name": "setInTransitionZone",
-     "sig": "setInTransitionZone(self, bNewInTransitionZone: boolean): ()",
-     "cpp": "void SetInTransitionZone(bool bNewInTransitionZone);"
-    },
-    {
-     "name": "setLaserActive",
-     "sig": "setLaserActive(self, state: boolean, isLeft: boolean): ()",
-     "cpp": "void SetLaserActive(bool State, bool isLeft);"
-    },
-    {
-     "name": "setManualReorientationScale",
-     "sig": "setManualReorientationScale(self, newManualReorientationScale: number): ()",
-     "cpp": "void SetManualReorientationScale(float newManualReorientationScale);"
-    },
-    {
-     "name": "setPawnCurrentTicket",
-     "sig": "setPawnCurrentTicket(self, currentTicket: number): ()",
-     "cpp": "void SetPawnCurrentTicket(int32 CurrentTicket);"
-    },
-    {
-     "name": "setPlayerNameDecoration",
-     "sig": "setPlayerNameDecoration(self, inNameDecoration: string): ()",
-     "cpp": "void SetPlayerNameDecoration(const class FString& InNameDecoration);"
-    },
-    {
      "name": "setQuestCompletedFromLocalClient",
      "sig": "setQuestCompletedFromLocalClient(self, string: string): ()",
      "cpp": "void SetQuestCompletedFromLocalClient(const class FString& String);"
-    },
-    {
-     "name": "setReorientationSpeed",
-     "sig": "setReorientationSpeed(self, newReorientationSpeed: number): ()",
-     "cpp": "void SetReorientationSpeed(float newReorientationSpeed);"
-    },
-    {
-     "name": "setRotationMode",
-     "sig": "setRotationMode(self, newRotationMode: any, bSetAsDefault: boolean, bSetRotationModeAfterNextTouch: boolean): ()",
-     "cpp": "void SetRotationMode(ERotationMode newRotationMode, bool bSetAsDefault, bool bSetRotationModeAfterNextTouch);"
-    },
-    {
-     "name": "setVelocity",
-     "sig": "setVelocity(self, vel: Vector, ignoreLimit: boolean): ()",
-     "cpp": "void SetVelocity(const struct FVector& vel, bool ignoreLimit);"
-    },
-    {
-     "name": "setWasWaiting",
-     "sig": "setWasWaiting(self, isWaiting: boolean): ()",
-     "cpp": "void SetWasWaiting(bool isWaiting);"
-    },
-    {
-     "name": "spawnTestBall",
-     "sig": "spawnTestBall(self): ()",
-     "cpp": "void SpawnTestBall();"
-    },
-    {
-     "name": "teamClearSuccess",
-     "sig": "teamClearSuccess(self): ()",
-     "cpp": "void TeamClearSuccess();"
-    },
-    {
-     "name": "ticketCheckSuccess",
-     "sig": "ticketCheckSuccess(self): ()",
-     "cpp": "void TicketCheckSuccess();"
-    },
-    {
-     "name": "turnOffAndDisableDebugBoost",
-     "sig": "turnOffAndDisableDebugBoost(self): ()",
-     "cpp": "void TurnOffAndDisableDebugBoost();"
-    },
-    {
-     "name": "updateAllBallIndicatorsInGamemode",
-     "sig": "updateAllBallIndicatorsInGamemode(self, bEnable: boolean): ()",
-     "cpp": "void UpdateAllBallIndicatorsInGamemode(bool bEnable);"
-    },
-    {
-     "name": "updateBallIndicators",
-     "sig": "updateBallIndicators(self, bEnable: boolean, ball: DiscEntity): ()",
-     "cpp": "void UpdateBallIndicators(bool bEnable, class ADiscEntity* Ball);"
     }
    ],
    "events": [
     {
-     "name": "onHighFive",
-     "type": "Event<(Vector, number)>",
-     "args": [
-      "worldPos: Vector",
-      "Speed: number"
-     ]
-    },
-    {
      "name": "onBeforeDestroy",
      "type": "Event<()>",
      "args": []
-    },
-    {
-     "name": "fLaserStateUpdatedForBlueprint",
-     "type": "Event<()>",
-     "args": []
-    },
-    {
-     "name": "initialPlayerEnteredArena",
-     "type": "Event<(string)>",
-     "args": [
-      "SlotID_0: string"
-     ]
-    },
-    {
-     "name": "lastPlayerLeftArena",
-     "type": "Event<(string)>",
-     "args": [
-      "SlotID_0: string"
-     ]
-    },
-    {
-     "name": "gripBroken",
-     "type": "Event<(boolean)>",
-     "args": [
-      "isLeftHand: boolean"
-     ]
-    },
-    {
-     "name": "onGripAction",
-     "type": "Event<(VRPawn, any, boolean)>",
-     "args": [
-      "OwnerPawn: VRPawn",
-      "Grabber: any",
-      "ActionState: boolean"
-     ]
-    },
-    {
-     "name": "onTriggerAction",
-     "type": "Event<(VRPawn, any, boolean, any)>",
-     "args": [
-      "OwnerPawn: VRPawn",
-      "Grabber: any",
-      "ActionState: boolean",
-      "Hand: any"
-     ]
-    },
-    {
-     "name": "ticketCheckFailure",
-     "type": "Event<()>",
-     "args": []
-    },
-    {
-     "name": "ticketGiveSuccess",
-     "type": "Event<()>",
-     "args": []
-    },
-    {
-     "name": "ticketGiveFailure",
-     "type": "Event<()>",
-     "args": []
-    },
-    {
-     "name": "queueReady",
-     "type": "Event<()>",
-     "args": []
-    },
-    {
-     "name": "onClientCosmeticsCustomizationUpdated",
-     "type": "Event<()>",
-     "args": []
-    },
-    {
-     "name": "onSettingsAndSafetyUpdated",
-     "type": "Event<(A2SettingsAndSafety)>",
-     "args": [
-      "NewSettingsAndSafety: A2SettingsAndSafety"
-     ]
-    },
-    {
-     "name": "onRefreshOnlineInventoryComplete",
-     "type": "Event<()>",
-     "args": []
-    },
-    {
-     "name": "onChanged",
-     "type": "Event<()>",
-     "args": []
-    },
-    {
-     "name": "onItemAdded",
-     "type": "Event<(A2ItemState)>",
-     "args": [
-      "ItemState: A2ItemState"
-     ]
-    },
-    {
-     "name": "onItemChanged",
-     "type": "Event<(A2ItemState, A2ItemState)>",
-     "args": [
-      "OldItemState: A2ItemState",
-      "NewItemState: A2ItemState"
-     ]
-    },
-    {
-     "name": "onItemRemoved",
-     "type": "Event<(A2ItemState)>",
-     "args": [
-      "OldItemState: A2ItemState"
-     ]
     }
    ],
-   "properties": [
-    {
-     "name": "personalBallSpawner",
-     "type": "BallSpawnerComponent"
-    },
-    {
-     "name": "bQueuedToUpdateRotationMode",
-     "type": "boolean"
-    },
-    {
-     "name": "playerIndex",
-     "type": "number"
-    },
-    {
-     "name": "notifiedQueueReady",
-     "type": "boolean"
-    },
-    {
-     "name": "bWasWaiting",
-     "type": "boolean"
-    },
-    {
-     "name": "teamChangeComponents",
-     "type": "{any}"
-    },
-    {
-     "name": "slotID",
-     "type": "string"
-    },
-    {
-     "name": "pawnCurrentTicket",
-     "type": "number"
-    },
-    {
-     "name": "settingsAndSafetyData",
-     "type": "A2SettingsAndSafety"
-    },
-    {
-     "name": "vivoxParticipantID",
-     "type": "string"
-    }
-   ],
+   "properties": [],
    "static": [
-    {
-     "name": "getLocalInstance",
-     "sig": "getLocalInstance: () -> VRPawn",
-     "cpp": "static class AVRPawn* GetLocalInstance();"
-    },
-    {
-     "name": "getLocalInstanceWithWorld",
-     "sig": "getLocalInstanceWithWorld: () -> VRPawn",
-     "cpp": "static class AVRPawn* GetLocalInstanceWithWorld(class UWorld* World);"
-    },
-    {
-     "name": "getLocalPlayer",
-     "sig": "getLocalPlayer: () -> VRPawn",
-     "cpp": "static class AVRPawn* GetLocalPlayer(class UWorld* World);"
-    },
     {
      "name": "getLocalPlayerIndex",
      "sig": "getLocalPlayerIndex: () -> number",
      "cpp": "static int32 GetLocalPlayerIndex(class UWorld* World);"
-    },
-    {
-     "name": "getLocalVRPawn",
-     "sig": "getLocalVRPawn: () -> VRPawn",
-     "cpp": "static class AVRPawn* GetLocalVRPawn(class UObject* WorldContextObject);"
-    },
-    {
-     "name": "getPlayer",
-     "sig": "getPlayer: (id: number) -> VRPawn",
-     "cpp": "static class AVRPawn* GetPlayer(class UObject* WorldContextObject, int32 ID);"
     },
     {
      "name": "getPlayerByID",
@@ -4974,12 +3564,7 @@
  },
  "globals": {
   "VRPawn": [
-   "getLocalInstance: () -> VRPawn",
-   "getLocalInstanceWithWorld: () -> VRPawn",
-   "getLocalPlayer: () -> VRPawn",
    "getLocalPlayerIndex: () -> number",
-   "getLocalVRPawn: () -> VRPawn",
-   "getPlayer: (id: number) -> VRPawn",
    "getPlayerByID: (id: number) -> VRPawn",
    "getPlayerName: (id: number) -> string",
    "getPositionByID: (id: number) -> Vector",
@@ -5019,10 +3604,10 @@
  },
  "stats": {
   "classes": 49,
-  "methods": 524,
-  "events": 119,
-  "properties": 239,
-  "static": 16,
+  "methods": 321,
+  "events": 100,
+  "properties": 179,
+  "static": 11,
   "structs": 19
  }
 }

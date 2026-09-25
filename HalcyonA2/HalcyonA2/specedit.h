@@ -503,6 +503,31 @@ static bool SeActorAlive(SDK::AActor* a);   // below
 struct SeCollisionProxy { SDK::AActor* owner; std::vector<SDK::AActor*> proxies; ULONGLONG dirtyAt; };
 static std::vector<SeCollisionProxy> g_seProxies;
 
+// A script's own collision calls on a piece: PhysicalComponent setTriggerCollision() ("OverlapAll"),
+// disableCollisionLua() ("NoCollision") and setDefaultCollision() ("BlockAll") only change the piece's own mesh --
+// its solid stand-in (below) kept blocking, so a trigger zone or a "vanished" platform stayed a wall (measured
+// 2026-09-25: the mock player stopped dead at the trigger cube's face). The server follows those calls: a stand-in
+// is solid only while the script's last call was setDefaultCollision (or it never made one). Keyed by the actor,
+// checked against its object id (a freed actor's pointer can come back as another object).
+struct SeScriptCollision { std::string idx; bool off; };
+static std::unordered_map<SDK::AActor*, SeScriptCollision> g_seScriptCollision;
+static std::string SeObjIdx(SDK::AActor* a);   // below
+static bool SeScriptCollisionOff(SDK::AActor* a)
+{
+    auto it = g_seScriptCollision.find(a);
+    if (it == g_seScriptCollision.end()) return false;
+    if (it->second.idx != SeObjIdx(a)) { g_seScriptCollision.erase(it); return false; }
+    return it->second.off;
+}
+static void SeApplyScriptCollision(SDK::AActor* a)
+{
+    const bool off = SeScriptCollisionOff(a);
+    for (auto& e : g_seProxies)
+        if (e.owner == a)
+            for (SDK::AActor* p : e.proxies)
+                if (p) { p->SetActorEnableCollision(!off); p->ForceNetUpdate(); }
+}
+
 // Does `a` own a component of this class (by name)? One GObjects walk; only used on spawn/edit, not per tick.
 static bool SeHasComponent(SDK::AActor* a, const char* cls)
 {
@@ -569,6 +594,7 @@ static int SeBuildProxies(SeCollisionProxy& e)
         SeTrack(p);
         e.proxies.push_back(p);
     }
+    if (SeScriptCollisionOff(a)) SeApplyScriptCollision(a);   // a rebuilt stand-in keeps what the script set
     return static_cast<int>(e.proxies.size());
 }
 
@@ -683,6 +709,7 @@ static std::string SeResolveIdent(const std::string& name)
 }
 static void SeBallFollow(SDK::AActor* spawner, const double* at, const double* scl);   // (below, with the game modes)
 static void SeBallScale(SDK::AActor* ball, const double* scl);
+static void SeBallMatchClients(SDK::AActor* ball, SDK::AActor* spawner);
 static bool SeAlive(SDK::UObject* o);
 static SDK::AActor* SeBallAt(const std::string& ident);
 static void SeTransform(const std::string& name, const std::string& locs, const std::string& rots,
@@ -701,18 +728,37 @@ static void SeTransform(const std::string& name, const std::string& locs, const 
         if (!SeVec(scls, sc)) { sc[0] = bs.X; sc[1] = bs.Y; sc[2] = bs.Z; }
         if (owner && SbPrefabOf(owner))
         {
-            // a ball can't be resized (see SeBallScale): the spawner keeps its own scale
-            { const SDK::FVector os = owner->GetActorScale3D(); sc[0] = os.X; sc[1] = os.Y; sc[2] = os.Z; }
-            // The spawner moves BY what the ball moved: a ball resting on the floor is ~18 cm up, not the 1 m over
-            // its spawner it was made at, so "1 m under the ball" sank spawners into the floor (and the rebuild
-            // took the ball with it).
+            // Any change to the spawner REBUILDS it (and it makes a fresh ball), so only touch it when the edit needs to:
+            //  * moved   -> the spawner moves BY what the ball moved (a resting ball is ~18 cm up, not the 1 m over its
+            //               spawner it was made at: "1 m under the ball" sank spawners into the floor);
+            //  * scaled  -> every machine sizes its own copy of the ball at 1 / its spawner's scale (measured), so a
+            //               ball of size s = its spawner at 1/s -- the game then sizes it the same everywhere;
+            //  * rotated -> nothing: a ball's rotation is its physics' (it rolls), so there is nothing to keep, and a
+            //               rebuild for it would only swap the ball for a new one.
             const SDK::FRotator cr = owner->K2_GetActorRotation();
-            const SDK::FVector ol = owner->K2_GetActorLocation();
-            double sl[3] = { ol.X + (l[0] - bl.X), ol.Y + (l[1] - bl.Y), ol.Z + (l[2] - bl.Z) }, r[3] = { cr.Pitch, cr.Yaw, cr.Roll };
-            SeSandboxXform(owner, sl, r, sc);
+            const SDK::FVector ol = owner->K2_GetActorLocation(), os = owner->GetActorScale3D();
+            const double dx = l[0] - bl.X, dy = l[1] - bl.Y, dz = l[2] - bl.Z;
+            const bool moved = dx * dx + dy * dy + dz * dz > 1.0;
+            const double want = (sc[0] + sc[1] + sc[2]) / 3.0, have = (bs.X + bs.Y + bs.Z) / 3.0;
+            const bool scaled = fabs(want - have) > 0.005;
+            if (!moved && !scaled)
+            {
+                HxLog("[HalcyonA2][SPECEDIT] ball %s: rotation only -- nothing to change (a ball's rotation is its physics')\n",
+                      ball->GetName().c_str());
+                return;
+            }
+            double sl[3] = { ol.X + dx, ol.Y + dy, ol.Z + dz }, r[3] = { cr.Pitch, cr.Yaw, cr.Roll }, ss[3] = { os.X, os.Y, os.Z };
+            if (!moved) { sl[0] = ol.X; sl[1] = ol.Y; sl[2] = ol.Z; }
+            if (scaled)
+            {
+                const double s = (std::min)(4.0, (std::max)(0.25, want));
+                ss[0] = ss[1] = ss[2] = 1.0 / s;
+            }
+            SeSandboxXform(owner, sl, r, ss);
             SeMarkProxyDirty(owner);
-            SeBallFollow(owner, sl, sc);
-            HxLog("[HalcyonA2][SPECEDIT] ball %s edited -> its spawner %s moved/scaled\n", ball->GetName().c_str(), owner->GetName().c_str());
+            SeBallFollow(owner, sl, ss);
+            HxLog("[HalcyonA2][SPECEDIT] ball %s edited -> spawner %s%s%s (spawner scale %.2f)\n", ball->GetName().c_str(),
+                  owner->GetName().c_str(), moved ? " moved" : "", scaled ? " resized" : "", ss[0]);
         }
         else
         {
@@ -4555,30 +4601,10 @@ end
 if type(BeginPlay) == "function" then BeginPlay = __rigelWrap("BeginPlay", BeginPlay) end
 if type(EndPlay) == "function" then EndPlay = __rigelWrap("EndPlay", EndPlay) end
 if type(Tick) == "function" then Tick = __rigelWrap("Tick", Tick) end
--- [Rigel] VRPawn.getPlayerName: the game answers from a registry keyed by the player index a pawn had when it
--- spawned, so it can say "None" for a real player. Fall back to the pawn's own replicated name.
-pcall(function()
-	local VR: any = VRPawn
-	local native = VR.getPlayerName
-	local function own(p: any): string?
-		if p == nil then return nil end
-		local ok, n = pcall(function() return p:getStoredName() end)
-		if ok and type(n) == "string" and n ~= "" then return n end
-		return nil
-	end
-	VR.getPlayerName = function(id: number): string
-		local ok, n = pcall(native, id)
-		if ok and type(n) == "string" and n ~= "" and n ~= "None" then return n end
-		local okl, lp = pcall(VR.getLocalPlayer)
-		if okl and lp ~= nil then
-			local oki, li = pcall(function() return lp:getPlayerIndex() end)
-			if oki and li == id then local s = own(lp); if s then return s end end
-		end
-		local okp, p = pcall(VR.getPlayer, id)
-		if okp then local s = own(p); if s then return s end end
-		return if ok and type(n) == "string" then n else "None"
-	end
-end)
+-- (A VRPawn.getPlayerName fallback used to sit here. It never ran: the VRPawn table is read-only userdata -- a
+-- script can't replace its functions -- and every call it relied on (getLocalPlayer, getPlayer, getPlayerIndex,
+-- getStoredName) isn't bound. The game's own getPlayerName resolves every player on every machine, including
+-- after a rejoin (new index) and a team change: verified 2026-09-25 with the mock player.)
 -- [Rigel] game modes: Rigel.* (see the scripting guide, "Game modes"). Available inside functions -- BeginPlay
 -- and later -- not at the top of the file (this part of the script runs after yours).
 Rigel = {}
@@ -5796,12 +5822,47 @@ static void SeTextQueueObject(SDK::UObject* prefab)
     g_seTextObjQueue.push_back(idx);
     ReleaseSRWLockExclusive(&g_seTextLock);
 }
+static std::string SeObjIdx(SDK::AActor* a)
+{
+    SDK::UObject* pc = a ? SbPrefabOf(a) : nullptr;
+    return pc ? FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(pc) + 0x248)) : std::string();
+}
+// UPhysicalComponent's collision-profile setter (0x53BE1F0: component, FName* profile, flag). Only calls made by
+// the three Luau functions count -- identified by the return address (their bodies are 46 bytes each) -- so the
+// component's own setup calls never switch a stand-in off.
+static constexpr uintptr_t kPhysSetProfile = 0x53BE1F0, kLuaTrigger = 0x53C0C80, kLuaNoColl = 0x539AF50, kLuaDefault = 0x53BE880;
+using PhysSetProfile_t = __int64(__fastcall*)(void*, void*, uint64_t);
+static PhysSetProfile_t g_physSetProfileOrig = nullptr;
+static void SeOnScriptCollision(void* comp, bool on)
+{
+    auto* c = static_cast<SDK::UObject*>(comp);
+    auto* owner = c && c->Outer ? static_cast<SDK::AActor*>(c->Outer) : nullptr;
+    if (!owner || !SeAlive(owner) || !SeNeedsProxy(owner)) return;
+    g_seScriptCollision[owner] = { SeObjIdx(owner), !on };
+    SeApplyScriptCollision(owner);
+}
+static void SeOnScriptCollisionSafe(void* comp, bool on) { __try { SeOnScriptCollision(comp, on); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+static __int64 __fastcall SePhysSetProfile_Hook(void* comp, void* profile, uint64_t flag)
+{
+    const __int64 r = g_physSetProfileOrig(comp, profile, flag);
+    const uintptr_t ret = reinterpret_cast<uintptr_t>(_ReturnAddress()) - GetBase();
+    auto from = [ret](uintptr_t f) { return ret > f && ret < f + 64; };
+    const bool trig = from(kLuaTrigger), none = from(kLuaNoColl), deflt = from(kLuaDefault);
+    if (trig || none || deflt) SeOnScriptCollisionSafe(comp, deflt);
+    return r;
+}
 static void SeTextTick()
 {
     static bool s_hooked = false;
     if (!s_hooked && g_seSandbox)
     {
         s_hooked = true;
+        {
+            void* at = reinterpret_cast<void*>(GetBase() + kPhysSetProfile);
+            const int c = MH_CreateHook(at, &SePhysSetProfile_Hook, reinterpret_cast<void**>(&g_physSetProfileOrig));
+            const int e = c == MH_OK ? MH_EnableHook(at) : -1;
+            HxLog("[HalcyonA2][SPECEDIT] script collision -> stand-ins: hook create=%d enable=%d\n", c, e);
+        }
         void* at = reinterpret_cast<void*>(GetBase() + 0x46CC430);   // BroadcastEventString (luau binding 0x46A5B00 -> here)
         const int c = MH_CreateHook(at, &SeBes_Hook, reinterpret_cast<void**>(&g_seBesOrig));
         const int e = c == MH_OK ? MH_EnableHook(at) : -1;
@@ -6053,12 +6114,8 @@ static int SeModeBalls(SeGameMode& m)
                         const bool ok = SafeProcessEvent(now.ReturnValue, fu, &up);
                         HxLog("[HalcyonA2][GAMEMODE] %s: ball %s unfrozen (%s)\n", m.name.c_str(), now.ReturnValue->GetName().c_str(), ok ? "ok" : "FAULT");
                     }
-                if (now.ReturnValue && SeAlive(now.ReturnValue))   // a ball is its spawner's size
-                {
-                    const SDK::FVector s = a->GetActorScale3D();
-                    const double sc[3] = { s.X, s.Y, s.Z };
-                    SeBallScale(static_cast<SDK::AActor*>(now.ReturnValue), sc);
-                }
+                if (now.ReturnValue && SeAlive(now.ReturnValue))   // the server's copy the size every player's is
+                    SeBallMatchClients(static_cast<SDK::AActor*>(now.ReturnValue), a);
             }
             ++n;
             break;
@@ -6126,6 +6183,22 @@ static SDK::AActor* SeSpawnerBall(SDK::AActor* spawner, SDK::UObject** compOut)
     return nullptr;
 }
 static void SeBallFollowNow(SDK::UObject* c, SDK::AActor* ball, const double* at, const double* scl);
+// Every player's game sizes a spawner's ball at 1 / the spawner's scale; the server's copy stays at 1 (measured
+// 2026-09-25: client 2.00, server 1.00 for a spawner at 0.5). So the server simulated a normal ball while players
+// saw a big one half inside the floor. Give the server's copy the same size -- then every copy agrees.
+static void SeBallMatchClients(SDK::AActor* ball, SDK::AActor* spawner)
+{
+    if (!ball || !spawner || !SeAlive(ball)) return;
+    const SDK::FVector ss = spawner->GetActorScale3D();
+    const double avg = (ss.X + ss.Y + ss.Z) / 3.0;
+    if (avg <= 0.01) return;
+    const double want = 1.0 / avg;
+    const SDK::FVector cur = ball->GetActorScale3D();
+    if (fabs(cur.X - want) < 0.01 && fabs(cur.Y - want) < 0.01 && fabs(cur.Z - want) < 0.01) return;
+    ball->SetActorScale3D(SDK::FVector{ want, want, want });
+    ball->ForceNetUpdate();
+    HxLog("[HalcyonA2][SPECEDIT] ball %s sized %.2f like every player's copy (spawner scale %.2f)\n", ball->GetName().c_str(), want, avg);
+}
 static void SeBallFollow(SDK::AActor* spawner, const double* at, const double* scl)
 {
     SDK::UObject* c = nullptr;
@@ -6158,7 +6231,9 @@ static void SeBallPendingTick()
         // this young (measured 2026-09-24) sent every player's copy 290 m under the floor while the server's sat on it.
         if (ball && ball != p.oldBall)
         {
-            HxLog("[HalcyonA2][SPECEDIT] spawner %s rebuilt with its ball %s\n", p.idx.c_str(), ball->GetName().c_str());
+            SeBallMatchClients(ball, sp);
+            HxLog("[HalcyonA2][SPECEDIT] spawner %s rebuilt with its ball %s (server scale %.2f)\n", p.idx.c_str(),
+                  ball->GetName().c_str(), ball->GetActorScale3D().X);
             g_seBallPending.erase(g_seBallPending.begin() + i);
             continue;
         }

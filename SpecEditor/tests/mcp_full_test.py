@@ -166,6 +166,8 @@ ok, r = call("luau_api_class", name="VRPawn")
 check("luau_api_class VRPawn lists the player statics", ok and "getPlayerName" in str(r) and "getPositionByID" in str(r), str(r)[:300])
 
 # ================================ build ================================
+call("level_close")                     # whatever an earlier session left open
+time.sleep(2)
 ok, r = call("place_object", item="PrimitiveCubeBlue", location=[0, 0, FLOOR + 50])
 check("place_object without a level is refused with a clear message", not ok and "level" in str(r).lower(), r)
 ok, r = call("level_new", name="ZMcpFull")
@@ -299,12 +301,24 @@ local function describe(id: number): string
 end
 
 function BeginPlay()
-	log(`ZPL begin local={VRPawn.getLocalPlayerIndex()} localPlayer={VRPawn.getLocalPlayer() ~= nil} trig={Trig ~= nil}`)
+	log(`ZPL begin local={VRPawn.getLocalPlayerIndex()} trig={Trig ~= nil}`)
 	if not Trig then
 		return
 	end
 	Trig:setTriggerCollision()
+	-- the documented "who is in the zone" pattern (MCP.md): enter by the server event, leave by distance
+	local inside = {} :: { [number]: boolean }
+	LuauClock.createTimer(0.5, function()
+		for pid in inside do
+			local p = VRPawn.getPositionByID(pid)
+			if math.sqrt((p.x - 0) ^ 2 + (p.y - 1500) ^ 2) > 300 then
+				inside[pid] = nil
+				log(`ZPL left id={pid}`)
+			end
+		end
+	end)
 	Trig.onOverlapByPlayerServer.Listen(function(id: number)
+		inside[id] = true
 		log(`ZPL server overlap id={id} {describe(id)}`)
 		local ok, err = pcall(function()
 			local p = VRPawn.getPlayerByID(id)
@@ -312,8 +326,9 @@ function BeginPlay()
 				log("ZPL byID nil")
 				return
 			end
-			local v = p:getVRPawnVelocity()
-			log(`ZPL pawn idx={p:getPlayerIndex()} team={p:getPawnTeamIndex()} name={p:getPlayerNameDecorated()} speed={math.floor(v.x)},{math.floor(v.y)} ticket={p:getPawnCurrentTicket()}`)
+			-- a pawn exposes only a few members; the ones the station's scripts use must be there
+			local has = type((p :: any).client_EmitStatEvent) == "function" and type((p :: any).client_SetQuestCompleted) == "function"
+			log(`ZPL pawn idx=byID methods={has}`)
 		end)
 		if not ok then
 			warn(`ZPL pawn methods failed: {err}`)
@@ -362,12 +377,16 @@ srv = [l for l in zpl if "server overlap" in l]
 check("onOverlapByPlayerServer fires with the player's id", bool(srv), zpl)
 check("getPlayerName / getTeamIndexByID / getPositionByID return real values",
       any(re.search(r"name=\S+ team=-?\d+ pos=-?\d+,-?\d+,-?\d+", l) and "name=None" not in l for l in srv), srv)
-check("getPlayerByID -> the pawn's methods", any("ZPL pawn idx=" in l for l in zpl) and not any("failed" in l or "byID nil" in l for l in zpl), zpl)
+check("getPlayerByID -> a pawn with client_EmitStatEvent / client_SetQuestCompleted",
+      any("ZPL pawn idx=byID methods=true" in l for l in zpl) and not any("failed" in l or "byID nil" in l for l in zpl), zpl)
 check("Quests.event runs", any("quests.event ok=true" in l for l in zpl), zpl)
 check("onOverlapByPlayerClientside fires on the player's machine (with its own name)",
       any("client overlap" in l and "name=None" not in l for l in zpl), zpl)
 check("onOverlapByPlayer / onOverlapByPlayerSimple fire", any("ZPL overlap id=" in l or "overlap simple" in l for l in zpl), zpl)
-check("onOverlapEndByPlayerSimple fires", any("overlap end" in l for l in zpl), zpl)
+check("leaving the zone is detected (the documented polling pattern)", any("ZPL left id=" in l for l in new_log_lines("ZPL left")),
+      new_log_lines("ZPL left"))
+# the game never fires onOverlapEndByPlayerSimple (documented); say so loudly if that ever changes
+print("    note: onOverlapEndByPlayerSimple " + ("FIRED -- update MCP.md" if any("overlap end" in l for l in zpl) else "did not fire (as documented)"))
 check("no script errors while the player walked through", not new_log_lines(r"RigelError|ZPlayerApi.*attempt to"),
       new_log_lines(r"RigelError|ZPlayerApi.*attempt to"))
 check("the mock player's game is still running", player_alive())
@@ -455,10 +474,8 @@ check("level_save", ok, r)
 ok, r = call("level_list")
 check("level_list shows the saved level", ok and "ZMcpFull" in str(r.get("local")), r)
 ok, r = call("level_upload")
-check("level_upload (to this server)", ok, r)
-time.sleep(3)
-ok, r = call("level_list")
-check("level_list: the server has it", ok and "ZMcpFull" in json.dumps(r.get("server")), r)
+# (a local test server has no backend: "upload" loads the level here -- the editor says so -- rather than storing it)
+check("level_upload runs the upload", ok and "upload 'ZMcpFull'" in json.dumps(r), r)
 ok, r = call("gamemode_delete", mode="ZFullMode")
 check("gamemode_delete", ok, r)
 ok, r = call("level_close")

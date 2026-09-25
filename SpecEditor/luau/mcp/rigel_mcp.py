@@ -243,11 +243,14 @@ def api_search(query: str, limit: int = 40):
 def api_class(name: str) -> str:
     txt = defs_text()
     m = re.search(r"^declare extern type " + re.escape(name) + r"\b.*?^end\s*$", txt, re.S | re.M)
+    statics = re.search(r"^declare " + re.escape(name) + r"\s*:\s*\{.*?^}\s*$", txt, re.S | re.M)
     if m:
         block = m.group(0)
         parent = re.search(r"extends (\w+)", block.splitlines()[0])
         extra = f"\n\n-- inherits from {parent.group(1)}: call luau_api_class('{parent.group(1)}') for its members" if parent else ""
-        return block + extra
+        # the class's static functions are a separate global table (VRPawn.getPlayerName(id) ...): show them too
+        st = f"\n\n-- static functions (call as {name}.fn(...)):\n{statics.group(0)}" if statics else ""
+        return block + extra + st
     m = re.search(r"^declare " + re.escape(name) + r"\b.*?^}\s*$", txt, re.S | re.M)
     if m:
         return m.group(0)
@@ -519,7 +522,7 @@ def t_props(a):
       "'x,y,z' vectors, 'p,y,r' rotators, 'r,g,b,a' colours, text).",
       {"handle": {"type": "string"}, "path": {"type": "string"}, "value": {"type": "string"}}, ["handle", "path", "value"])
 def t_setprop(a):
-    return BR.call("set_property", a["handle"], a["path"], a["value"])
+    return BR.call("set_prop", a["handle"], a["path"], a["value"])
 
 
 @tool("get_game_data", "A sandbox object's synced Game data (serverData / gameData / Properties): what every player's copy uses "
@@ -911,7 +914,13 @@ def t_op(a):
 @tool("editor_logs", "The editor's own log lines (what it did, server notes, errors). 'since' = a logSeq from editor_status.",
       {"since": {"type": "integer"}, "filter": {"type": "string"}, "max": {"type": "integer"}})
 def t_elogs(a):
-    return BR.call("logs", a.get("since", 0), a.get("filter", ""), a.get("max", 200))
+    r = BR.call("logs", a.get("since", 0), a.get("filter", ""), 600)
+    # the editor's periodic "[repl]" dumps (hundreds of lines of the station's own objects) are noise unless asked for
+    if isinstance(r, dict) and not (a.get("filter") or "").startswith("[repl"):
+        r["lines"] = [l for l in r.get("lines", []) if not str(l).startswith("[repl]")]
+    if isinstance(r, dict):
+        r["lines"] = r.get("lines", [])[-int(a.get("max", 200)):]
+    return r
 
 
 @tool("editor_problems", "Problems the editor is showing the user (server refusals, script errors).")

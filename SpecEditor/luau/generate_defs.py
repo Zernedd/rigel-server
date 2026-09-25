@@ -92,6 +92,58 @@ STATIC_OVERRIDES = {
     ("LuauClock", "createTimer"): "createTimer: (betweenTime: number, callback: () -> ()) -> number",
 }
 
+# Classes whose Luau binding exposes only a FEW of their UFunctions. For these, the definitions list only members a
+# runtime probe proved exist (every other declared member fails with "Unknown (Static) Property or Function").
+# VRPawn, 2026-09-25 (mock player, tests/mcp_full_test.py + a member-by-member probe): 6 of 218 instance members and
+# 5 of 10 statics are bound -- exactly what the station's own scripts use.
+RUNTIME_VERIFIED = {
+    "VRPawn": {
+        "members": {"client_EmitStatEvent", "client_SetQuestCompleted", "emitStatEventFromLocalClient",
+                    "setQuestCompletedFromLocalClient", "onBeforeDestroy", "OnBeforeDestroy"},
+        "statics": {"getLocalPlayerIndex", "getPlayerByID", "getPlayerName", "getPositionByID", "getTeamIndexByID"},
+    },
+}
+
+
+# Members a runtime probe proved are NOT bound, for classes whose binding covers most of what they declare
+# (2026-09-25: every documented component wired into one script's slots, each declared member indexed). The rest
+# of each class was proved to exist.
+RUNTIME_MISSING = {
+    "LuauBehavior": {"isNetworkReady"},
+    "BasicButtonComponent": {"setButtonText", "setOnCooldown"},
+    "TimerComponent": {"bTextIncludeMilliseconds", "timerTextArrayToUpdate"},
+    "ToggleableComponent": {"defaultEnabledValue"},
+    "PhysicalComponent": {"bClientsideOverride", "bIsVisibleClientside", "onHit", "overlapBegin", "overlapEnd"},
+    "DataTableComponent": {"getTest", "hostTable", "tablesToCopyToo"},
+    "BallSpawnerComponent": {"bBallWasGrounded", "bIsRunningGamemodeTests", "bShouldFreezeBallUponReset",
+                             "bShouldSpawnBallFrozen", "bSmoothlyOffsetting", "bSmoothlyResetting", "bWaitingForBallNetGUID",
+                             "checkForDeletedBalls", "checkIfBallGroundedUponHit", "preOffsetPosition", "preResetPosition",
+                             "processQueuedGrounding", "resetHeartBall_Server", "smoothOffsetDestination",
+                             "smoothOffsetStartTime", "smoothResetStartTime", "spawnHeartBall", "spawnedBalls"},
+    "ScoreComponent": {"bCombineScores", "bouncesPlayerScored", "fastestGoalSpeed", "fastestPlayerScored", "lastBounces",
+                       "lastGoalDistance", "lastGoalLocation", "lastGoalSpeed", "lastPasses", "lastPlayerScored",
+                       "lastPlayerScoredID", "lastPlayerScoredTeam", "lastPoints", "longestGoalDistance",
+                       "longestPlayerScored", "mostBounces", "mostPasses", "passesPlayerScored", "scoringTeam",
+                       "teamCount", "teamPoints"},
+    "DiscEntity": {"PlayerHit", "playerHit", "bHasBallBegunShrinking", "bIsFrozen", "bIsHeartBall", "bIsPersonalBall",
+                   "ballStolen", "basePushbackPercentage", "clientUnreliablePlayerHit", "client_SetVisibilityOfDiscComponents",
+                   "forceUpdate", "getCosmeticLoadout", "getDiscBounces", "getDiscPasses", "getGameSoundManagerEvent",
+                   "getPlayerWhoSpawnedThisBall", "getTrailVisibility", "interceptionEvent", "multicast_UnreliablePlayerHit",
+                   "networkedReleasePosition", "newHitEvent", "onGrabbedCallback", "onReleasedCallback",
+                   "passEventServer", "playerHitOnServerLuau", "resetHeartBall", "resetMainBodyColor",
+                   "serverDiscGrabbed", "serverDiscReleased", "setIgnorePawn", "setMainBodyColor",
+                   "setPlayerWhoSpawnedThisBall", "setTrailVisibility", "spawner", "spawnerIndex",
+                   "timeLastUsedByPoolingManager"},
+}
+
+
+def verified_ok(lname: str, member: str, static: bool = False) -> bool:
+    if member in RUNTIME_MISSING.get(lname, ()):
+        return False
+    v = RUNTIME_VERIFIED.get(lname)
+    return v is None or member in v["statics" if static else "members"]
+
+
 # Globals written by hand in the prelude; generated tables must never reuse these names.
 PRELUDE_GLOBALS = {"log", "warn", "Logging", "LuauClock", "Promise", "Vector", "Vec3", "LinearColor",
                    "Enum", "BallSpawnParameters", "GoalInfo", "CellStyle", "LayoutSettings",
@@ -800,7 +852,7 @@ def generate(sdk_dir: str, out_path: str, index_path: str | None):
                 luau_names.append(f.name)
                 luau_names = list(dict.fromkeys(luau_names))
             for ln in luau_names:
-                if not add_name(ln):
+                if not verified_ok(lname, ln) or not add_name(ln):
                     continue
                 ov = OVERRIDES.get((lname, ln))
                 if ov:
@@ -822,6 +874,8 @@ def generate(sdk_dir: str, out_path: str, index_path: str | None):
                 stats["methods"] += 1
         # events (delegates) -- both lowerCamel and the original C++ name
         for d in delegates:
+            if not verified_ok(lname, lower_camel(d.name)) and not verified_ok(lname, d.name):
+                continue
             et = event_type(mapper, d.params)
             for ln in dict.fromkeys([lower_camel(d.name), d.name]):
                 if add_name(ln):
@@ -838,7 +892,7 @@ def generate(sdk_dir: str, out_path: str, index_path: str | None):
             if t == "any":
                 continue
             ln = lower_camel(p.name)
-            if add_name(ln):
+            if verified_ok(lname, ln) and add_name(ln):
                 body.append(f"\t{ln}: {t}\n")
                 entry["properties"].append({"name": ln, "type": t})
                 stats["properties"] += 1
@@ -858,6 +912,8 @@ def generate(sdk_dir: str, out_path: str, index_path: str | None):
                     ins.append(f"{safe_ident(p.name, used)}: {mapper.map(p.ctype, p.ptr)}")
             rets = ([] if f.ret == "void" else [mapper.map(f.ret, f.ret_ptr)]) + outs
             ln = lower_camel(f.name)
+            if not verified_ok(lname, ln, static=True):
+                continue
             ov = STATIC_OVERRIDES.get((lname, ln))
             line = ov or f"{ln}: ({', '.join(ins)}) -> {fmt_pack(rets)}"
             statics_by_global.setdefault(lname, []).append((line, f.decl))

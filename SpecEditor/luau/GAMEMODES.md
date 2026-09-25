@@ -128,11 +128,15 @@ runs on every machine and each would make its own ball that only it can see.
 
 **Moving and sizing a ball.** A ball is made at run time, so what you really place is its spawner. The editor lists
 the balls of your spawners (*Ball (edits its spawner)*) and you can pick and drag them like anything else: the
-spawner moves to where you put the ball (1 m under it) and the ball follows. Moving the spawner itself does the same.
+spawner moves by as much as you moved the ball, and the ball follows. Moving the spawner itself does the same.
 Balls the station owns (training balls, death balls) are not listed.
 
-A ball **can't be resized**: every player's game sizes its own copy of the ball, and nothing the server does reaches
-it. Keep ball spawners at scale 1 -- the game draws the ball of a scaled spawner *smaller* (1 / the spawner's scale).
+- **Resize a ball** by scaling the ball (not the spawner): the game sizes a spawner's ball at 1 / the spawner's
+  scale on every machine, so a ball scaled to 2 sets its spawner to 0.5. Sizes 0.25 to 4 work; the ball keeps its
+  size through rounds and moves, rests on the floor at its new size, and plays normally.
+- **Rotating a ball** changes nothing: a ball's rotation is its physics (it rolls).
+- Any edit to a spawner (move, scale, turn) rebuilds it, and it makes a fresh ball -- the old one is replaced, not
+  lost. Scaling the *spawner* resizes its ball the other way round (a big spawner makes a small ball).
 
 - **Goals.** Place a *Driftball goal* from the pieces (or give any goal the **Goal** role) and set the team that
   scores there. The game's own goal detection fires, the mode adds the goal's points to that team, and -- with
@@ -231,7 +235,8 @@ traps, scoreboards, signs -- and as code (**Start from example...**):
 - **The ball doesn't come back**: give the spawner the *Ball spawner* role and call `Rigel.resetBalls()`.
 - **The monitor shows no countdown**: set *Countdown (s)* above 0 and put someone on a team (an empty arena shows
   its empty page). Levels saved before 2026-09-24 need **Apply script** once to pick up the countdown fix.
-- **The ball got smaller**: the spawner is scaled. Set it back to 1 -- balls can't be resized.
+- **The ball is the wrong size**: its size is 1 / its spawner's scale. Scale the ball itself (not the spawner) to
+  the size you want, or set the spawner back to 1.
 
 ## Building game modes with an AI agent
 
