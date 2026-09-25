@@ -3311,6 +3311,8 @@ static SDK::AActor* SbCreateSlotWithId(const double* at, const std::string& path
     SDK::UObject* tm = *reinterpret_cast<SDK::UObject**>(sp + 0x438);
     // Register the ticket manager for replication again, now, so every client gets it AFTER its slot (the project load
     // inside FinishSpawningActor registered it first). See SeModeOnPostLogin for the rest of the join story.
+    // (2026-09-25: dropping this re-register made the join hold misbehave -- the clients already there lost the team
+    // list and a seated player crashed -- so it stays. It was a suspect for a live heap corruption; not proven.)
     if (tm && teamSizes && nTeams > 0)
         if (auto* f = tm->Class->GetFunction("Actor", "SetReplicates"))
         {
