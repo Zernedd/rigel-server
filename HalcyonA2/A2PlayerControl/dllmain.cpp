@@ -861,6 +861,32 @@ static void Tick()
                                 g_lastHandR.X, g_lastHandR.Y, g_lastHandR.Z);
                         }
                     }
+                    else if (!strncmp(line, "tms", 3))
+                    {
+                        // every TicketManager this client has: its replicated ModuleSlot (0x328) and team list size
+                        // (VerifiedTicketHolders 0x388); and every runtime module slot (BP_ModuleSlotWithImportanceVolume)
+                        auto* tmc = SDK::UObject::FindClassFast("TicketManager");
+                        auto* slc = SDK::UObject::FindClassFast("BP_ModuleSlotWithImportanceVolume_C");
+                        const int32_t num = SDK::UObject::GObjects->Num();
+                        for (int32_t i = 0; i < num; ++i)
+                        {
+                            auto* o = SDK::UObject::GObjects->GetByIndex(i);
+                            if (!o || o->IsDefaultObject()) continue;
+                            const uintptr_t b = reinterpret_cast<uintptr_t>(o);
+                            if (tmc && o->IsA(tmc))
+                            {
+                                auto* slot = *reinterpret_cast<SDK::UObject**>(b + 0x328);
+                                Log("[A2PlayerControl][TMS] %s slot=%s holders=%d\n", o->GetName().c_str(),
+                                    slot ? slot->GetName().c_str() : "NULL", *reinterpret_cast<int32_t*>(b + 0x390));
+                            }
+                            else if (slc && o->IsA(slc))
+                            {
+                                const SDK::FVector q = static_cast<SDK::AActor*>(o)->K2_GetActorLocation();
+                                Log("[A2PlayerControl][TMS] slot %s at (%.0f,%.0f,%.0f) tm=%p\n", o->GetName().c_str(), q.X, q.Y, q.Z,
+                                    *reinterpret_cast<void**>(b + 0x438));
+                            }
+                        }
+                    }
                     else if (!strncmp(line, "tcs", 3) && pc->Pawn)
                     {
                         // every team changer this client has: where, whether its door mesh is visible, and whether its

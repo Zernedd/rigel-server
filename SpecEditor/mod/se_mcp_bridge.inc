@@ -316,6 +316,55 @@ void McpHandle(const Snapshot& snap, const McpReq& r)
         McpOk(r, "{\"ok\":true}");
         return;
     }
+    if (c == "materials")                   // handle: every mesh + material the object renders with
+    {
+        const SceneObject* o = McpFind(snap, McpStr(r, 0));
+        if (!o) { McpErr(r, "No object with that handle."); return; }
+        SDK::UObject* actor = ActorFor(o->handle);
+        if (!actor) { McpErr(r, "That object has no actor on this machine yet."); return; }
+        static SDK::UClass* meshCls = nullptr;
+        if (!meshCls) meshCls = SDK::UObject::FindClassFast("MeshComponent");
+        static SDK::UClass* smCls = nullptr;
+        if (!smCls) smCls = SDK::UObject::FindClassFast("StaticMeshComponent");
+        std::string out = "{\"handle\":" + J(o->handle) + ",\"class\":" + J(o->className) + ",\"components\":[";
+        bool first = true, deprecated = false;
+        const int32_t num = SDK::UObject::GObjects->Num();
+        for (int32_t i = 0; meshCls && i < num; ++i)
+        {
+            SDK::UObject* comp = SDK::UObject::GObjects->GetByIndex(i);
+            if (!comp || comp->IsDefaultObject() || !comp->IsA(meshCls)) continue;
+            SDK::UObject* ow = comp->Outer;
+            while (ow && ow != actor) ow = ow->Outer;              // components of the actor (and of its sub-objects)
+            if (!ow) continue;
+            std::string mesh;
+            if (smCls && comp->IsA(smCls))
+                if (auto* sm = static_cast<SDK::UStaticMeshComponent*>(comp)->StaticMesh) mesh = sm->GetFullName();
+            std::string mats;
+            SDK::Params::PrimitiveComponent_GetNumMaterials gn{};
+            const int n = CallNative(comp, "PrimitiveComponent", "GetNumMaterials", gn) ? gn.ReturnValue : 0;
+            for (int m = 0; m < n && m < 32; ++m)
+            {
+                SDK::Params::PrimitiveComponent_GetMaterial gm{};
+                gm.ElementIndex = m;
+                SDK::UMaterialInterface* mi = CallNative(comp, "PrimitiveComponent", "GetMaterial", gm) ? gm.ReturnValue : nullptr;
+                const std::string mn = mi ? mi->GetFullName() : std::string("(none)");
+                std::string low = mn; for (char& ch : low) ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
+                if (low.find("deprecat") != std::string::npos) deprecated = true;
+                mats += (m ? "," : "") + J(mn);
+            }
+            std::string lowMesh = mesh; for (char& ch : lowMesh) ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
+            if (lowMesh.find("deprecat") != std::string::npos) deprecated = true;
+            SDK::Params::SceneComponent_IsVisible iv{};
+            const bool vis = CallNative(comp, "SceneComponent", "IsVisible", iv) && iv.ReturnValue;
+            out += std::string(first ? "" : ",") + "{\"component\":" + J(comp->GetName()) + ",\"visible\":" +
+                   (vis ? "true" : "false") +
+                   ",\"mesh\":" + J(mesh) + ",\"materials\":[" + mats + "]}";
+            first = false;
+        }
+        out += std::string("],\"deprecated\":") + (deprecated ? "true" : "false") + "}";
+        McpOk(r, out);
+        return;
+    }
     if (c == "props")                       // handle [, sub-object path]
     {
         const SceneObject* o = McpFind(snap, McpStr(r, 0));

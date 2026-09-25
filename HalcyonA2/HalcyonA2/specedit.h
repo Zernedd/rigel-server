@@ -291,6 +291,7 @@ static void SeError(SDK::UObject* caller, const std::string& title, const std::s
 static void SbOwnedForget(const std::string& idx);     // below
 struct SbOwned;
 static std::string SbRespawnKeep(SDK::AActor* a, const SbOwned& keep, const char* why);   // below
+static bool SeBallWaitUnseat(const std::string& idx, std::function<void()> redo);           // below (ball sims)
 static SDK::AActor* SbActorForIdx(const std::string& idx);                                  // below
 static SDK::AActor* SbActorForIdx(const std::string& idx, bool indexOnly);                  // below
 static double g_sbHostOutsideCm = 0;   // set by SbHostGamemode: how far outside every importance volume (cm; 0 inside)
@@ -801,6 +802,7 @@ static void SeDelete(const std::string& name)
     if (!a) { SbOwnedDelete(name); return; }             // a node the server never built an actor for
     std::string idx;
     if (SDK::UObject* pc = SbPrefabOf(a)) idx = FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(pc) + 0x248));
+    if (SeBallWaitUnseat(idx, [name] { SeDelete(name); })) return;   // a mode's ball spawner: players off the teams first
     if (SeSandboxDelete(a))                              // a sandbox object: remove its node, every machine follows
     {
         SeDropProxies(a);
@@ -1968,6 +1970,8 @@ static void SbMoveFlush()
             g_sbMovePending[idx] = now;                   // try again once they have stepped off
             continue;
         }
+        // a ball spawner's rebuild takes its ball with it: players seated in that ball's sim leave the teams first
+        if (SeBallWaitUnseat(idx, [idx] { g_sbMovePending[idx] = GetTickCount64() - kSbMoveSettleMs; })) continue;
         const SbOwned keep = *o;                         // o lives in g_sbOwned, which the rebuild changes
         SbRespawnKeep(SbActorForIdx(keep.idx), keep, "move");
     }
@@ -3257,6 +3261,7 @@ static bool SbCreateEditorSlot(const double* at, const std::string& path)
 // A runtime slot with its OWN SlotID (set before the spawn finishes, like the path), loading `path`. Used by the
 // game mode fabricator: one slot per game mode, so each gets its own gamemode, ticket manager and teams.
 static std::vector<std::wstring*> g_seSlotStrings;      // FString buffers must outlive the slot (never freed)
+static bool g_seTmServerOnly = wcsstr(GetCommandLineW(), L"-TmServerOnly") != nullptr;   // see SbCreateSlotWithId
 static SDK::AActor* SbCreateSlotWithId(const double* at, const std::string& path, const std::string& slotId, const int* teamSizes, int nTeams)
 {
     auto* cls = SDK::UObject::FindClassFast("BP_ModuleSlotWithImportanceVolume_C");
@@ -3291,6 +3296,8 @@ static SDK::AActor* SbCreateSlotWithId(const double* at, const std::string& path
         else if (arr && num > 0) for (int k = 0; k < num && k < nTeams; ++k) arr[k] = teamSizes[k];
     }
     ++g_lodForceVisible;                                               // its project's DefaultLODSettings -> VisibleAlways
+    if (teamSizes && nTeams > 0)   // a game mode's slot seats its ball sim like a Jakeball arena's (see SeModeTick)
+        *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(slot) + 0x2FA) = 1;       // AModuleSlot::bUseRollbackNetcode
     SDK::UGameplayStatics::FinishSpawningActor(slot, xf, SDK::ESpawnActorScaleMethod::MultiplyWithRoot);
     --g_lodForceVisible;
     const uintptr_t sp = reinterpret_cast<uintptr_t>(slot);
@@ -3302,6 +3309,15 @@ static SDK::AActor* SbCreateSlotWithId(const double* at, const std::string& path
     SDK::UObject* lgm = *reinterpret_cast<SDK::UObject**>(sp + 0x440);
     if (lgm) if (auto* f = lgm->Class->GetFunction("LoadedGameMode", "PushNetVars")) SafeProcessEvent(lgm, f, nullptr);
     SDK::UObject* tm = *reinterpret_cast<SDK::UObject**>(sp + 0x438);
+    // Register the ticket manager for replication again, now, so every client gets it AFTER its slot (the project load
+    // inside FinishSpawningActor registered it first). See SeModeOnPostLogin for the rest of the join story.
+    if (tm && teamSizes && nTeams > 0)
+        if (auto* f = tm->Class->GetFunction("Actor", "SetReplicates"))
+        {
+            struct { bool b; } off{ false }, on{ !g_seTmServerOnly };
+            SafeProcessEvent(tm, f, &off);
+            SafeProcessEvent(tm, f, &on);
+        }
     HxLog("[HalcyonA2][SPECEDIT] slot '%s' <- '%s' at (%.0f,%.0f,%.0f): LoadedGameMode=%s TicketManager=%s\n", slotId.c_str(), path.c_str(),
           at[0], at[1], at[2], lgm ? lgm->GetName().c_str() : "none", tm ? tm->GetName().c_str() : "none");
     g_seFabSlots.push_back(slot);
@@ -5975,6 +5991,7 @@ static const char* kSeModeDefaults[][2] = {
     { "auto_restart", "0" },      // 1 = auto mode starts again after a round
     { "stop_when_empty", "1" },   // 1 = a running round ends when every team is empty
     { "reset_after_goal", "1" },  // 1 = a goal / score box point sends the ball back to its spawner
+    { "script_flow", "0" },       // 1 = the mode's script runs kickoffs, goals and the clock (see GAMEMODES.md)
 };
 static const double kSeModeHalf[3] = { 3881.0, 4733.0, 950.0 };   // the slot class's box (half-size, cm)
 
@@ -5983,6 +6000,93 @@ static SeGameMode* SeModeById(const std::string& id)
     for (auto& m : g_seModes) if (!m.deleted && m.id == id) return &m;
     return nullptr;
 }
+// ---- Removals wait for the ball sims. A player on one of our teams is seated in the mode's ball sim (SeModeTick).
+// If the ball goes while they are seated -- the level unloads or is re-imported, the mode is deleted -- their client
+// crashes rebuilding its sim (AV reading 0x8 at client +0x548FCF3, after "Building Simulation ... Index: -2" with no
+// "Destroying Simulation" first; seen 2026-09-25 when an editor re-opened the level). Leaving a team tears the seat
+// down cleanly ("Destroying Simulation, Index: 7" on the client), so a removal first takes everyone off that mode's
+// teams -- the game's own VRPawn::GetTicketManagerAndClearTeam -- and runs once that has reached them. The queue is
+// FIFO, so a close followed by an open still runs in that order.
+static std::vector<std::pair<ULONGLONG, std::function<void()>>> g_seAfterUnseat;
+static ULONGLONG g_seUnseatUntil = 0;
+static int SeModeUnseat(SeGameMode& m)
+{
+    if (m.deleted || !m.slot || !SeAlive(m.slot)) return 0;
+    const uintptr_t tm = *reinterpret_cast<const uintptr_t*>(reinterpret_cast<uintptr_t>(m.slot) + 0x438);
+    if (!tm) return 0;
+    const uintptr_t data = *reinterpret_cast<const uintptr_t*>(tm + 0x388);            // VerifiedTicketHolders
+    const int32_t num = *reinterpret_cast<const int32_t*>(tm + 0x390);
+    if (!data || num <= 0 || num > 256) return 0;
+    static SDK::UClass* pawnCls = nullptr;
+    if (!pawnCls) pawnCls = SDK::UObject::FindClassFast("VRPawn");
+    std::vector<SDK::UObject*> holders;
+    for (int32_t i = 0; i < num; ++i)                                                     // TScriptInterface = 16 bytes
+        if (auto* o = *reinterpret_cast<SDK::UObject* const*>(data + static_cast<uintptr_t>(i) * 16)) holders.push_back(o);
+    int n = 0;
+    for (SDK::UObject* o : holders)
+    {
+        if (!SeAlive(o) || !pawnCls || !o->IsA(pawnCls)) { HxLog("[HalcyonA2][GAMEMODE] unseat: holder %s is not a pawn\n", o ? o->GetName().c_str() : "?"); continue; }
+        if (auto* f = o->Class->GetFunction("VRPawn", "GetTicketManagerAndClearTeam"))
+        {
+            struct { bool bPawnBeingDestroyed, bResetPawnCollision; } a{ false, true };
+            SafeProcessEvent(o, f, &a);
+            ++n;
+        }
+    }
+    // The seat reconcile (0x545BD80) is gated here: it only rebuilds a TicketManager's sim when that manager is dirty
+    // (+0x398) and a pass is wanted. A walk-out through a team door gets both from the team-RPC watch; this direct call
+    // doesn't -- without these the player stayed a participant of the old sim and still crashed when the ball went.
+    if (n > 0)
+    {
+        *reinterpret_cast<uint8_t*>(tm + 0x398) = 1;
+        g_reconcileWanted = 8;
+    }
+    return n;
+}
+// Run fn once the players on these modes' teams (level's modes, or only `only`) are off them and their clients know.
+static void SeModesAfterUnseat(const std::string& level, const SeGameMode* only, std::function<void()> fn)
+{
+    int n = 0;
+    for (auto& m : g_seModes)
+        if (!m.deleted && (only ? &m == only : (!level.empty() && m.level == level))) n += SeModeUnseat(m);
+    const ULONGLONG now = GetTickCount64();
+    if (n > 0)
+    {
+        g_seUnseatUntil = (std::max)(g_seUnseatUntil, now + 1500);
+        HxLog("[HalcyonA2][GAMEMODE] %d player(s) taken off the teams of %s first (their ball sims are torn down before the ball goes)\n",
+              n, only ? only->name.c_str() : ("level '" + level + "'").c_str());
+    }
+    if (g_seUnseatUntil > now || !g_seAfterUnseat.empty()) { g_seAfterUnseat.push_back({ (std::max)(g_seUnseatUntil, now), std::move(fn) }); return; }
+    fn();
+}
+// A mode's ball spawner (its "ball" role; the ball goes with it) while players are on the mode's teams: take them
+// off first, then redo. (By role, not by class or host: the sandbox actor and its host don't say "this mode's ball".)
+static bool SeBallWaitUnseat(const std::string& idx, std::function<void()> redo)
+{
+    if (idx.empty()) return false;
+    for (auto& m : g_seModes)
+    {
+        if (m.deleted || !m.slot || !SeAlive(m.slot)) continue;
+        const auto it = m.settings.find("role." + idx);
+        if (it == m.settings.end() || it->second.rfind("ball", 0) != 0) continue;
+        const uintptr_t tm = *reinterpret_cast<const uintptr_t*>(reinterpret_cast<uintptr_t>(m.slot) + 0x438);
+        if (!tm || *reinterpret_cast<const int32_t*>(tm + 0x390) <= 0) return false;       // nobody seated
+        SeModesAfterUnseat("", &m, std::move(redo));
+        return true;
+    }
+    return false;
+}
+static void SeAfterUnseatTick(ULONGLONG now)
+{
+    while (!g_seAfterUnseat.empty() && now >= g_seAfterUnseat.front().first)
+    {
+        std::function<void()> fn = std::move(g_seAfterUnseat.front().second);
+        g_seAfterUnseat.erase(g_seAfterUnseat.begin());
+        fn();
+    }
+}
+static bool SeLvIsLoaded(const std::string& n) { return std::find(g_lvLoaded.begin(), g_lvLoaded.end(), n) != g_lvLoaded.end(); }
+
 static SeGameMode* SeModeByApi(void* api)
 {
     for (auto& m : g_seModes)
@@ -6369,7 +6473,10 @@ static void SeModeSetState(SeGameMode& m, const std::string& st)
     if (st == "countdown" || st == "running") m.hadPlayers = false;   // re-learned from the next tick's team sizes
     if (st == "idle") { m.winner = 0; }
     SeModePushAll(m);
-    if (st == "running") SeModeBalls(m);
+    // script_flow = 1: the mode's own script runs the ball (a Jakeball-style kickoff: glide into place, freeze, fling
+    // when the countdown ends) -- the server must not reset / unfreeze it under the script
+    if (SeModeSettingInt(m, "script_flow")) {}
+    else if (st == "running") SeModeBalls(m);
     else SeModeLobbyBall(m);                               // a "Ball start ring" needs a ball in the lobby to carry in
 }
 static void SeModeEnd(SeGameMode& m, int winner)   // winner: 1-based team, 0 = work it out from the scores (tie = 0)
@@ -6599,7 +6706,7 @@ static void SeModeEvent(SeGameMode& m, const std::string& ev, const std::string&
         HxLog("[HalcyonA2][GAMEMODE] %s: goal '%s' -> %s +%d (%d)\n", m.name.c_str(), key.c_str(), m.teamName[team - 1].c_str(), val, m.score[team - 1]);
         const int toWin = SeModeSettingInt(m, "score_to_win");
         if (toWin > 0 && m.score[team - 1] >= toWin) { SeModeEnd(m, team); return; }
-        if (SeModeSettingInt(m, "reset_after_goal")) SeModeBalls(m);
+        if (SeModeSettingInt(m, "reset_after_goal") && !SeModeSettingInt(m, "script_flow")) SeModeBalls(m);
     }
     else if (e == "balls") SeModeBalls(m);                 // Rigel.resetBalls(): spawn / reset every ball-role spawner
     else if (e == "set")                                   // "key=value": scripts can change a custom setting
@@ -6740,10 +6847,119 @@ static void SeSimSeatsDump()
             discs += isDisc;
             if (list.size() < 700) list += (list.empty() ? "" : ", ") + o->GetName() + (isDisc ? "*" : "");
         }
-        HxLog("[HalcyonA2][SIMSEATS] %s slot=%s flag2FA=%d X=%s entries=%d discs=%d [%s]\n", tm->GetName().c_str(), slotName.c_str(),
-              flag, xs.c_str(), cnt, discs, list.c_str());
+        uintptr_t tf = 0, tc = 0, tp = 0, sf = 0, sc = 0;
+        SeSeatRead(reinterpret_cast<uintptr_t>(tm), 0x60, &tf); SeSeatRead(reinterpret_cast<uintptr_t>(tm), 0x170, &tc);
+        SeSeatRead(reinterpret_cast<uintptr_t>(tm), 0x180, &tp);
+        if (slot) { SeSeatRead(slot, 0x60, &sf); SeSeatRead(slot, 0x170, &sc); }
+        float tcull = 0, tprio = 0, scull = 0; uint32_t u32 = static_cast<uint32_t>(tc); memcpy(&tcull, &u32, 4);
+        u32 = static_cast<uint32_t>(tp); memcpy(&tprio, &u32, 4); u32 = static_cast<uint32_t>(sc); memcpy(&scull, &u32, 4);
+        HxLog("[HalcyonA2][SIMSEATS] %s slot=%s flag2FA=%d X=%s entries=%d discs=%d [%s] tmNet(0x60=%02X cull=%.0f prio=%.1f) slotNet(0x60=%02X cull=%.0f)\n",
+              tm->GetName().c_str(), slotName.c_str(), flag, xs.c_str(), cnt, discs, list.c_str(),
+              static_cast<unsigned>(tf & 0xFF), sqrtf(tcull), tprio, static_cast<unsigned>(sf & 0xFF), sqrtf(scull));
     }
 }
+// ---- A player joining while someone is on one of our teams crashed (AV 0x300 / 0x744) in the ticket manager's
+// OnRep_VerifiedTicketHolders (0x4728BE0): it reads ModuleSlot(0x328)->ModuleState(0x300), and a joining client
+// receives our runtime slot but builds its module state only when the slot's netvars are pushed again -- a station
+// arena's slot is a level actor, so its module is there from the start. So when a player logs in: our ticket managers
+// stop replicating (the joiner doesn't get the team list yet), the slots' netvars are pushed again once the joiner has
+// the slots (the joiner builds the module state), then the ticket managers replicate again -- to everyone, with the
+// slot and module in place. Everyone else's team boards blank for those few seconds.
+static ULONGLONG g_seJoinAt = 0;                           // the last login we are handling
+static std::vector<SDK::UObject*> g_seJoinHeld;           // ticket managers we stopped replicating
+static int g_seJoinPushes = 0;
+static void SeSetReplicates(SDK::UObject* o, bool on)
+{
+    if (auto* f = o->Class->GetFunction("Actor", "SetReplicates")) { struct { bool b; } p{ on }; SafeProcessEvent(o, f, &p); }
+    if (on) if (auto* f = o->Class->GetFunction("Actor", "ForceNetUpdate")) SafeProcessEvent(o, f, nullptr);
+}
+static void SeModeOnPostLogin()                            // a player joined (SeModeJoinWatch, game thread)
+{
+    if (g_seTmServerOnly) return;
+    g_seJoinAt = GetTickCount64();
+    g_seJoinPushes = 0;
+    int n = 0;
+    for (auto& m : g_seModes)
+    {
+        if (m.deleted || !m.slot || !SeAlive(m.slot)) continue;
+        auto* tm = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(m.slot) + 0x438);
+        if (!tm || !SeAlive(tm)) continue;
+        if (std::find(g_seJoinHeld.begin(), g_seJoinHeld.end(), tm) == g_seJoinHeld.end())
+        {
+            SeSetReplicates(tm, false);
+            g_seJoinHeld.push_back(tm);
+        }
+        ++n;
+    }
+    if (n) HxLog("[HalcyonA2][GAMEMODE] a player is joining: %d ticket manager(s) held back until their module is built\n", n);
+}
+static void SeModeJoinTick(ULONGLONG now)
+{
+    if (!g_seJoinAt) return;
+    const ULONGLONG t = now - g_seJoinAt;
+    static const ULONGLONG kPushAt[] = { 2000, 5000, 9000 };   // a Quest joiner can take a while to get the slots
+    if (g_seJoinPushes < 3 && t >= kPushAt[g_seJoinPushes])
+    {
+        ++g_seJoinPushes;
+        for (auto& m : g_seModes)
+        {
+            if (m.deleted || !m.slot || !SeAlive(m.slot)) continue;
+            if (auto* f = m.slot->Class->GetFunction("ModuleSlot", "PushNetVars")) SafeProcessEvent(m.slot, f, nullptr);
+            SDK::UObject* lgm = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(m.slot) + 0x440);
+            if (lgm && SeAlive(lgm)) if (auto* f = lgm->Class->GetFunction("LoadedGameMode", "PushNetVars")) SafeProcessEvent(lgm, f, nullptr);
+        }
+    }
+    if (t >= 12000)
+    {
+        for (SDK::UObject* tm : g_seJoinHeld) if (tm && SeAlive(tm)) SeSetReplicates(tm, true);
+        HxLog("[HalcyonA2][GAMEMODE] join: %zu ticket manager(s) replicating again\n", g_seJoinHeld.size());
+        g_seJoinHeld.clear();
+        g_seJoinAt = 0;
+    }
+}
+
+// Joins, seen on the net driver: a client connection whose PlayerController has just appeared. The controller is
+// spawned while the join message is handled, before the frame's net flush sends that connection anything, and this
+// runs on (almost) every ProcessEvent, so the ticket managers are held back before the joiner can get one.
+// (K2_PostLogin would have been the obvious hook, but this game never dispatches it.)
+static std::vector<std::pair<uintptr_t, uintptr_t>> g_seJoinSeen;   // (connection, its player controller)
+static bool g_seJoinSeeded = false;
+static void SeModeJoinWatch()
+{
+    if (g_seModes.empty() || g_seTmServerOnly) return;
+    auto* world = SDK::UWorld::GetWorld();
+    if (!world || !world->NetDriver) return;
+    const uintptr_t nd = reinterpret_cast<uintptr_t>(world->NetDriver);
+    const uintptr_t* conns = *reinterpret_cast<uintptr_t* const*>(nd + 0xD0);   // ClientConnections
+    const int32_t num = *reinterpret_cast<const int32_t*>(nd + 0xD8);
+    if (!conns || num < 0 || num > 1024) return;
+    bool joined = false;
+    for (int32_t i = 0; i < num; ++i)
+    {
+        const uintptr_t c = conns[i];
+        if (!c) continue;
+        const uintptr_t pc = *reinterpret_cast<const uintptr_t*>(c + 0x30);        // UPlayer::PlayerController
+        if (!pc) continue;
+        bool known = false;
+        for (const auto& e : g_seJoinSeen) if (e.first == c && e.second == pc) { known = true; break; }
+        if (known) continue;
+        g_seJoinSeen.push_back({ c, pc });
+        joined = true;
+    }
+    static int32_t s_lastNum = -1;
+    if (num != s_lastNum)                                                            // someone left: forget them
+    {
+        s_lastNum = num;
+        g_seJoinSeen.erase(std::remove_if(g_seJoinSeen.begin(), g_seJoinSeen.end(), [&](const std::pair<uintptr_t, uintptr_t>& e)
+        {
+            for (int32_t i = 0; i < num; ++i) if (conns[i] == e.first) return false;
+            return true;
+        }), g_seJoinSeen.end());
+    }
+    if (!g_seJoinSeeded) { g_seJoinSeeded = true; return; }                          // the players already here
+    if (joined) SeModeOnPostLogin();
+}
+
 static void SeModeTick()
 {
     static ULONGLONG s_last = 0;
@@ -6754,10 +6970,13 @@ static void SeModeTick()
     ReleaseSRWLockExclusive(&g_seTextLock);
     for (auto& ev : evs)
         if (SeGameMode* m = SeModeByApi(ev.first)) SeModeEvent(*m, ev.second.first, ev.second.second);
+    SeModeJoinWatch();
+    if (!g_seAfterUnseat.empty()) SeAfterUnseatTick(now);
     if (now - s_last < 250) return;
     s_last = now;
     if (!g_seBallPending.empty()) SeBallPendingTick();
     if (!g_seBallCarry.empty()) SeBallCarryTick();
+    SeModeJoinTick(now);
     for (auto& m : g_seModes)
     {
         if (m.deleted || !m.slot || !SeAlive(m.slot)) continue;
@@ -6844,7 +7063,11 @@ static void SeLvTick()
     for (auto& j : jobs)
     {
         if (j.kind == 1) SeLvLoad(j.name, j.text);
-        else if (j.kind == 2) { if (std::find(g_lvLocal.begin(), g_lvLocal.end(), j.name) == g_lvLocal.end()) SeLvUnload(j.name); }
+        else if (j.kind == 2)
+        {
+            if (std::find(g_lvLocal.begin(), g_lvLocal.end(), j.name) == g_lvLocal.end())
+                SeModesAfterUnseat(j.name, nullptr, [n = j.name] { if (SeLvIsLoaded(n) && std::find(g_lvLocal.begin(), g_lvLocal.end(), n) == g_lvLocal.end()) SeLvUnload(n); });
+        }
         else if (j.kind == 3 && j.pc && SeAlive(j.pc)) SeBroadcast(j.text, j.pc);
     }
     if (!jobs.empty()) { std::lock_guard<std::mutex> lk(g_lvMu); g_lvLoadedSnapshot = g_lvLoaded; g_lvLocalSnapshot = g_lvLocal; }
@@ -6927,7 +7150,9 @@ static void SeLvImport(SDK::UObject* ctx, const std::string& rawName, const std:
     // The file's own name line is replaced by the one it is imported as.
     const size_t eol = text.find('\n');
     text = "L\t" + SeLvClean(name) + "\t1" + (eol == std::string::npos ? std::string("\n") : text.substr(eol));
-    if (std::find(g_lvLoaded.begin(), g_lvLoaded.end(), name) != g_lvLoaded.end()) SeLvUnload(name);   // replace, don't stack
+    SeModesAfterUnseat(name, nullptr, [name, text, mode, pc]() mutable {
+    if (pc && !SeAlive(pc)) pc = nullptr;
+    if (SeLvIsLoaded(name)) SeLvUnload(name);   // replace, don't stack
     SeLvLoad(name, text);
     SeLvMarkLocal(name);
     if (mode == "save")
@@ -6943,6 +7168,7 @@ static void SeLvImport(SDK::UObject* ctx, const std::string& rawName, const std:
     else if (pc) SeBroadcast("SE|NOTE|Loaded '" + name + "' on this server (not uploaded - Unload removes it).", pc);
     g_lvStatusDirty = true;
     HxLog("[HalcyonA2][LEVELS] imported '%s' (%zu byte(s), %s)\n", name.c_str(), text.size(), mode.c_str());
+    });
 }
 
 static void SeLvList(SDK::UObject* ctx)
@@ -6961,7 +7187,8 @@ static void SeLvList(SDK::UObject* ctx)
 static void SeLvSetLoaded(SDK::UObject* ctx, const std::string& name, bool load)
 {
     SDK::UObject* pc = SeCallerPC(ctx);
-    if (!load && std::find(g_lvLocal.begin(), g_lvLocal.end(), name) != g_lvLocal.end()) SeLvUnload(name);   // the poller won't
+    if (!load && std::find(g_lvLocal.begin(), g_lvLocal.end(), name) != g_lvLocal.end())   // the poller won't
+        SeModesAfterUnseat(name, nullptr, [name] { if (SeLvIsLoaded(name)) SeLvUnload(name); });
     std::thread([name, load, pc]() {
         DWORD st = 0;
         SeLvHttp(L"POST", "/v1/spec/levels/" + SeLvUrlName(name) + "/loaded?value=" + (load ? "1" : "0"), "", &st);
@@ -7236,7 +7463,7 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
     else if (op == "LVEXPORT" && p.size() >= 3) SeLvExport(pawn, p[2], p.size() >= 4 && p[3] == "1");
     else if (op == "LVCLOSE" && p.size() >= 3)                // the editor closes its open scene: remove it from this server
     {
-        if (std::find(g_lvLoaded.begin(), g_lvLoaded.end(), p[2]) != g_lvLoaded.end()) SeLvUnload(p[2]);
+        if (SeLvIsLoaded(p[2])) SeModesAfterUnseat(p[2], nullptr, [n = p[2]] { if (SeLvIsLoaded(n)) SeLvUnload(n); });
         HxLog("[HalcyonA2][LEVELS] scene '%s' closed by the editor\n", p[2].c_str());
     }
     else if (op == "LVPART" && p.size() >= 3) SeLvImportPart(p[2]);
@@ -7313,7 +7540,11 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
             SeModeListTo(nullptr);
         }
     }
-    else if (op == "GMDEL" && p.size() >= 3) { if (SeGameMode* m = SeModeById(p[2])) { SeModeDelete(*m); SeModeListTo(nullptr); } }
+    else if (op == "GMDEL" && p.size() >= 3)
+    {
+        if (SeGameMode* m = SeModeById(p[2]))
+            SeModesAfterUnseat("", m, [id = p[2]] { if (SeGameMode* g = SeModeById(id); g && !g->deleted) { SeModeDelete(*g); SeModeListTo(nullptr); } });
+    }
     else if (op == "GMLIST") SeModeListTo(SeCallerPC(pawn));
     else if (op == "GMTEAM" && p.size() >= 5)             // SE|GMTEAM|id|team (1-based)|x,y,z[|yaw] : a team changer for that team
     {

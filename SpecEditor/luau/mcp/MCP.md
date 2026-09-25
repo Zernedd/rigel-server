@@ -209,7 +209,9 @@ Defensive habits that keep scripts from failing on some machines:
 **Look around**: `editor_status` (start here), `list_objects(filter, near, radius, limit)` (each object's
 `boundsMin` / `boundsMax` are the world box it really covers), `trace(location, direction, max_distance)` (the first
 surface along a line: hit point, normal, actor -- find a floor's height and tilt, or check a spot is clear),
-`search_palette(query, category)`, `get_properties(handle, sub_path)`, `get_game_data(handle)`,
+`search_palette(query, category)`, `materials(handle)` (every mesh and material a piece renders with, and
+`deprecated=true` if any is a deprecated asset: place one sample, check it, then build with it),
+`get_properties(handle, sub_path)`, `get_game_data(handle)`,
 `station_scripts(name)`, `level_list`, `gamemode_list`, `editor_logs(since, filter)`, `editor_problems`.
 
 **Build**: `place_object(item, location, rotation, scale)` returns the new object; `move_object(handle, location,
@@ -357,6 +359,14 @@ Collected from real builds (the full log is `FIELD_NOTES.md`). `tests/build_wall
   builder does) so a copy anywhere else still works.
 - **Test the rules with the tools**, not by eye: walk a mock player through the doors, `ball_carry` the ball into the
   ring and each goal, play to `score_to_win`, carry it out of bounds -- and read `gamemode_list` after each step.
+- **Carry the ball in through a goal's mouth.** A goal only counts a ball that comes through the front; carried in
+  through the side wall of the goal box it never fires. Carry it to the front of the mouth first, then in.
+- **Glowing detail: the station's forcefield.** `Prefab_BP_Primitive_Cube_Shield_C` (1 m cube,
+  `MI_JakeBall_Forcefield_Interior`, not deprecated, doesn't cull) makes glowing goal nets and roof light strips.
+  Its `_Yellow_` twin renders almost black.
+- **No deprecated materials**: check every new kind of piece with `materials(handle)` before building with it.
+- **Don't reload the level under players mid-game.** Players on a ball mode's teams are seated in its ball sim; the
+  server takes them off the teams before a close / re-open / delete (about 1.5 s), so they have to walk back in.
 
 ### Building a game mode, step by step
 

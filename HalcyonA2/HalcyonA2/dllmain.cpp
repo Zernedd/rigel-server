@@ -15,6 +15,7 @@
 #include <atomic>
 #include <intrin.h>
 #include <vector>
+#include <functional>
 #include <cstdarg>
 #include <cmath>
 #include <winhttp.h>

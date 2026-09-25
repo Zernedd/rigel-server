@@ -67,6 +67,7 @@ Walking into it puts a player on that team; the team's size and the max show in 
 | **Restart automatically** | start the next round after the result |
 | **End a round when every team is empty** | so an abandoned round doesn't run forever: once a round has had players on a team and they all leave. A round started with empty teams keeps running |
 | **Ball back to its spawner after a goal** | a Goal / Score box point resets every ball (a kick-off) |
+| **My code runs the arena** (`script_flow`) | your code runs the whole game: clock, arena state, start ring, goals and the ball. The generated script only declares the slots, keeps the scoreboards up to date and calls your hooks. This is how the station's own Jakeball script works; `SpecEditor/tests/minijakeball_flow.luau` is that script ported onto a mode's slots |
 
 ![The rules. **1** how a round starts (Manual / Start button / Automatic). **2** players per team to start, countdown, round length, score to win, how long the result shows. **3** restart automatically, and end a round when every team is empty.](doc-images/gm-rules.png)
 
@@ -101,6 +102,8 @@ switched) instead -- the editor picks the right one for the object.
 | Goal (team N) | Driftball goal, Goal | the ball going in during a round gives team N the goal's points (1, more for long shots) |
 | Score box (team N, 0 = by side) | Score box (a disc trigger) | the ball flies *through* it; each pass during a round gives team N a point. 0 = by side: along the box's forward arrow scores for team 1, the other way for team 2 |
 | Ball start ring | Ball start ring | between rounds, carry the ball into it to start a round; hidden while a round is on |
+| Goal celebration (team N) | Goal celebration VFX (`LE_BP_VFX_TackleBallGoal01a_C`) | off until your code switches it on when team N scores. Its slot is named after the team: `Celebrate1`, `Celebrate2` |
+| Midfield trigger | a disc trigger (`BP_DiscTriggerC_C`) | for your code: the ball crossing it (e.g. ends Jakeball's next-point countdown early). Slots `Midfield1`, `Midfield2`, ... |
 | Scoreboard (score + clock) | the classic Score board | shows team 1 / team 2 points |
 | Score table | the Score table | one row per team: name, score, players, rounds won |
 
@@ -155,6 +158,15 @@ Balls the station owns (training balls, death balls) are not listed.
   is being put back), so a ring next to the spawner is fine. The ring hides while a round runs.
 - A goal or box counts once even though every machine sees it (the server ignores repeats of the same goal within
   2.5 s), and only while a round is running. In your own code, `Rigel.goal(team, points, key)` does the same.
+- **Which team a goal is for, in your own code.** Every goal slot comes with a constant: `Goal1_team` is the team
+  that scores in `Goal1`. Use it in `Goal1.onGoalScored.Listen(...)`; don't rely on the game's `goalInfo.scoringTeam`,
+  which reads the same for both goals of a mode.
+- **Players on a ball mode's teams are seated in its ball simulation** (as in the station's Jakeball arenas: that's
+  what makes the ball respond to them). When the ball is about to go, the server takes those players off the teams
+  first and waits about 1.5 s: closing, re-opening or unloading the level, deleting the mode, moving or deleting its
+  ball spawner. Otherwise their game would crash. They walk back in through a team door afterwards.
+- **A player joining** while a mode has players on its teams gets the teams a few seconds after the rest of the
+  arena. For those ~12 s the team boards show empty for everyone. This stops the joining player from crashing.
 
 ## Text on signs
 

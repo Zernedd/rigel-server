@@ -2638,6 +2638,26 @@ void ScriptOp(const Snapshot& snap, const std::string& line)
         return;
     }
     if (!strcmp(op, "mousepark")) { g_uiMouseParked = rest != "0"; Log("[script] mouse %s", g_uiMouseParked ? "parked" : "back"); return; }
+    if (!strcmp(op, "tms"))                   // every TicketManager + runtime module slot this client has (join diagnostics)
+    {
+        auto* tmc = SDK::UObject::FindClassFast("TicketManager");
+        auto* msc = SDK::UObject::FindClassFast("ModuleSlot");
+        const int32_t num = SDK::UObject::GObjects->Num();
+        for (int32_t i = 0; i < num; ++i)
+        {
+            auto* o = SDK::UObject::GObjects->GetByIndex(i);
+            if (!o || o->IsDefaultObject()) continue;
+            const uintptr_t b = reinterpret_cast<uintptr_t>(o);
+            if (tmc && o->IsA(tmc))
+            {
+                auto* slot = *reinterpret_cast<SDK::UObject**>(b + 0x328);
+                Log("[tms] %s slot=%s holders=%d", o->GetName().c_str(), slot ? slot->GetName().c_str() : "NULL", *reinterpret_cast<int32_t*>(b + 0x390));
+            }
+            else if (msc && o->IsA(msc) && o->Class->GetName().find("ImportanceVolume") != std::string::npos)
+                Log("[tms] slot %s tm=%p", o->GetName().c_str(), *reinterpret_cast<void**>(b + 0x438));
+        }
+        return;
+    }
     if (!strcmp(op, "shot"))                  // shot <name|full path.bmp> -- the next frame, editor UI included (docs, tests)
     {
         std::string path = rest;
@@ -4245,7 +4265,58 @@ void __fastcall PE_Hook(void* ctx, void* fn, void* parms)
 
 }  // namespace
 
-void GameThreadPump() { PumpImpl(); }
+void JoinGuardTick();   // below
+void GameThreadPump() { PumpImpl(); JoinGuardTick(); }
+
+// ---- join guard: a TicketManager's team list can arrive before the module slot it points at ----------------
+// ATicketManager's OnRep_VerifiedTicketHolders (0x4728BE0) reads TM->ModuleSlot(0x328)->ModuleState(0x300). For a
+// game mode made at run time the slot is a runtime actor; a client that joins while someone is on one of its teams
+// got the team list first and crashed (AV reading 0x300). Skip the call while the slot is unknown, deliver it once
+// the slot has arrived, and log how long that took.
+using TmRep_t = __int64(__fastcall*)(__int64);
+TmRep_t g_tmRepOrig = nullptr;
+struct TmWait { __int64 tm; ULONGLONG since; };
+std::vector<TmWait> g_tmWaiting;
+std::mutex g_tmWaitMx;
+__int64 __fastcall TmRep_Hook(__int64 tm)
+{
+    const uintptr_t slot0 = tm ? *reinterpret_cast<const uintptr_t*>(tm + 0x328) : 0;
+    if (tm && (slot0 == 0 || *reinterpret_cast<const uintptr_t*>(slot0 + 0x300) == 0))   // no slot, or its module not built yet
+    {
+        std::lock_guard<std::mutex> lk(g_tmWaitMx);
+        bool known = false;
+        for (const auto& w : g_tmWaiting) if (w.tm == tm) known = true;
+        if (!known)
+        {
+            g_tmWaiting.push_back({ tm, GetTickCount64() });
+            Log("[joinguard] %s: team list arrived before its module slot / module state (%d on teams, slot %s) -- held",
+                reinterpret_cast<SDK::UObject*>(tm)->GetName().c_str(), *reinterpret_cast<const int32_t*>(tm + 0x390),
+                slot0 ? reinterpret_cast<SDK::UObject*>(slot0)->GetName().c_str() : "not yet");
+        }
+        return 0;
+    }
+    return g_tmRepOrig(tm);
+}
+void JoinGuardTick()
+{
+    std::vector<TmWait> ready;
+    {
+        std::lock_guard<std::mutex> lk(g_tmWaitMx);
+        for (size_t i = 0; i < g_tmWaiting.size();)
+        {
+            const __int64 tm = g_tmWaiting[i].tm;
+            const uintptr_t sl = *reinterpret_cast<const uintptr_t*>(tm + 0x328);
+            if (sl != 0 && *reinterpret_cast<const uintptr_t*>(sl + 0x300) != 0) { ready.push_back(g_tmWaiting[i]); g_tmWaiting.erase(g_tmWaiting.begin() + i); }
+            else ++i;
+        }
+    }
+    for (const auto& w : ready)
+    {
+        Log("[joinguard] %s: its slot and module arrived %llu ms later -- team list delivered",
+            reinterpret_cast<SDK::UObject*>(w.tm)->GetName().c_str(), GetTickCount64() - w.since);
+        g_tmRepOrig(w.tm);
+    }
+}
 
 bool InstallGameHook()
 {
@@ -4258,6 +4329,9 @@ bool InstallGameHook()
     if (MH_CreateHook(pe, &PE_Hook, reinterpret_cast<void**>(&g_peOrig)) != MH_OK) return false;
     if (MH_EnableHook(pe) != MH_OK) return false;
     Log("[game] ProcessEvent hooked @%p", pe);
+    void* tmRep = reinterpret_cast<void*>(base + 0x4728BE0);
+    if (!wcsstr(GetCommandLineW(), L"-NoJoinGuard") && MH_CreateHook(tmRep, &TmRep_Hook, reinterpret_cast<void**>(&g_tmRepOrig)) == MH_OK && MH_EnableHook(tmRep) == MH_OK)
+        Log("[game] join guard on the ticket managers' team list @%p", tmRep);
     return true;
 }
 

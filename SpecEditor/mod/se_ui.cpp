@@ -3854,6 +3854,8 @@ const GmRole kGmRoles[] = {
     { "goal", "Goal (ball in = points)", "GoalComponent", "When the ball goes into this goal during a round, the team gets the goal's points (1, or more for long shots) and the ball goes back to its spawner. Team = the team that SCORES here.", true, "team" },
     { "score_zone", "Score box (ball passes through)", "PhysicalComponent", "The ball flies through it; each pass during a round gives the team a point and resets the ball. Team 0 = by side: crossing along the box's forward arrow scores for team 1, the other way for team 2.", true, "team" },
     { "start_ring", "Ball start ring", "PhysicalComponent", "Like the driftball arenas: between rounds the ball waits, carry it into the ring to start a round. The ring hides while a round is on.", false, "" },
+    { "midfield", "Midfield trigger", "PhysicalComponent", "A trigger the ball crosses at midfield (e.g. BP_DiscTriggerC_C): the Jakeball flow skips the next-point countdown when the ball is carried over it. Slot Midfield1, Midfield2, ...", false, "" },
+    { "celebrate", "Goal celebration (team N)", "ToggleableComponent", "A goal celebration (e.g. LE_BP_VFX_TackleBallGoal01a_C) your mode code switches on when team N scores: slot Celebrate1, Celebrate2, ... Off at the start.", true, "team" },
     { "trap_round", "Trap - on during rounds", "ToggleableComponent", "Switched on when a round starts, off when it ends.", false, "" },
     { "trap_pulse", "Trap - pulses during rounds", "ToggleableComponent", "Flips on/off every N seconds while a round is on.", true, "seconds" },
     { "trap_fired", "Trap - fired by trap buttons", "ToggleableComponent", "Switched on for a while when a trap button is pressed.", false, "" },
@@ -3976,7 +3978,11 @@ std::string GmBuildScript(const Snapshot& snap, const GmInfo& g, std::vector<GmS
         const std::string key = it->second.substr(0, it->second.find(':'));
         const GmRole* r = GmRoleOf(key);
         if (!r->type[0]) continue;
-        const std::string slot = GmSlotName(key, ++counters[key]);
+        // a celebration's slot is named by its team (Celebrate1 = team 1), so the mode's code knows which is which
+        const size_t colon = it->second.find(':');
+        const std::string slot = key == "celebrate" && colon != std::string::npos
+            ? "Celebrate" + std::to_string((std::max)(1, atoi(it->second.c_str() + colon + 1)))
+            : GmSlotName(key, ++counters[key]);
         // A wall is whatever the object is: force fields / shields only have a ToggleableComponent (on = the wall
         // is up), other pieces are shown / hidden through their PhysicalComponent.
         std::string type = r->type;
@@ -3991,12 +3997,18 @@ std::string GmBuildScript(const Snapshot& snap, const GmInfo& g, std::vector<GmS
             snprintf(b, sizeof(b), "local %s_fwd = { %.4f, %.4f, %.4f }\n", slot.c_str(), f[0], f[1], f[2]);
             head += b;
         }
+        // a goal's scoring team, for the mode's own code (the game's goalInfo.scoringTeam doesn't tell our goals apart)
+        if (key == "goal")
+            head += "local " + slot + "_team = " + std::to_string((std::max)(1, atoi(it->second.c_str() + (colon == std::string::npos ? it->second.size() : colon + 1)))) + "\n";
         roleOf.push_back({ slot, it->second + (type == "ToggleableComponent" && key.rfind("wall_", 0) == 0 ? "|toggle" : "") });
     }
     // The controller is a Game State Manager: its GameTimeComponent is the arena clock the scoreboard monitors show,
     // its GameStateManagerComponent's state drives the monitors' screens and the announcer, its ScoreComponent the
     // score -- exactly what the station's own arena script drives. Wire all three.
     bool arena = false;
+    // script_flow = 1: the mode's own code runs the arena (clock, arena state, ring, goals, the ball) -- e.g. the
+    // Jakeball flow; the generated wiring then only declares the slots, keeps the boards and calls the hooks
+    const bool flow = g.sets.count("script_flow") && g.sets.at("script_flow") == "1";
     const SceneObject* ctlObj = GmObjectBySetting(snap, g, "controller");
     if (ctlObj && scriptObj && scriptObj != ctlObj)
         for (const auto& o : snap.objects)
@@ -4053,7 +4065,7 @@ std::string GmBuildScript(const Snapshot& snap, const GmInfo& g, std::vector<GmS
     body += "function BeginPlay()\n";
     body += "\tlocal __lastState = \"\"\n";
     body += "\tlocal function onState(st: string)\n";
-    if (arena)
+    if (arena && !flow)
         body += "\t\t-- the arena's own game state (monitors + announcer) and clock, as the station's arenas do\n"
                 "\t\tlocal rt = Rigel.settingNumber(\"round_time\") * 1000\n"
                 "\t\tif st == \"idle\" then\n"
@@ -4090,17 +4102,19 @@ std::string GmBuildScript(const Snapshot& snap, const GmInfo& g, std::vector<GmS
             if (toggle) body += "\t\tpcall(function() if " + up + " then " + s + ":luaEnable() else " + s + ":luaDisable() end end)\n";
             else body += "\t\tpcall(function() if " + up + " then " + s + ":showLua(); " + s + ":setDefaultCollision() else " + s + ":hideLua(); " + s + ":disableCollisionLua() end end)\n";
         }
-        else if (key == "start_ring")
+        else if (key == "start_ring" && !flow)
             body += "\t\tpcall(function() if st == \"idle\" or st == \"ended\" then " + s + ":showLua(); " + s + ":setTriggerCollision() else " + s + ":hideLua(); " + s + ":disableCollisionLua() end end)\n";
-        else if (key == "timer") body += "\t\tpcall(function()\n\t\t\tif st == \"countdown\" then " + s + ":start(math.max(1, Rigel.settingNumber(\"countdown\")))\n\t\t\telseif st == \"running\" then if Rigel.settingNumber(\"round_time\") > 0 then " + s + ":start(Rigel.settingNumber(\"round_time\")) else " + s + ":startCountUpFromZero() end\n\t\t\telse " + s + ":stopAndResetTimer() end\n\t\tend)\n";
+        else if (key == "timer" && !flow) body += "\t\tpcall(function()\n\t\t\tif st == \"countdown\" then " + s + ":start(math.max(1, Rigel.settingNumber(\"countdown\")))\n\t\t\telseif st == \"running\" then if Rigel.settingNumber(\"round_time\") > 0 then " + s + ":start(Rigel.settingNumber(\"round_time\")) else " + s + ":startCountUpFromZero() end\n\t\t\telse " + s + ":stopAndResetTimer() end\n\t\tend)\n";
         // "ball": the server spawns / resets the ball itself when a round starts (a Luau spawnBall on every machine made
         // client-only balls). The slot stays available to your code: Ball1:getSpawnedBall(), Rigel.resetBalls().
     }
     body += "\tend\n";
     body += "\tonState(Rigel.state())\n\t__boards()\n";
-    body += "\tRigel.onStateChanged(function(st: string, old: string)\n\t\tonState(st)\n\t\t__boards()\n"
-            "\t\tif st == \"running\" and old ~= \"running\" then pcall(function() Gamemode:startGame() end)\n"
-            "\t\telseif (st == \"ended\" or st == \"idle\") and (old == \"running\" or old == \"countdown\") then pcall(function() Gamemode:stopGame() end) end\n"
+    body += "\tRigel.onStateChanged(function(st: string, old: string)\n\t\tonState(st)\n\t\t__boards()\n";
+    if (!flow)
+        body += "\t\tif st == \"running\" and old ~= \"running\" then pcall(function() Gamemode:startGame() end)\n"
+            "\t\telseif (st == \"ended\" or st == \"idle\") and (old == \"running\" or old == \"countdown\") then pcall(function() Gamemode:stopGame() end) end\n";
+    body += ""
             "\t\tif st == \"idle\" then __call(\"OnLobby\")\n"
             "\t\telseif st == \"countdown\" then __call(\"OnCountdown\", math.max(Rigel.timeLeft(), Rigel.settingNumber(\"countdown\")))\n"
             "\t\telseif st == \"running\" then __call(\"OnRoundStart\", Rigel.round())\n"
@@ -4129,13 +4143,15 @@ std::string GmBuildScript(const Snapshot& snap, const GmInfo& g, std::vector<GmS
                     "\t\tlocal owner = Rigel.teams() == 2 and (" + team + " == 1 and 1 or 0) or (" + team + " - 1)\n"
                     "\t\tpcall(function() " + s + ":updateCppTeam(owner) end)\n"
                     "\t\tpcall(function() " + s + ":setColorByIndex(owner) end)\n"
-                    "\t\tpcall(function() " + s + ":enableGoal(true) end)\n"
-                    "\t\t" + s + ".onGoalScored.Listen(function(info: any)\n"
+                    "\t\tpcall(function() " + s + ":enableGoal(true) end)\n";
+            if (!flow)
+                body += "\t\t" + s + ".onGoalScored.Listen(function(info: any)\n"
                     "\t\t\tif not Rigel.isRunning() then return end\n"
                     "\t\t\tlocal pts = 1\n"
                     "\t\t\tpcall(function() if info and info.goalPoints and info.goalPoints > 0 then pts = info.goalPoints end end)\n"
                     "\t\t\tRigel.goal(" + team + ", pts, \"" + s + "\")\n"
-                    "\t\tend)\n\tend\n";
+                    "\t\tend)\n";
+            body += "\tend\n";
         }
         else if (key == "score_zone")
         {
@@ -4150,7 +4166,7 @@ std::string GmBuildScript(const Snapshot& snap, const GmInfo& g, std::vector<GmS
                     "\t\tRigel.goal(team, 1, \"" + s + "\")\n"
                     "\tend) end\n";
         }
-        else if (key == "start_ring")
+        else if (key == "start_ring" && !flow)
             body += "\tif " + s + " then " + s + ".onOverlapByDisc.Listen(function(disc: any)\n"
                     "\t\tlocal st = Rigel.state()\n"
                     "\t\t-- the server ignores the first 3 s of a lobby (the ball being put back is not a player carrying it in)\n"

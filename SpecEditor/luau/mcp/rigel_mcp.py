@@ -344,7 +344,8 @@ SLOT_TYPES = {"Start": "BasicButtonComponent", "Score": "BasicButtonComponent", 
               "TrapPulse": "ToggleableComponent", "TrapFired": "ToggleableComponent", "TrapButton": "BasicButtonComponent",
               "WallLobby": "PhysicalComponent", "WallRound": "PhysicalComponent", "Timer": "TimerComponent",
               "Ball": "BallSpawnerComponent", "ScoreBoard": "ScoreComponent", "ScoreTable": "DataTableComponent",
-              "ModeTimer": "GameTimeComponent", "ModeState": "GameStateManagerComponent", "ModeScore": "ScoreComponent"}
+              "ModeTimer": "GameTimeComponent", "ModeState": "GameStateManagerComponent", "ModeScore": "ScoreComponent",
+              "Celebrate": "ToggleableComponent", "Midfield": "PhysicalComponent"}
 
 
 def check_luau(source: str, name: str = "Script", gamemode_code: bool = False):
@@ -355,9 +356,13 @@ def check_luau(source: str, name: str = "Script", gamemode_code: bool = False):
     src = source
     if gamemode_code:
         # game mode code is spliced into the controller: its role slots are locals declared before it
-        slots = dict.fromkeys(re.findall(r"\b((?:StartRing|Start|ScoreZone|ScoreBoard|ScoreTable|Score|Goal|TrapRound|TrapPulse|"
+        slots = dict.fromkeys(re.findall(r"\b((?:StartRing|Start|ScoreZone|ScoreBoard|ScoreTable|Score|Goal|Celebrate|Midfield|TrapRound|TrapPulse|"
                                          r"TrapFired|TrapButton|WallLobby|WallRound|Timer|Ball)\d+|Mode(?:Timer|State|Score))\b", source))
-        src = "".join(f"local {s}: {SLOT_TYPES.get(re.sub(r'[0-9]+$', '', s), 'any')} = nil\n" for s in slots) + source
+        src = "".join(f"local {s}: {SLOT_TYPES.get(re.sub(r'[0-9]+$', '', s), 'any')} = nil\n" for s in slots)
+        # ... and the wiring's per-slot constants: a goal's scoring team, a score zone's forward
+        src += "".join(f"local {s}: number = 1\n" for s in dict.fromkeys(re.findall(r"\bGoal\d+_team\b", source)))
+        src += "".join(f"local {s}: {{number}} = {{0, 0, 0}}\n" for s in dict.fromkeys(re.findall(r"\bScoreZone\d+_fwd\b", source)))
+        src += source
     shift = src.count("\n") - source.count("\n")
     fpath = os.path.join(tmpdir, re.sub(r"[^\w-]", "_", name) + ".luau")
     with open(fpath, "w", encoding="utf-8") as fh:
@@ -573,6 +578,12 @@ def t_trace(a):
     L = a["location"]
     D = a.get("direction") or [0, 0, -1]
     return BR.call("trace", *L, *D, a.get("max_distance", 10000))
+
+
+@tool("materials", "Every mesh and material an object renders with (full asset paths), and deprecated=true when any "
+      "of them is a deprecated asset -- check a piece before building with it.", {"handle": {"type": "string"}}, ["handle"])
+def t_materials(a):
+    return BR.call("materials", a["handle"], timeout=15)
 
 
 @tool("delete_object", "Delete an object (for everyone).", {"handle": {"type": "string"}}, ["handle"])
@@ -928,6 +939,8 @@ ROLES = {"start": "BasicButton: starts a round", "score:N": "BasicButton: +1 for
          "goal:N": "Goal (BP_GoalJakeBall_C etc.): the mode's ball in it = points for team N (the team that SCORES there)",
          "score_zone:N": "trigger the ball flies through: +1 for team N (0 = by direction)",
          "start_ring": "trigger (e.g. Prefab_BP_CylinderPrimitive_Trigger_C): the mode's ball carried into it starts a round",
+         "celebrate:N": "ToggleableComponent (e.g. LE_BP_VFX_TackleBallGoal01a_C) your code switches on when team N scores (slot CelebrateN)",
+         "midfield": "trigger the ball crosses at midfield (e.g. BP_DiscTriggerC_C), for your code (slot Midfield1..)",
          "trap_round": "Toggleable trap: on during rounds", "trap_pulse:S": "trap: flips every S seconds during rounds",
          "trap_fired": "trap: switched on by trap buttons", "trap_button:S": "BasicButton: fires 'trap_fired' traps for S s",
          "wall_lobby": "solid between rounds, gone during", "wall_round": "only there during rounds",
