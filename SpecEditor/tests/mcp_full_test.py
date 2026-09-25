@@ -88,6 +88,23 @@ def new_log_lines(pattern):
     return out
 
 
+def server_log_name():
+    """The local server's log file. It is A2.log only if no other A2 was running when it started -- the user's own
+    editor takes A2.log, and then the server writes A2_2.log. Find it by its command line (-nullrhi)."""
+    for f in sorted(glob.glob(os.path.join(LOGS, "A2*.log")), key=os.path.getmtime, reverse=True):
+        try:
+            with open(f, encoding="utf-8", errors="replace") as fh:
+                head = fh.read(200000)
+            if "-nullrhi" in head:
+                return os.path.basename(f)
+        except OSError:
+            pass
+    return "A2.log"
+
+
+SERVER_LOG = server_log_name()
+
+
 def machines(lines):
     return sorted({l.split(":")[0] for l in lines})
 
@@ -99,9 +116,32 @@ def player(cmd, wait=0.0):
         time.sleep(wait)
 
 
+def player_at(spot, tol=120):
+    try:
+        me = [l for l in open(os.path.join(TEMP, "A2PlayerControl.log"), encoding="utf-8", errors="replace") if "<-- me" in l][-1]
+        x, y, z = [float(v) for v in re.search(r"pos=\(([-\d.]+), ([-\d.]+), ([-\d.]+)\)", me).groups()]
+        return abs(x - spot[0]) < tol and abs(y - spot[1]) < tol
+    except Exception:
+        return False
+
+
+def goto_wait(spot, timeout=40):
+    """Walk the mock player to spot and wait until it's there (a fixed wait missed when it started far away)."""
+    t0 = time.time()
+    player(f"goto {spot[0]:.0f} {spot[1]:.0f} {FLOOR + 25:.0f}", 2)
+    while time.time() - t0 < timeout:
+        player("pawns", 1.5)
+        if player_at(spot):
+            return True
+        player(f"goto {spot[0]:.0f} {spot[1]:.0f} {FLOOR + 25:.0f}", 1)
+    return False
+
+
 def walk(a, b, each=9):
-    player(f"goto {a[0]:.0f} {a[1]:.0f} {FLOOR + 25:.0f}", each)
-    player(f"goto {b[0]:.0f} {b[1]:.0f} {FLOOR + 25:.0f}", each)
+    goto_wait(a)
+    time.sleep(1)
+    goto_wait(b)
+    time.sleep(1)
 
 
 def player_alive():
@@ -118,7 +158,26 @@ def near(objs, loc, tol=80):
     return None
 
 
+def player_home(spot=(0, 800), timeout=240):
+    """Send the mock player to the test's start spot and wait until it's there (it may have been left anywhere --
+    on the wall arena, say, a long flight away -- and every player check would fail)."""
+    plog = os.path.join(TEMP, "A2PlayerControl.log")
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        player(f"goto {spot[0]} {spot[1]} {FLOOR + 25:.0f}", 6)
+        player("pawns", 2)
+        try:
+            me = [l for l in open(plog, encoding="utf-8", errors="replace") if "<-- me" in l][-1]
+            x, y, z = [float(v) for v in re.search(r"pos=\(([-\d.]+), ([-\d.]+), ([-\d.]+)\)", me).groups()]
+            if abs(x - spot[0]) < 300 and abs(y - spot[1]) < 300 and abs(z - FLOOR) < 300:
+                return True
+        except Exception:
+            pass
+    return False
+
+
 # ================================ protocol + resources ================================
+check("the mock player is at the test's start spot", player_home(), "")
 init = rpc("initialize", {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "mcp_full_test", "version": "1"}})
 check("initialize", "result" in init and init["result"].get("serverInfo"), init)
 p.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
@@ -355,8 +414,12 @@ end
 '''
 ok, r = call("attach_script", handle=host["handle"], name="ZPlayerApi", source=PLAYER_API, wait_seconds=3)
 check("attach the player-API script", ok and r.get("attached"), r)
-ok, cands = call("find_reference_targets", type="PhysicalComponent", near=TRIG, radius=300)
-tr = near(cands if isinstance(cands, list) else [], TRIG)
+for _ in range(4):                      # the attach rebuilds the host: give the editor's list a moment to settle
+    ok, cands = call("find_reference_targets", type="PhysicalComponent", near=TRIG, radius=300)
+    tr = near(cands if isinstance(cands, list) else [], TRIG)
+    if tr:
+        break
+    time.sleep(2)
 check("find_reference_targets near= lists the trigger, with class + location", tr is not None and tr.get("class"), cands)
 mark_logs()
 # the ORIGINAL handles (attach rebuilt the host): they must still work
@@ -423,7 +486,7 @@ mark_logs()
 ok, r = call("gamemode_apply_script", mode="ZFullMode")
 check("gamemode_apply_script", ok, r)
 time.sleep(6)
-walk([DOOR[0] - 500, DOOR[1]], [DOOR[0] + 500, DOOR[1]])
+walk([DOOR[0] + 500, DOOR[1]], [DOOR[0] - 500, DOOR[1]])   # against the door's +X = walking in (joins)
 time.sleep(3)
 ok, modes = call("gamemode_list")
 m = next((x for x in modes if x.get("name") == "ZFullMode"), {}) if ok and isinstance(modes, list) else {}
@@ -442,9 +505,9 @@ check("gamemode_control reset", ok, r)
 time.sleep(4)
 zg = new_log_lines(r"ZGM (lobby|countdown|round|score|time|end)")
 for l in zg:
-    if l.startswith("A2.log"):
+    if l.startswith(SERVER_LOG + ":"):
         print("   ", l)
-srvz = [l for l in zg if l.startswith("A2.log")]
+srvz = [l for l in zg if l.startswith(SERVER_LOG + ":")]
 check("OnCountdown", any("ZGM countdown" in l for l in srvz), srvz)
 check("OnRoundStart with players() = 1", any(re.search(r"ZGM round 1 players=1", l) for l in srvz), srvz)
 check("OnScore after Rigel.addScore", any("ZGM score t1=2" in l for l in srvz), srvz)
@@ -513,6 +576,36 @@ check("self-reference: the mock player's game survives", player_alive(), zsr)
 call("level_close")
 time.sleep(2)
 call("level_delete", name="ZMcpSelfRef")
+
+# ================================ floors, bounds, clean shots, carrying a ball ================================
+ok, r = call("trace", location=[0, 1500, FLOOR + 500])
+check("trace down finds the floor", ok and r.get("hit") and abs(r["location"][2] - FLOOR) < 60 and r["normal"][2] > 0.9, r)
+ok, r = call("trace", location=[0, 1500, FLOOR + 500], direction=[0, 0, 1], max_distance=50)
+check("trace up into empty air: no hit", ok and r.get("hit") is False, r)
+ok, r = call("level_new", name="ZMcpBall")
+time.sleep(2)
+ok, cube = call("place_object", item="Prefab_BP_Cube2Primitive_C", location=[300, 1500, FLOOR + 32], scale=[1, 1, 1])
+time.sleep(2)
+ok, r = call("list_objects", near=[300, 1500, FLOOR + 32], radius=40)
+o = next((x for x in (r.get("objects") or []) if x.get("class") == "Prefab_BP_Cube2Primitive_C"), {}) if ok else {}
+size = [round(o["boundsMax"][i] - o["boundsMin"][i]) for i in range(3)] if o.get("boundsMin") else None
+check("list_objects gives world bounds (the purple cube is 64 cm at scale 1)", size is not None and all(abs(x - 64) <= 2 for x in size), o)
+ok, r = call("screenshot", max_width=480, hide_ui=True)
+check("screenshot with hide_ui", ok, r if not ok else "")
+ok, sp = call("place_object", item="BP_JakeBallSpawner_C", location=[0, 1500, FLOOR + 100])
+time.sleep(6)
+ok, r = call("list_objects", filter="BP_JakeBall_C", near=[0, 1500, FLOOR], radius=400)
+ball = next((x for x in (r.get("objects") or []) if "Spawner" not in x.get("class", "")), None) if ok else None
+check("the spawner made its ball", ball is not None, r)
+if ball:
+    ok, r = call("ball_carry", handle=ball["handle"], location=[0, 1900, FLOOR + 30], seconds=1.5)
+    time.sleep(2)
+    ok2, r2 = call("list_objects", filter="BP_JakeBall_C", near=[0, 1900, FLOOR], radius=150)
+    moved = [x for x in (r2.get("objects") or []) if "Spawner" not in x.get("class", "")] if ok2 else []
+    check("ball_carry moved the live ball (spawner untouched)", ok and bool(moved), (r, r2))
+call("level_close")
+time.sleep(2)
+call("level_delete", name="ZMcpBall")
 
 # ================================ coverage ================================
 missing = sorted(ALL - used)

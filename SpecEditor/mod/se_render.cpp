@@ -675,9 +675,12 @@ HRESULT __stdcall Hook_Present(IDXGISwapChain3* sc, UINT interval, UINT flags)
         g_cmdList->ResourceBarrier(1, &b);
         g_cmdList->OMSetRenderTargets(1, &f.rtv, FALSE, nullptr);
         g_cmdList->SetDescriptorHeaps(1, &g_srvHeap);
-        ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_cmdList);
         std::string shotPath;
         { std::lock_guard<std::mutex> lk(g_shotMx); shotPath.swap(g_shotPath); }
+        // "clean:<path>": this frame's shot without the editor UI (the scene as players see it)
+        const bool clean = shotPath.rfind("clean:", 0) == 0;
+        if (clean) shotPath.erase(0, 6);
+        if (!clean) ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_cmdList);
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{}; UINT rows = 0; UINT64 total = 0;
         ID3D12Resource* rb = shotPath.empty() ? nullptr : ShotRecord(f.backbuffer, fp, rows, total);
         if (!rb)

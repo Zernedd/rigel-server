@@ -6235,6 +6235,61 @@ static void SeBallFollow(SDK::AActor* spawner, const double* at, const double* s
     }
     if (ball) SeBallFollowNow(c, ball, at, scl);   // a station spawner (not rebuilt): reset its ball to the new spot
 }
+// SE|BALLPUT|<Class@x,y,z>|x,y,z|seconds -- carry a live ball to a point on the server, the way a player carrying it
+// would (swept steps, 4 a second), without touching its spawner: a spawner edit rebuilds it and makes a NEW ball
+// already sitting at the spot, which is not a ball carried into a ring or a goal. For testing rings and goals.
+struct SeBallCarry { SDK::AActor* ball; double from[3], to[3]; ULONGLONG t0, ms; double last[3]; bool moved; };
+static std::vector<SeBallCarry> g_seBallCarry;
+static void SeBallPut(const std::string& ident, const std::string& locs, const std::string& secs)
+{
+    SDK::AActor* ball = SeBallAt(ident);
+    double to[3];
+    if (!ball || !SeVec(locs, to)) { HxLog("[HalcyonA2][SPECEDIT] BALLPUT: no ball at %s (or bad target)\n", ident.c_str()); return; }
+    const SDK::FVector b = ball->K2_GetActorLocation();
+    SeBallCarry c{ ball, { b.X, b.Y, b.Z }, { to[0], to[1], to[2] }, GetTickCount64(),
+                   static_cast<ULONGLONG>((std::max)(0.25, atof(secs.c_str())) * 1000.0), { b.X, b.Y, b.Z }, false };
+    g_seBallCarry.erase(std::remove_if(g_seBallCarry.begin(), g_seBallCarry.end(), [&](const SeBallCarry& q) { return q.ball == ball; }),
+                        g_seBallCarry.end());
+    g_seBallCarry.push_back(c);
+    HxLog("[HalcyonA2][SPECEDIT] BALLPUT: carrying %s (%.0f,%.0f,%.0f) -> (%.0f,%.0f,%.0f) over %llu ms\n", ball->GetName().c_str(),
+          b.X, b.Y, b.Z, to[0], to[1], to[2], c.ms);
+}
+static void SeBallCarryTick()
+{
+    const ULONGLONG now = GetTickCount64();
+    for (size_t i = 0; i < g_seBallCarry.size();)
+    {
+        SeBallCarry& c = g_seBallCarry[i];
+        if (!c.ball || !SeAlive(c.ball)) { g_seBallCarry.erase(g_seBallCarry.begin() + i); continue; }
+        // The game moved the ball itself (a goal / out-of-bounds reset): let go, as a player's hand would.
+        const SDK::FVector cur = c.ball->K2_GetActorLocation();
+        const double jx = cur.X - c.last[0], jy = cur.Y - c.last[1], jz = cur.Z - c.last[2];
+        if (c.moved && jx * jx + jy * jy + jz * jz > 250.0 * 250.0)
+        {
+            HxLog("[HalcyonA2][SPECEDIT] BALLPUT: %s was moved by the game to (%.0f,%.0f,%.0f) -- let go\n", c.ball->GetName().c_str(), cur.X, cur.Y, cur.Z);
+            g_seBallCarry.erase(g_seBallCarry.begin() + i);
+            continue;
+        }
+        const double k = (std::min)(1.0, static_cast<double>(now - c.t0) / static_cast<double>(c.ms));
+        SDK::FHitResult hit{};
+        c.ball->K2_SetActorLocation(SDK::FVector{ c.from[0] + (c.to[0] - c.from[0]) * k, c.from[1] + (c.to[1] - c.from[1]) * k,
+                                                  c.from[2] + (c.to[2] - c.from[2]) * k }, true, &hit, false);
+        if (hit.bBlockingHit)                            // a resting ball touches the floor: step without the sweep
+            c.ball->K2_SetActorLocation(SDK::FVector{ c.from[0] + (c.to[0] - c.from[0]) * k, c.from[1] + (c.to[1] - c.from[1]) * k,
+                                                      c.from[2] + (c.to[2] - c.from[2]) * k }, false, &hit, false);
+        c.ball->ForceNetUpdate();
+        { const SDK::FVector nl = c.ball->K2_GetActorLocation(); c.last[0] = nl.X; c.last[1] = nl.Y; c.last[2] = nl.Z; c.moved = true; }
+        if (k >= 1.0)
+        {
+            const SDK::FVector e = c.ball->K2_GetActorLocation();
+            HxLog("[HalcyonA2][SPECEDIT] BALLPUT: %s arrived at (%.0f,%.0f,%.0f)%s\n", c.ball->GetName().c_str(), e.X, e.Y, e.Z,
+                  hit.bBlockingHit ? " (stopped by a hit)" : "");
+            g_seBallCarry.erase(g_seBallCarry.begin() + i);
+            continue;
+        }
+        ++i;
+    }
+}
 static void SeBallPendingTick()
 {
     const ULONGLONG now = GetTickCount64();
@@ -6665,6 +6720,7 @@ static void SeModeTick()
     if (now - s_last < 250) return;
     s_last = now;
     if (!g_seBallPending.empty()) SeBallPendingTick();
+    if (!g_seBallCarry.empty()) SeBallCarryTick();
     for (auto& m : g_seModes)
     {
         if (m.deleted || !m.slot || !SeAlive(m.slot)) continue;
@@ -7096,6 +7152,7 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
         cur = n;
     }
     else if (op == "XFORM"  && p.size() >= 6) SeTransform(SeResolveIdent(p[2]), p[3], p[4], p[5]);
+    else if (op == "BALLPUT" && p.size() >= 5) SeBallPut(p[2], p[3], p[4]);
     else if (op == "DELETE" && p.size() >= 3) SeDelete(SeResolveIdent(p[2]));
     else if (op == "PROP"   && p.size() >= 5) SeSetProp(p[2], p[3], p[4]);
     else if (op == "AUDIT"  && p.size() >= 3) SeAudit(pawn, p[2]);
@@ -7221,6 +7278,9 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
                 // on the walls. The door stands on what it hits, upright for that floor, turned `yaw` about its up.
                 double up[3]; SeStationUp(at, up);
                 double door[3] = { at[0], at[1], at[2] };
+                // the station-frame tilt, corrected to the floor actually hit: a pitch built flat on the curved hull
+                // (the wall pitches are) would otherwise leave the door leaning a little
+                SDK::FQuat upQ = SeStationUpQuat(at);
                 {
                     SDK::FHitResult hit{};
                     SDK::TArray<SDK::AActor*> ignore{};
@@ -7228,23 +7288,33 @@ static bool SpecEditHandle(SDK::UObject* pawn, const std::string& cmd)
                         SDK::FVector{ at[0] + up[0] * 100.0, at[1] + up[1] * 100.0, at[2] + up[2] * 100.0 },
                         SDK::FVector{ at[0] - up[0] * 3000.0, at[1] - up[1] * 3000.0, at[2] - up[2] * 3000.0 }, SDK::ETraceTypeQuery::TraceTypeQuery1,
                         false, ignore, SDK::EDrawDebugTrace::None, &hit, true, SDK::FLinearColor{}, SDK::FLinearColor{}, 0.0f);
-                    if (ok && hit.bBlockingHit) { door[0] = hit.Location.X; door[1] = hit.Location.Y; door[2] = hit.Location.Z; }
+                    if (ok && hit.bBlockingHit)
+                    {
+                        door[0] = hit.Location.X; door[1] = hit.Location.Y; door[2] = hit.Location.Z;
+                        const SDK::FVector n{ hit.ImpactNormal.X, hit.ImpactNormal.Y, hit.ImpactNormal.Z };
+                        if (n.X * up[0] + n.Y * up[1] + n.Z * up[2] > 0.9)          // a floor (not a wall or ramp): stand on it
+                        {
+                            upQ = SDK::UKismetMathLibrary::Multiply_QuatQuat(
+                                SDK::UKismetMathLibrary::Quat_FindBetweenNormals(SDK::FVector{ up[0], up[1], up[2] }, n), upQ);
+                            up[0] = n.X; up[1] = n.Y; up[2] = n.Z;
+                        }
+                    }
                     for (int k = 0; k < 3; ++k) door[k] += up[k] * 150.0;
                 }
-                // Yaw: walking through along the door's +X joins its team, walking back out clears it (measured with a
-                // real player). With no yaw given the door faces the mode's centre, so walking IN joins and walking out
-                // leaves -- a door can't end up backwards.
+                // Yaw: a door's +X points OUT of its arena -- walking in (along -X) joins the team, walking back out
+                // leaves it (the user checked it in the game: +X pointing in was backwards). With no yaw given the
+                // door is turned that way from the mode's centre, so it can't end up backwards.
                 double yaw = 0.0;
                 if (p.size() >= 6 && !p[5].empty()) yaw = atof(p[5].c_str());
                 else
                 {
-                    const SDK::FQuat q = SeStationUpQuat(at);
-                    const SDK::FVector lx = SDK::UKismetMathLibrary::Quat_RotateVector(q, SDK::FVector{ 1, 0, 0 });
-                    const SDK::FVector ly = SDK::UKismetMathLibrary::Quat_RotateVector(q, SDK::FVector{ 0, 1, 0 });
+                    const SDK::FVector lx = SDK::UKismetMathLibrary::Quat_RotateVector(upQ, SDK::FVector{ 1, 0, 0 });
+                    const SDK::FVector ly = SDK::UKismetMathLibrary::Quat_RotateVector(upQ, SDK::FVector{ 0, 1, 0 });
                     const double d[3] = { m->at[0] - door[0], m->at[1] - door[1], m->at[2] - door[2] };
-                    yaw = atan2(d[0] * ly.X + d[1] * ly.Y + d[2] * ly.Z, d[0] * lx.X + d[1] * lx.Y + d[2] * lx.Z) * 57.29577951308232;
+                    yaw = atan2(d[0] * ly.X + d[1] * ly.Y + d[2] * ly.Z, d[0] * lx.X + d[1] * lx.Y + d[2] * lx.Z) * 57.29577951308232 + 180.0;
                 }
-                const SDK::FRotator dr = SDK::UKismetMathLibrary::ComposeRotators(SDK::FRotator{ 0.0, yaw, 0.0 }, SeStationUpRot(at));
+                const SDK::FRotator dr = SDK::UKismetMathLibrary::ComposeRotators(SDK::FRotator{ 0.0, yaw, 0.0 },
+                                                                                   SDK::UKismetMathLibrary::Quat_Rotator(upQ));
                 const double rot[3] = { dr.Pitch, dr.Yaw, dr.Roll }, scl[3] = { 1, 1, 1 };
                 const std::string prevLoading = g_lvLoading;
                 g_lvLoading = SeCallerScene();

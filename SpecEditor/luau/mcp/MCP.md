@@ -206,7 +206,9 @@ Defensive habits that keep scripts from failing on some machines:
 
 ## Tools reference
 
-**Look around**: `editor_status` (start here), `list_objects(filter, near, radius, limit)`,
+**Look around**: `editor_status` (start here), `list_objects(filter, near, radius, limit)` (each object's
+`boundsMin` / `boundsMax` are the world box it really covers), `trace(location, direction, max_distance)` (the first
+surface along a line: hit point, normal, actor -- find a floor's height and tilt, or check a spot is clear),
 `search_palette(query, category)`, `get_properties(handle, sub_path)`, `get_game_data(handle)`,
 `station_scripts(name)`, `level_list`, `gamemode_list`, `editor_logs(since, filter)`, `editor_problems`.
 
@@ -231,9 +233,13 @@ gamemode_code)`, `write_script_file(name, source, save_and_update)`, `read_scrip
 `gamemode_set_role(mode, handle, role)`, `gamemode_get_code(mode)`, `gamemode_set_code(mode, source)`,
 `gamemode_apply_script(mode)`, `gamemode_delete(mode)`.
 
-**See**: `screenshot(max_width)` returns what the editor shows right now as an image -- frame things first with
-`set_camera`, then look. Use it to check placement, facing (scoreboards and signs have a front) and that pieces
-stand on the floor.
+**See**: `screenshot(max_width, hide_ui)` returns what the editor shows right now as an image -- frame things first
+with `set_camera`, then look. `hide_ui=true` leaves the editor's panels out (they cover most of the view). Use it to
+check placement, facing (scoreboards and signs have a front), seams and that pieces stand on the floor.
+
+**Test**: `ball_carry(handle, location, seconds)` carries a live ball to a point the way a player would, so a start
+ring, a goal or a score box sees it arrive. (`move_object` on a ball edits its *spawner*: a new ball appears already
+sitting there, which is not a ball carried in.) It lets go if the game moves the ball (a goal's reset).
 
 **Anything else**: `editor_op(line)` runs one editor op (below), `wait(seconds)`.
 
@@ -263,13 +269,17 @@ roles plus the mode's code:
 | `trap_button:S` | button | fires every `trap_fired` trap for S seconds | `TrapButton1` |
 | `wall_lobby` | force field / wall | solid and visible between rounds, gone during | `WallLobby1` |
 | `wall_round` | force field / wall | only there during rounds | `WallRound1` |
-
-A wall slot is a `ToggleableComponent` for force fields and shields (on = the wall stands) and a
-`PhysicalComponent` (shown / hidden) for anything else.
+| `goal:N` | a goal (`BP_GoalJakeBall_C`, ...) | the mode's ball in it during a round = points for team N (the team that **scores** there); the ball goes back | `Goal1` |
+| `score_zone:N` | a trigger the ball flies through | +1 for team N per pass (0 = by direction) | `ScoreZone1` |
+| `start_ring` | `Prefab_BP_CylinderPrimitive_Trigger_C` at scale 1 | the ball carried into it between rounds starts one; hidden while a round is on | `StartRing1` |
 | `timer` | Timer | counts the countdown, then the round | `Timer1` |
 | `ball` | ball spawner | the **server** spawns / resets its ball each round | `Ball1` |
 | `score_board` | the classic Score board | shows team 1 / 2 points | `ScoreBoard1` |
 | `score_table` | Score table | a row per team: name, score, players, rounds won | `ScoreTable1` |
+
+A wall slot is a `ToggleableComponent` for force fields and shields (on = the wall stands) and a
+`PhysicalComponent` (shown / hidden) for anything else. The controller's own clock, state and score are the slots
+`ModeTimer`, `ModeState`, `ModeScore`. `check_luau(gamemode_code=true)` knows every slot name and its type.
 
 The **Scoreboard monitors** (`BP_ScoreboardA_C`, side and half-court variants) need no role: the controller keeps
 the mode's team scores and rounds won on them (`Gamemode:setTeamScore`, `setTeamRoundsWon`).
@@ -311,10 +321,42 @@ reading `{<mode>.team1.name} team`. The example levels do exactly this.
 **Balls.** A ball is made at run time; its spawner is what's placed. `move_object` on a ball moves its spawner by
 the same amount and the ball comes along. Scaling a ball (0.25-4) sets its spawner to 1/that scale -- the game sizes
 a spawner's ball at 1 / the spawner's scale on every machine. Rotating a ball does nothing (it rolls). Any spawner
-edit rebuilds it with a fresh ball.
+edit rebuilds it with a fresh ball -- and the editor then re-wires the mode's script by itself (a rebuilt object is a
+new actor; the old slot would point at nothing). Ball logic runs on the **server's** copy of the mode script:
+`getSpawnedBall()` is nil on players' machines and only the server sees the ball enter a ring or a goal.
 
 **Monitor countdown.** Scoreboard monitors show the countdown seconds (round clock waiting) once someone is on a
 team, then the clock and scores. Keep `countdown` above 0 for a visible count.
+
+**Monitors bind at level load.** A Scoreboard monitor finds its mode's clock and scores only when the level loads.
+After placing monitors, `level_save`, `level_close`, `level_open` -- until then they read "Inactive" or stay dark.
+
+### Building an arena: what goes wrong
+
+Collected from real builds (the full log is `FIELD_NOTES.md`). `tests/build_wall_jakeball.py` is the reference: a
+56 x 34 m Jakeball arena with cut corners, ramps, framed and sealed goals, stands, bumpers, platforms and boosts.
+
+- **Build where the user is looking** (`editor_status.camera`) unless told otherwise, and don't move their camera
+  without asking.
+- **Walls: only the gridded cubes.** `Prefab_BP_StandardCubePrimitive_C` (navy) and `Prefab_BP_Cube2Primitive_C`
+  (purple). The Small / Blue / Yellow cube primitives vanish at some distances.
+- **Scale is not centimetres.** The navy cube is 100 cm per unit, the purple one **64**. Place one, read its
+  `boundsMin` / `boundsMax`, and size from that -- sizing the purple one as 100 left every goal box in pieces.
+- **Seal every seam.** Side walls run past the ends by a wall's thickness; goal box sides reach into the end wall and
+  the back; the roof covers sides and back; doorways get posts and a lintel. Check seams with `screenshot(hide_ui)`.
+- **Shapes from turned cubes.** A cube turned 45 degrees (yaw) on a corner cuts it; a square bar turned 45 degrees
+  about its length (pitch) along a wall's foot is a quarter-pipe ramp.
+- **Find the floor first.** `trace` down (or along the local up) to learn where a floor is, how far it goes and that
+  it's clear above. The station's flat wall pitch is the plane x = -28575 facing +X (y 6300..18300, z -3300..3700):
+  pass `floor_up=[1,0,0]` there, or pieces tilt to the curved hull's up.
+- **One ball per mode.** `list_objects(filter="BallSpawner", near=centre)` before adding one; a stray spawner in the
+  area makes a second ball.
+- **Facing.** A Scoreboard monitor's screen faces its local Y; text signs read from their front. Look at both from
+  inside. Text signs need scale 3 or so to be read across a pitch.
+- **Mode code must not hard-code world axes**: write the arena's centre and u/v/up axes into the code (the reference
+  builder does) so a copy anywhere else still works.
+- **Test the rules with the tools**, not by eye: walk a mock player through the doors, `ball_carry` the ball into the
+  ring and each goal, play to `score_to_win`, carry it out of bounds -- and read `gamemode_list` after each step.
 
 ### Building a game mode, step by step
 

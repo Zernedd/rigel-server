@@ -209,6 +209,9 @@ static bool          g_wasdEnabled = false;
 static SDK::FVector    g_cmdTarget{};                 // [CMDFILE] where the test command file sends the pawn
 static bool          g_cmdActive = false;
 static bool          g_cmdThrow = false;                // [CMDFILE] "throw": the F4 throw, once
+static bool          g_throwTo = false;                 // [CMDFILE] "throw x y z [sec]": carry the ball to a point instead
+static SDK::FVector    g_throwTarget{};
+static double        g_throwSecs = 3.0;
 static constexpr uintptr_t kRootCollisionOff = 0x5D8;   // AVRPawn::rootCollision (USphereComponent*)
 static bool          g_prevF1 = false, g_prevF2 = false;
 static ULONGLONG     g_lastTickMs = 0;
@@ -389,7 +392,14 @@ static void ThrowTick(SDK::APawn* pawn)
 
     const double t = g_throwTick / 90.0;
     SDK::FVector np{ g_throwStart.X + 1100.0 * t, g_throwStart.Y, g_throwStart.Z + 250.0 * t };
-    const SDK::FVector vel{ 1100.0, 0.0, 250.0 };
+    SDK::FVector vel{ 1100.0, 0.0, 250.0 };
+    if (g_throwTo)                                           // carried to a point at walking pace, then held there
+    {
+        const double k = t < g_throwSecs ? t / g_throwSecs : 1.0;
+        const SDK::FVector dd{ g_throwTarget.X - g_throwStart.X, g_throwTarget.Y - g_throwStart.Y, g_throwTarget.Z - g_throwStart.Z };
+        np = { g_throwStart.X + dd.X * k, g_throwStart.Y + dd.Y * k, g_throwStart.Z + dd.Z * k };
+        vel = t < g_throwSecs ? SDK::FVector{ dd.X / g_throwSecs, dd.Y / g_throwSecs, dd.Z / g_throwSecs } : SDK::FVector{ 0.0, 0.0, 0.0 };
+    }
 
     PushToServer(pawn, np, vel, true);                       // stay on the ball, moving
 
@@ -423,7 +433,7 @@ static void ThrowTick(SDK::APawn* pawn)
             own ? own->GetName().c_str() : "<null>");
     }
 
-    if (++g_throwTick > 270)                                  // ~3 s
+    if (++g_throwTick > (g_throwTo ? static_cast<int>((g_throwSecs + 1.5) * 90.0) : 270))   // ~3 s (carry: + 1.5 s held)
     {
         const SDK::FVector fin = g_throwBall->K2_GetActorLocation();
         Log("[A2PlayerControl] F4: done. ownedFrames=%d start=(%.0f, %.0f, %.0f) end=(%.0f, %.0f, %.0f)\n",
@@ -796,7 +806,13 @@ static void Tick()
                     const SDK::FVector p = pc->Pawn->K2_GetActorLocation();
                     if (sscanf_s(line, "move %lf %lf %lf", &x, &y, &z) == 3) { g_cmdTarget = { p.X + x, p.Y + y, p.Z + z }; g_cmdActive = true; }
                     else if (sscanf_s(line, "goto %lf %lf %lf", &x, &y, &z) == 3) { g_cmdTarget = { x, y, z }; g_cmdActive = true; }
-                    else if (!strncmp(line, "throw", 5)) g_cmdThrow = true;
+                    else if (!strncmp(line, "throw", 5))
+                    {
+                        double sec = 3.0;
+                        g_throwTo = sscanf_s(line, "throw %lf %lf %lf %lf", &x, &y, &z, &sec) >= 3;
+                        if (g_throwTo) { g_throwTarget = { x, y, z }; g_throwSecs = sec < 0.5 ? 0.5 : sec; }
+                        g_cmdThrow = true;
+                    }
                     else if (!strncmp(line, "press", 5))
                     {
                         // press x y z: the KeypadButton nearest the point gets exactly what a hand overlap gives it --

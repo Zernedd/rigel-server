@@ -97,6 +97,9 @@ std::string McpObjJson(const SceneObject& o)
 {
     std::string s = "{\"handle\":" + J(o.handle) + ",\"class\":" + J(o.className) + ",\"label\":" + J(o.label) +
                     ",\"location\":" + JV(o.location) + ",\"rotation\":" + JR(o.rotation) + ",\"scale\":" + JV(o.scale);
+    if (o.boundsExt.x + o.boundsExt.y + o.boundsExt.z > 0.0)      // world box: what the object really covers
+        s += ",\"boundsMin\":" + JV({ o.location.x + o.boundsOff.x - o.boundsExt.x, o.location.y + o.boundsOff.y - o.boundsExt.y, o.location.z + o.boundsOff.z - o.boundsExt.z }) +
+             ",\"boundsMax\":" + JV({ o.location.x + o.boundsOff.x + o.boundsExt.x, o.location.y + o.boundsOff.y + o.boundsExt.y, o.location.z + o.boundsOff.z + o.boundsExt.z });
     if (o.lockedByOther) s += ",\"lockedBy\":" + J(o.lockOwner);
     if (o.lockedByMe) s += ",\"lockedByMe\":true";
     return s + "}";
@@ -135,6 +138,36 @@ void McpHandle(const Snapshot& snap, const McpReq& r)
         char tp[MAX_PATH]; GetTempPathA(MAX_PATH, tp);
         s += ",\"editorLog\":" + J(std::string(tp) + "spec_editor.log") + "}";
         McpOk(r, s);
+        return;
+    }
+    if (c == "trace")                       // x, y, z, dx, dy, dz, maxDist: the first surface along a line
+    {
+        if (!g_pc) { McpErr(r, "no player controller yet"); return; }
+        const Vec3 from{ McpArg(r, 0, 0), McpArg(r, 1, 0), McpArg(r, 2, 0) };
+        Vec3 d{ McpArg(r, 3, 0), McpArg(r, 4, 0), McpArg(r, 5, -1) };
+        const double len = sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+        if (len < 1e-6) { McpErr(r, "direction is zero"); return; }
+        d = { d.x / len, d.y / len, d.z / len };
+        const double maxDist = McpArg(r, 6, 10000.0);
+        SDK::Params::KismetSystemLibrary_LineTraceSingle p{};
+        p.WorldContextObject = g_pc;
+        p.Start = SDK::FVector{ from.x, from.y, from.z };
+        p.End = SDK::FVector{ from.x + d.x * maxDist, from.y + d.y * maxDist, from.z + d.z * maxDist };
+        p.TraceChannel = SDK::ETraceTypeQuery::TraceTypeQuery1;      // Visibility
+        p.bTraceComplex = true;
+        p.DrawDebugType = SDK::EDrawDebugTrace::None;
+        p.bIgnoreSelf = true;
+        if (!CallStatic("KismetSystemLibrary", "LineTraceSingle", p) || !p.ReturnValue || !p.OutHit.bBlockingHit)
+        {
+            McpOk(r, "{\"hit\":false}");
+            return;
+        }
+        const auto& h = p.OutHit;
+        std::string what;
+        if (SDK::UObject* comp = h.Component.Get()) what = comp->Outer ? comp->Outer->GetName() + "." + comp->GetName() : comp->GetName();
+        McpOk(r, "{\"hit\":true,\"location\":" + JV({ h.ImpactPoint.X, h.ImpactPoint.Y, h.ImpactPoint.Z }) +
+                 ",\"normal\":" + JV({ h.ImpactNormal.X, h.ImpactNormal.Y, h.ImpactNormal.Z }) +
+                 ",\"distance\":" + std::to_string(h.Distance) + ",\"actor\":" + J(what) + "}");
         return;
     }
     if (c == "objects")                     // filter, cx, cy, cz, radius, limit

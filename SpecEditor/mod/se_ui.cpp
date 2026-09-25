@@ -4102,7 +4102,7 @@ std::string GmBuildScript(const Snapshot& snap, const GmInfo& g, std::vector<GmS
             "\t\tif st == \"running\" and old ~= \"running\" then pcall(function() Gamemode:startGame() end)\n"
             "\t\telseif (st == \"ended\" or st == \"idle\") and (old == \"running\" or old == \"countdown\") then pcall(function() Gamemode:stopGame() end) end\n"
             "\t\tif st == \"idle\" then __call(\"OnLobby\")\n"
-            "\t\telseif st == \"countdown\" then __call(\"OnCountdown\", Rigel.timeLeft())\n"
+            "\t\telseif st == \"countdown\" then __call(\"OnCountdown\", math.max(Rigel.timeLeft(), Rigel.settingNumber(\"countdown\")))\n"
             "\t\telseif st == \"running\" then __call(\"OnRoundStart\", Rigel.round())\n"
             "\t\telseif st == \"ended\" then __call(\"OnRoundEnd\", Rigel.winner()) end\n\tend)\n";
     body += "\tRigel.onTeamChanged(function(team: number, size: number, old: number) __boards(); __call(\"OnTeamChanged\", team, size, old) end)\n";
@@ -4183,6 +4183,7 @@ int  g_gmNewMax[4] = { 4, 4, 4, 4 };
 char g_gmNewNames[4][24] = { "Blue", "Red", "Green", "Yellow" };
 bool g_gmAutoApply = true;
 std::map<std::string, FILETIME> g_gmCodeWritten;   // per mode id: the custom code file's time when last applied
+std::map<std::string, std::vector<std::string>> g_gmWired;   // per mode id: the actors its script's slots point at
 std::string g_gmPreview;                 // "Show generated script"
 
 std::set<std::string> g_gmCtlCleaned;   // modes whose controller had its old script copy taken off (this session)
@@ -4202,6 +4203,9 @@ void GmApply(const Snapshot& snap, const GmInfo& g)
     const std::string script = "GM_" + GmFileStem(g.name) + ".luau";
     { Command c{ CmdType::LuauAttach }; c.str = ctl->handle; c.str2 = script; c.str3 = src; State().Push(c); }
     for (const auto& sl : slots) { Command c{ CmdType::LuauRef }; c.str = ctl->handle; c.str2 = script; c.str3 = sl.slot; c.str4 = sl.type; c.str5 = sl.targetHandle; State().Push(c); }
+    auto& wired = g_gmWired[g.id];
+    wired.clear();
+    for (const auto& sl : slots) wired.push_back(sl.targetHandle);
     Log("[gamemode] applied %s: %zu slot(s), %zu byte(s)", script.c_str(), slots.size(), src.size());
     Notes().Set("Applied the script for '" + g.name + "' (" + std::to_string(slots.size()) + " object(s) wired).");
     WIN32_FILE_ATTRIBUTE_DATA fa{};
@@ -4260,9 +4264,47 @@ void GmAdoptPending(const Snapshot& snap)
     }
 }
 
+// Moving / resizing a ball, attaching a script etc. rebuilds the object as a new actor under the same id, and the
+// mode script's slot still points at the destroyed one (a rebuilt ball spawner: Ball1:getSpawnedBall() is nil, so the
+// start ring and the goals stop knowing the mode's ball). Wire the script again once the rebuilt actor is there.
+void GmRewireRebuilt(const Snapshot& snap)
+{
+    static double s_last = 0;
+    static std::map<std::string, int> s_seen;            // mode id -> consecutive checks with a rebuilt target
+    static std::map<std::string, double> s_at;           // mode id -> last rewire (never more than once per 10 s)
+    if (ImGui::GetTime() - s_last < 1.0) return;
+    s_last = ImGui::GetTime();
+    for (const auto& rec : snap.gameModes)
+    {
+        const GmInfo g = GmParse(rec);
+        if (g.id.empty() || !GmScriptObject(snap, g)) continue;
+        // what the mode's slots point at NOW (by id), against what its script was wired to
+        std::vector<GmSlot> sl;
+        GmBuildScript(snap, g, sl);
+        auto& wired = g_gmWired[g.id];
+        const size_t known = wired.size();
+        bool rebuilt = false;
+        for (const auto& x : sl)
+        {
+            auto w = std::find_if(wired.begin(), wired.end(), [&](const std::string& h) { return GmGuid(h) == GmGuid(x.targetHandle); });
+            if (w == wired.end()) wired.push_back(x.targetHandle);      // not seen yet (still loading, or applied elsewhere)
+            else if (*w != x.targetHandle) rebuilt = true;
+        }
+        if (wired.size() != known) Log("[gamemode] %s: watching %zu wired object(s) for rebuilds", g.name.c_str(), wired.size());
+        if (!rebuilt) { s_seen.erase(g.id); continue; }
+        if (++s_seen[g.id] < 2) continue;                // let the rebuild settle for a second
+        if (ImGui::GetTime() - s_at[g.id] < 10.0) continue;
+        s_seen.erase(g.id);
+        s_at[g.id] = ImGui::GetTime();
+        Log("[gamemode] %s: a wired object was rebuilt -- wiring the script again", g.name.c_str());
+        GmApply(snap, g);                                // (records the new handles in g_gmWired)
+    }
+}
+
 void DrawGameModeBoxes(const Snapshot& snap)
 {
     GmAdoptPending(snap);
+    GmRewireRebuilt(snap);
     if (snap.gameModes.empty()) return;
     const View v = MakeView(snap);
     if (!v.valid) return;

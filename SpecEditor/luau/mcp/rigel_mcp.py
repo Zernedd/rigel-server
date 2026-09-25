@@ -338,6 +338,15 @@ def luau_lsp() -> str:
     return ext[-1] if ext else ""
 
 
+# a game mode's role slots (generated controller script) and their types -- se_ui.cpp kGmRoles
+SLOT_TYPES = {"Start": "BasicButtonComponent", "Score": "BasicButtonComponent", "Goal": "GoalComponent",
+              "ScoreZone": "PhysicalComponent", "StartRing": "PhysicalComponent", "TrapRound": "ToggleableComponent",
+              "TrapPulse": "ToggleableComponent", "TrapFired": "ToggleableComponent", "TrapButton": "BasicButtonComponent",
+              "WallLobby": "PhysicalComponent", "WallRound": "PhysicalComponent", "Timer": "TimerComponent",
+              "Ball": "BallSpawnerComponent", "ScoreBoard": "ScoreComponent", "ScoreTable": "DataTableComponent",
+              "ModeTimer": "GameTimeComponent", "ModeState": "GameStateManagerComponent", "ModeScore": "ScoreComponent"}
+
+
 def check_luau(source: str, name: str = "Script", gamemode_code: bool = False):
     problems = []
     lsp = luau_lsp()
@@ -346,8 +355,9 @@ def check_luau(source: str, name: str = "Script", gamemode_code: bool = False):
     src = source
     if gamemode_code:
         # game mode code is spliced into the controller: its role slots are locals declared before it
-        src = "".join(f"local {s}: any = nil\n" for s in re.findall(r"\b((?:Start|Score|TrapRound|TrapPulse|TrapFired|TrapButton|"
-                                                                  r"WallLobby|WallRound|Timer|Ball|ScoreBoard|ScoreTable)\d+)\b", source)) + source
+        slots = dict.fromkeys(re.findall(r"\b((?:StartRing|Start|ScoreZone|ScoreBoard|ScoreTable|Score|Goal|TrapRound|TrapPulse|"
+                                         r"TrapFired|TrapButton|WallLobby|WallRound|Timer|Ball)\d+|Mode(?:Timer|State|Score))\b", source))
+        src = "".join(f"local {s}: {SLOT_TYPES.get(re.sub(r'[0-9]+$', '', s), 'any')} = nil\n" for s in slots) + source
     shift = src.count("\n") - source.count("\n")
     fpath = os.path.join(tmpdir, re.sub(r"[^\w-]", "_", name) + ".luau")
     with open(fpath, "w", encoding="utf-8") as fh:
@@ -489,11 +499,21 @@ def _rot_from_q(q):                       # FQuat -> FRotator (UE's FQuat::Rotat
     return [math.degrees(math.asin(2 * st)), yaw, math.degrees(math.atan2(-2 * (w * x + y * z), 1 - 2 * (x * x + y * y)))]
 
 
-def floor_rotation(L, rot):
-    """`rot` as seen standing on the local floor at L -> the world rotation (identity tilt on the bottom floor)."""
-    up = station_up(L)
-    a = math.atan2(up[0], up[2])
-    tilt = (0.0, math.sin(a / 2), 0.0, math.cos(a / 2))
+def floor_rotation(L, rot, up=None):
+    """`rot` as seen standing on the local floor at L -> the world rotation (identity tilt on the bottom floor).
+    `up` = the floor's own normal when it isn't the curved hull (the wall pitches are flat: up = [1, 0, 0])."""
+    if up:
+        n = math.sqrt(sum(c * c for c in up))
+        ux, uy, uz = (c / n for c in up)
+        if uz < -0.9999:
+            tilt = (1.0, 0.0, 0.0, 0.0)                      # upside down: half a turn about X
+        else:
+            q = (-uy, ux, 0.0, 1.0 + uz)                    # +Z -> up, the shortest way (FindBetweenNormals)
+            m = math.sqrt(sum(c * c for c in q))
+            tilt = tuple(c / m for c in q)
+    else:
+        a = math.atan2(*station_up(L)[0::2])
+        tilt = (0.0, math.sin(a / 2), 0.0, math.cos(a / 2))
     return [round(v, 3) for v in _rot_from_q(_q_mul(tilt, _q_from_rot(*(rot or [0, 0, 0]))))]
 
 
@@ -504,12 +524,14 @@ def floor_rotation(L, rot):
       "takes `rotation` as a plain world rotation. Look at nearby objects for the floor's height.",
       {"item": {"type": "string", "description": "palette name (exact or substring) or sandbox id, e.g. BP_BasicButton_C"},
        "location": V3, "rotation": {**V3, "description": "pitch, yaw, roll (degrees)"}, "scale": V3,
-       "align_to_floor": {"type": "boolean", "default": True}}, ["item", "location"])
+       "align_to_floor": {"type": "boolean", "default": True},
+       "floor_up": {**V3, "description": "optional: the floor's normal where it isn't the curved hull (a flat pitch on a "
+                                           "wall: [1, 0, 0]); objects stand exactly square to it"}}, ["item", "location"])
 def t_place(a):
     L = a["location"]
     r = a.get("rotation") or [0, 0, 0]
     if a.get("align_to_floor", True):
-        r = floor_rotation(L, r)
+        r = floor_rotation(L, r, a.get("floor_up"))
     s = a.get("scale") or [1, 1, 1]
     return BR.call("place", a["item"], *L, *r, *s, timeout=20)
 
@@ -520,6 +542,37 @@ def t_move(a):
     L, R, S = a.get("location"), a.get("rotation"), a.get("scale")
     args = [a["handle"]] + (L if L else ["", "", ""]) + (R if R else ["", "", ""]) + (S if S else ["", "", ""])
     return BR.call("transform", *args)
+
+
+@tool("ball_carry", "TEST AID: carry a live ball to a point on the server over `seconds`, the way a player carrying it "
+      "would (so a start ring / goal / score box sees it arrive). Unlike move_object -- which edits the ball's SPAWNER and makes a "
+      "new ball already sitting there -- this moves the ball itself and doesn't change the level. handle = the ball's handle "
+      "(list_objects filter=Ball).", {"handle": {"type": "string"}, "location": V3, "seconds": {"type": "number", "default": 2}},
+      ["handle", "location"])
+def t_ballcarry(a):
+    objs = BR.call("objects", a["handle"].split("_")[0] if "-" in a["handle"] else a["handle"], "", "", "", "", 20)
+    lst = objs.get("objects", []) if isinstance(objs, dict) else []
+    o = next((x for x in lst if x.get("handle") == a["handle"]), lst[0] if lst else None)
+    if not o:
+        raise EditorError(f"no object {a['handle']}")
+    cls = o.get("class", "")
+    if "Ball" not in cls or "Spawner" in cls:
+        raise EditorError(f"{a['handle']} is a {cls}, not a ball (list_objects filter=Ball)")
+    fx, fy, fz = o["location"]
+    tx, ty, tz = a["location"]
+    mark = log_mark()
+    BR.call("raw", f"SE|BALLPUT|{cls}@{fx:.1f},{fy:.1f},{fz:.1f}|{tx:.1f},{ty:.1f},{tz:.1f}|{float(a.get('seconds', 2)):.2f}")
+    time.sleep(float(a.get("seconds", 2)) + 1.5)
+    return {"ball": a["handle"], "from": [fx, fy, fz], "to": [tx, ty, tz], "gameLog": read_game_log(mark)["lines"]}
+
+
+@tool("trace", "Line-trace the level from a point along a direction (default straight down -Z): where the first surface is, "
+      "its normal and the actor hit. Use it to find a floor's height and tilt before building, or to check a spot is clear.",
+      {"location": V3, "direction": V3, "max_distance": {"type": "number", "default": 10000}}, ["location"])
+def t_trace(a):
+    L = a["location"]
+    D = a.get("direction") or [0, 0, -1]
+    return BR.call("trace", *L, *D, a.get("max_distance", 10000))
 
 
 @tool("delete_object", "Delete an object (for everyone).", {"handle": {"type": "string"}}, ["handle"])
@@ -861,7 +914,8 @@ def t_gmdel(a):
       "The server stands it on the local floor under `location` (walls included; its middle is 1.5 m up) and, with no "
       "yaw, turns it to face the mode's centre -- walk in to join, walk out to leave. Give yaw only to override that.",
       {"mode": {"type": "string"}, "team": {"type": "integer"}, "location": V3,
-       "yaw": {"type": "number", "description": "optional: degrees about the local up; walking along it joins (default: face the centre)"}},
+       "yaw": {"type": "number", "description": "optional: degrees about the local up; the door's +X points OUT of the arena "
+                                                 "(walking in, against it, joins). Default: turned that way from the centre"}},
       ["mode", "team", "location"])
 def t_gmteam(a):
     m = find_mode(a["mode"])
@@ -871,6 +925,9 @@ def t_gmteam(a):
 
 
 ROLES = {"start": "BasicButton: starts a round", "score:N": "BasicButton: +1 for team N while running",
+         "goal:N": "Goal (BP_GoalJakeBall_C etc.): the mode's ball in it = points for team N (the team that SCORES there)",
+         "score_zone:N": "trigger the ball flies through: +1 for team N (0 = by direction)",
+         "start_ring": "trigger (e.g. Prefab_BP_CylinderPrimitive_Trigger_C): the mode's ball carried into it starts a round",
          "trap_round": "Toggleable trap: on during rounds", "trap_pulse:S": "trap: flips every S seconds during rounds",
          "trap_fired": "trap: switched on by trap buttons", "trap_button:S": "BasicButton: fires 'trap_fired' traps for S s",
          "wall_lobby": "solid between rounds, gone during", "wall_round": "only there during rounds",
@@ -879,7 +936,7 @@ ROLES = {"start": "BasicButton: starts a round", "score:N": "BasicButton: +1 for
 
 
 @tool("gamemode_set_role", "Give an object inside a mode a role; the generated controller script wires it (slot names Start1, "
-      "Score1, TrapRound1, Ball1, ... usable from the mode's code). Roles: " + "; ".join(f"{k} = {v}" for k, v in ROLES.items()) +
+      "Score1, Goal1, StartRing1, TrapRound1, Ball1, ModeTimer/ModeState/ModeScore ... usable from the mode's code). Roles: " + "; ".join(f"{k} = {v}" for k, v in ROLES.items()) +
       ". Call gamemode_apply_script afterwards.", {"mode": {"type": "string"}, "handle": {"type": "string"}, "role": {"type": "string"}},
       ["mode", "handle", "role"])
 def t_gmrole(a):
@@ -926,13 +983,14 @@ def t_gmapply(a):
 
 
 @tool("screenshot", "What the editor shows right now (the game view plus the editor UI), as an image you can look at. "
-      "Use set_camera first to frame what you want to check. max_width shrinks it (default 1280).",
-      {"max_width": {"type": "integer", "default": 1280}})
+      "Use set_camera first to frame what you want to check. max_width shrinks it (default 1280). hide_ui=true: the scene "
+      "alone, as players see it (the editor's panels hide most of the view).",
+      {"max_width": {"type": "integer", "default": 1280}, "hide_ui": {"type": "boolean", "default": False}})
 def t_screenshot(a):
     shots = os.path.join(tempfile.gettempdir(), "rigel_shots")
     os.makedirs(shots, exist_ok=True)
     bmp = os.path.join(shots, f"mcp_{int(time.time() * 1000)}.bmp")
-    BR.call("op", "shot " + bmp)
+    BR.call("op", "shot " + ("clean:" if a.get("hide_ui") else "") + bmp)
     for _ in range(40):
         time.sleep(0.25)
         if os.path.exists(bmp) and os.path.getsize(bmp) > 1000:

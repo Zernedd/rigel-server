@@ -113,6 +113,9 @@ After changing roles click **Apply script** (or keep **Auto-apply on save** on a
   seconds counting down while the round clock waits at the full round length;
   when the round starts it switches to the clock and the scores.
 - A monitor shows its game page only once someone is on a team; with every team empty it shows the empty-arena page.
+- A monitor finds its mode when the **level loads**. After adding monitors, save the level, close it and open it
+  again; until then they read "Inactive" or stay dark.
+- A monitor's screen faces its local Y (the side its stand leans away from): check it from inside the arena.
 - The classic **Score board** shows team 1 and team 2 points (role *Scoreboard*).
 - The **Score table** shows a row per team (role *Score table*).
 - A **Text sign** can show anything the mode knows through templates (below).
@@ -137,6 +140,8 @@ Balls the station owns (training balls, death balls) are not listed.
 - **Rotating a ball** changes nothing: a ball's rotation is its physics (it rolls).
 - Any edit to a spawner (move, scale, turn) rebuilds it, and it makes a fresh ball -- the old one is replaced, not
   lost. Scaling the *spawner* resizes its ball the other way round (a big spawner makes a small ball).
+- After such an edit the editor wires the mode's script again by itself, so the ring and goals keep knowing the ball.
+- One ball per mode: check the area for other ball spawners (the station's training spawners count) before you add one.
 
 - **Goals.** Place a *Driftball goal* from the pieces (or give any goal the **Goal** role) and set the team that
   scores there. The game's own goal detection fires, the mode adds the goal's points to that team, and -- with
@@ -237,6 +242,12 @@ traps, scoreboards, signs -- and as code (**Start from example...**):
   its empty page). Levels saved before 2026-09-24 need **Apply script** once to pick up the countdown fix.
 - **The ball is the wrong size**: its size is 1 / its spawner's scale. Scale the ball itself (not the spawner) to
   the size you want, or set the spawner back to 1.
+- **The ring doesn't start the round**: someone must be on a team, it must be at least 3 s after the last round
+  ended, and the ball must be the mode's own (the *Ball spawner* role).
+- **Cubes don't meet**: the cube prefabs aren't all the same size at scale 1 -- the navy gridded cube is 1 m, the
+  purple gridded cube 0.64 m. Size each by what it really covers. Use only the two gridded cubes for walls; the
+  small / blue / yellow cube primitives disappear at some distances.
+- **The monitor is dark or "Inactive"**: save, close and reopen the level (monitors find their mode at load).
 
 ## Building game modes with an AI agent
 
