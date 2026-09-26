@@ -589,6 +589,10 @@ public sealed class AresDashboardServer : AstraHttpServer, IAresDashboardServer
         // fleet advertised in the station browser with a game server that no longer has a station.
         foreach (var dep in deps)
         {
+            // ...and the servers themselves: a fleet's game servers must go with it (see DeleteDeployment).
+            var stop = HalcyonSocketServer.Instance?.Watchdog.Stop(dep.DeploymentId, "station deleted from the dashboard")
+                       ?? "allocator not running";
+            Console.WriteLine($"[Deployments] station {station_id} deleted, {dep.DeploymentId}: {stop}");
             EosGatewayServer.RemoveSessionsByDeployment(dep.DeploymentId);
             deploymentCol!.Delete(dep.Id);
         }

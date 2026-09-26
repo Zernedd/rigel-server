@@ -229,6 +229,39 @@ public sealed class ServerWatchdog
 
     public bool Forget(string deploymentId) => _servers.TryRemove(deploymentId, out _);
 
+    // The deployment was deleted: shut its server down for good. Retire first, so the kill below reads as a
+    // planned stop and is never "restored"; the entry stays (retired) so a late heartbeat can't re-adopt it.
+    // The kill goes to the box that owns the process. When only the pid is known (a server we adopted and no box
+    // has claimed yet), it goes to the single connected box -- never guessed across several, since the same pid
+    // on another box is a different server. The agent itself refuses a pid that is not one of its game servers.
+    public string Stop(string deploymentId, string reason)
+    {
+        if (!_servers.TryGetValue(deploymentId, out var w))
+            return "no running server known for it";
+        w.Retired       = true;
+        w.RetiredReason = reason;
+        w.LastVerdict   = "stopped";
+        if (w.Pid <= 0)
+            return "retired; its process id is not known yet";
+
+        string? box = string.IsNullOrWhiteSpace(w.Box) ? null : w.Box;
+        if (box == null)
+            lock (w.BoxClaims) if (w.BoxClaims.Count == 1) box = w.BoxClaims.First();
+        if (box == null)
+        {
+            var agents = _hub.Agents;
+            if (agents.Count == 1) box = agents[0].Box;
+        }
+        if (box == null)
+        {
+            Log($"{Short(deploymentId)} stopped ({reason}) but pid {w.Pid} has no known box -- NOT killed");
+            return $"retired; pid {w.Pid} has no known box, so it was not killed";
+        }
+        var sent = _hub.Kill(box, w.Pid.ToString(), reason);
+        Log($"{Short(deploymentId)} stopped ({reason}): kill pid {w.Pid} on '{box}' {(sent ? "sent" : "FAILED to send")}");
+        return sent ? $"server pid {w.Pid} on '{box}' is being shut down" : $"could not reach '{box}' to stop pid {w.Pid}";
+    }
+
     // ─── the decision ──────────────────────────────────────────────────────────────────────────
 
     private async Task EvaluateLoop()

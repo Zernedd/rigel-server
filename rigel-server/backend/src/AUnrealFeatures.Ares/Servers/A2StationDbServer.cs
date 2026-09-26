@@ -2474,6 +2474,15 @@ namespace AUnrealFeatures.Ares.Servers
             if (deployment == null)
                 return Results.Ok(new SuccessBoolean { Success = false });
 
+            // Deleting a deployment used to drop only its rows: the game server kept running, stayed in the
+            // station browser, and on its next register_server minted a brand-new blank station. Stop the
+            // server (the watchdog retires it so it is not "restored", and the owning agent kills it), and drop
+            // its EOS sessions so the browser forgets it at once.
+            var stop = HalcyonSocketServer.Instance?.Watchdog.Stop(deployment_id, "deployment deleted from the dashboard")
+                       ?? "allocator not running";
+            Console.WriteLine($"[Deployments] delete {deployment_id}: {stop}");
+            EosGatewayServer.RemoveSessionsByDeployment(deployment_id);
+
             deploymentCollection!.Delete(deployment.Id);
 
             // delete all server events for this deployment
