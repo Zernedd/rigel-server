@@ -291,6 +291,11 @@ void ClassifyPrefab(PaletteItem& it)
     for (const char* l : limited)
         if (it.name == l) it.limited = "Places and displays fine, but its behaviour (scores, panels, quest logic) comes from the "
                                        "game's sandbox scripts, which don't run for editor-placed objects.";
+    // The station's Tackleball training system needs the training data only the station's own areas carry: placed in a
+    // level it crashed the server two minutes later (2026-09-27). The server refuses it too.
+    if (it.name == "BP_TackleballTraining_C")
+        it.blocked = "The station's Tackleball training system can't be placed in a level: it needs the station's own "
+                     "training data, and placed on its own it crashes the server.";
     // Team changers only work inside a game mode's arena: placed free they have no arena (-1), carry blocking
     // colliders, and their team-change logic runs on every player's machine -- it crashed players' clients.
     std::string lo = it.name;

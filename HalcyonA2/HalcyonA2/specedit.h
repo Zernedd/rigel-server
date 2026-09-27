@@ -3685,8 +3685,24 @@ static bool SeRefusedPrefab(const std::string& name)
     for (char& ch : lo) ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
     return lo.find("teamchange") != std::string::npos || lo.find("teamswitch") != std::string::npos;
 }
+// Prefabs that take the server down when a level places them. TackleballTrainingSystem (BP_TackleballTraining_C) reads
+// its shootingTraining* netvars (+0x54B6C90) -- which only the station's own training areas carry -- and derefs a
+// node that isn't there: the first read, at the placement, faults inside a guarded call and the server carries on;
+// ~2 minutes later it reads them again unguarded and dies (AV 0x1B0 at +0x54B6D15). Live 2026-09-27 18:35 (Funhouse,
+// 2 players); reproduced locally (tools/localtest/repro/tackleball_training_spawn.py). The station's own five keep working.
+static bool SeUnplaceablePrefab(const std::string& name)
+{
+    return _stricmp(name.c_str(), "TackleballTrainingSystem") == 0 || _stricmp(name.c_str(), "BP_TackleballTraining_C") == 0 ||
+           name.find("BP_TackleballTraining.BP_TackleballTraining_C") != std::string::npos;
+}
 static std::string SeSandboxSpawn(const std::string& uniqueId, const double* loc, const double* rot, const double* scl)
 {
+    if (SeUnplaceablePrefab(uniqueId) || SeUnplaceablePrefab(g_sbSpawnCls) || SeUnplaceablePrefab(g_sbSpawnPath))
+    {
+        HxLog("[HalcyonA2][SPECEDIT] refused %s at (%.0f,%.0f,%.0f): it can't be placed in a level (it crashes the server)\n",
+              uniqueId.c_str(), loc[0], loc[1], loc[2]);
+        return std::string();
+    }
     if ((SeRefusedPrefab(uniqueId) || SeRefusedPrefab(g_sbSpawnCls)) && !SeTeamChangerAllowedAt(loc))
     {
         HxLog("[HalcyonA2][SPECEDIT] refused %s at (%.0f,%.0f,%.0f): team changers only work inside a game mode\n", uniqueId.c_str(),

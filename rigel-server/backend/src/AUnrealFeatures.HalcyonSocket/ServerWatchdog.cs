@@ -119,6 +119,16 @@ public sealed class ServerWatchdog
         w.ProbeAlive  = null;
         w.ProbeSentAt = null;
         w.LastVerdict = "starting";
+        // Someone put a retired deployment up again on purpose (the watchdog itself never restarts a retired one): watch
+        // it again, or its next crash is never restored (2026-09-27: Funhouse, respun after a failed restart, stayed retired).
+        if (w.Retired)
+        {
+            w.Retired          = false;
+            w.RetiredReason    = "";
+            w.RestartsInWindow = 0;
+            w.WindowStart      = DateTime.UtcNow;
+            Log($"{Short(deploymentId)} spun up again on purpose: back under watch");
+        }
         _reqToDeployment[reqId] = deploymentId;
     }
 
