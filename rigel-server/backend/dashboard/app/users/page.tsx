@@ -46,7 +46,7 @@ export default function UsersPage() {
 
   function openBan(user: User) {
     setBanTarget(user);
-    setBanStation(stations[0]?.station_id ?? "");
+    setBanStation("*");   // a respin mints a new station id: an all-stations ban survives it
     setBanReason("");
     setBanDuration("0");
     setActionErr(null);
@@ -70,9 +70,8 @@ export default function UsersPage() {
   }
 
   async function unban(user: User) {
-    const stationId = prompt("Station ID to unban from:");
-    if (!stationId) return;
-    await api.unbanUser(user.user_id, stationId);
+    if (!confirm(`Lift every ban on ${user.username}?`)) return;
+    await api.unbanUser(user.user_id, "*");
     api.users().then(setUsers).catch(() => {});
   }
 
@@ -195,6 +194,7 @@ export default function UsersPage() {
           <div className="mb-4">
             <label className="block text-xs mb-1.5" style={{ color: "var(--muted)" }}>Station</label>
             <select className={inputCls} style={inputStyle} value={banStation} onChange={e => setBanStation(e.target.value)}>
+              <option value="*">All stations</option>
               {stations.map(s => <option key={s.station_id} value={s.station_id}>{s.station_name}</option>)}
             </select>
           </div>

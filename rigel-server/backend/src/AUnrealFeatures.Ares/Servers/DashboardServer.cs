@@ -1,4 +1,4 @@
-﻿using AUnrealFeatures.Hosting.Http;
+using AUnrealFeatures.Hosting.Http;
 using AUnrealFeatures.Hosting.Http.Actions;
 using AUnrealFeatures.Hosting.Http.Attributes;
 using AUnrealFeatures.Hosting.Http.Interfaces;
@@ -167,7 +167,7 @@ public sealed class AresDashboardServer : AstraHttpServer, IAresDashboardServer
                 LastLogin = u.LastLogin,
                 CreatedAt = u.CreatedAt,
                 RoleCount = u.Roles?.Count ?? 0,
-                Banned    = u.Bans?.Any(b => !b.Revoked && (b.Expiration == null || b.Expiration > DateTime.UtcNow)) ?? false,
+                Banned    = u.Bans?.Any(StationBans.IsActive) ?? false,
                 IsAdmin   = u.Roles?.Contains(GlobalAdminRoleId) ?? false
             })
             .ToList() ?? new();
@@ -849,6 +849,7 @@ public sealed class AresDashboardServer : AstraHttpServer, IAresDashboardServer
             Revoked = false
         });
         users!.Update(user);
+        StationBans.PushAll();
         return Results.Ok(new DashboardActionResult { Success = true });
     }
 
@@ -867,16 +868,19 @@ public sealed class AresDashboardServer : AstraHttpServer, IAresDashboardServer
         if (user == null)
             return Results.Ok(new DashboardActionResult { Success = false, Error = "user not found" });
 
+        // lifts every ban that is enforced on that station (its own, global, or one left on a station that is gone);
+        // "*" lifts them all
+        var live = StationBans.LiveStationIds();
         bool changed = false;
         foreach (var ban in user.Bans ?? new List<BanRequest>())
         {
-            if (ban.StationId == body.StationId && !ban.Revoked)
+            if (StationBans.IsActive(ban) && StationBans.AppliesTo(ban, body.StationId, live))
             {
                 ban.Revoked = true;
                 changed = true;
             }
         }
-        if (changed) users!.Update(user);
+        if (changed) { users!.Update(user); StationBans.PushAll(); }
         return Results.Ok(new DashboardActionResult { Success = changed });
     }
 
@@ -884,17 +888,17 @@ public sealed class AresDashboardServer : AstraHttpServer, IAresDashboardServer
     public async Task<IHttpActionResult> GetStationBans(IHttpRequest request, IHttpResponse response, string station_id)
     {
         var users = Program.Database.GetCollection<UserDataResponse>(true);
-        var now   = DateTime.UtcNow;
+        var live  = StationBans.LiveStationIds();   // lists what is enforced here: global and orphaned bans too
         var bans  = users?.FindAll()
             .SelectMany(u => (u.Bans ?? new List<BanRequest>())
-                .Where(b => b.StationId == station_id && !b.Revoked && b.Expiration > now)
+                .Where(b => StationBans.IsActive(b) && StationBans.AppliesTo(b, station_id, live))
                 .Select(b => new DashboardBan
                 {
                     UserId     = u.UserId,
                     Username   = u.Username,
                     StationId  = b.StationId,
                     Reason     = b.Reason,
-                    Expiration = b.Expiration == DateTime.MaxValue ? null : b.Expiration,
+                    Expiration = b.Expiration.Year >= 9999 ? null : b.Expiration,
                     Revoked    = b.Revoked
                 }))
             .ToList() ?? new();

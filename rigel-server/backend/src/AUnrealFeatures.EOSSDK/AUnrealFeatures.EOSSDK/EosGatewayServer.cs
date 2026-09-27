@@ -58,6 +58,37 @@ public sealed partial class EosGatewayServer : AstraHttpServer, IEosGatewayServe
 
     public static int WhitelistedStationCount => _stationWhitelist.Count;
 
+    // ── Bans ─────────────────────────────────────────────────────────────────
+    // [2026-09-27] Bans were stored (dashboard / station API) but nothing enforced them: a banned player still got
+    // the station list and joined. Now a banned account never gets the banned station's servers in its EOS session
+    // list, and can't join one by a remembered session id either. Pushed in from Ares (StationBans) like the
+    // whitelist: station id -> banned usernames, "*" = banned from every station. Replaced wholesale on each push.
+    static volatile Dictionary<string, HashSet<string>> _stationBans = new(StringComparer.OrdinalIgnoreCase);
+
+    public static void SetBans(Dictionary<string, HashSet<string>> byStation)
+        => _stationBans = new Dictionary<string, HashSet<string>>(byStation ?? new(), StringComparer.OrdinalIgnoreCase);
+
+    public static int BannedAccountCount => _stationBans.Values.Sum(v => v.Count);
+
+    static bool InBanSet(HashSet<string>? set, string name, string puid)
+    {
+        if (set == null || set.Count == 0) return false;
+        if (!string.IsNullOrEmpty(name) && set.Contains(name)) return true;
+        if (!string.IsNullOrEmpty(puid))                    // the Oculus login derives the puid from the display name
+            foreach (var n in set)
+                if (string.Equals(EosJwtFactory.ProductUserIdFor(n), puid, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+
+    // Is this caller banned from the station this session belongs to (or from every station)?
+    static bool BannedFrom(EosSessionInfo s, string name, string puid)
+    {
+        var bans = _stationBans;
+        if (bans.Count == 0) return false;
+        if (bans.TryGetValue("*", out var all) && InBanSet(all, name, puid)) return true;
+        return !string.IsNullOrWhiteSpace(s.StationId) && bans.TryGetValue(s.StationId!, out var set) && InBanSet(set, name, puid);
+    }
+
     // Decode the caller out of the EOS user token. We minted and signed it ourselves (EosJwtFactory), so the
     // payload is trusted here; it is only ever used to decide what to SHOW, never to grant anything.
     static byte[] Base64UrlDecode(string s)
@@ -705,6 +736,14 @@ public sealed partial class EosGatewayServer : AstraHttpServer, IEosGatewayServe
                                    $"{(string.IsNullOrEmpty(callerName) ? "an unidentified caller" : callerName)}");
         }
 
+        if (_stationBans.Count > 0 && (!string.IsNullOrEmpty(callerName) || !string.IsNullOrEmpty(callerPuid)))
+        {
+            int before = snapshot.Count;
+            snapshot = snapshot.Where(s => !BannedFrom(s, callerName, callerPuid)).ToList();
+            if (before != snapshot.Count)
+                Logger.Information($"Bans | hid {before - snapshot.Count} session(s) from banned {callerName} ({callerPuid})");
+        }
+
         var matched = snapshot
             .Where(s => MatchesCriteria(s, filterReq?.Criteria))
             .Take(filterReq?.MaxResults > 0 ? filterReq.MaxResults : 100);
@@ -1063,6 +1102,16 @@ public sealed partial class EosGatewayServer : AstraHttpServer, IEosGatewayServe
     public async Task<IHttpActionResult> JoinSession(IHttpRequest request, IHttpResponse response, string deployment_id, string session_id, string product_user_id)
     {
         AddEosHeaders(response);
+
+        // a banned account can't join by a session id it remembered from before the ban either
+        var joinName = _userNames.TryGetValue(product_user_id, out var jn) ? jn : "";
+        EosSessionInfo? target;
+        lock (_sessionLock) target = Sessions.FirstOrDefault(s => s.Id == session_id);
+        if (target != null && BannedFrom(target, joinName, product_user_id))
+        {
+            Logger.Information($"Bans | refused join | session={session_id} player={product_user_id} ({joinName})");
+            return Results.Configurable(System.Net.HttpStatusCode.Forbidden, "application/json");
+        }
 
         lock (_sessionLock)
         {

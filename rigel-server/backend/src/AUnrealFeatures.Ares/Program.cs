@@ -135,6 +135,7 @@ namespace AUnrealFeatures.Ares
             // itself (Ares -> EOSSDK, never back), and an allowlist with no data fails OPEN -- so without
             // this a backend restart would silently unhide every private station until the next config edit.
             StationAcl.PushAll();
+            StationBans.Start();   // and the ban lists (banned accounts never get the banned station's servers)
 
             await _hostApplication.RunAsync();
         }

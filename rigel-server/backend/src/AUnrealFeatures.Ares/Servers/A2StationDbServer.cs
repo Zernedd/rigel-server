@@ -1,4 +1,4 @@
-﻿using AUnrealFeatures.Hosting.Database.Interfaces;
+using AUnrealFeatures.Hosting.Database.Interfaces;
 using AUnrealFeatures.Hosting.Http;
 using AUnrealFeatures.Hosting.Http.Actions;
 using AUnrealFeatures.Hosting.Http.Attributes;
@@ -1702,6 +1702,7 @@ namespace AUnrealFeatures.Ares.Servers
                 Revoked = false
             });
             userCollection?.Update(user);
+            StationBans.PushAll();
             return Results.Ok(new SuccessBoolean { Success = true });
         }
 
@@ -1715,16 +1716,17 @@ namespace AUnrealFeatures.Ares.Servers
             if (user == null)
                 return Results.Ok(new SuccessBoolean { Success = false });
 
+            var live = StationBans.LiveStationIds();
             bool updated = false;
             foreach (var ban in user.Bans ?? new List<BanRequest>())
             {
-                if (ban.StationId == station_id && !ban.Revoked)
+                if (StationBans.IsActive(ban) && StationBans.AppliesTo(ban, station_id, live))
                 {
                     ban.Revoked = true;
                     updated = true;
                 }
             }
-            if (updated) userCollection?.Update(user);
+            if (updated) { userCollection?.Update(user); StationBans.PushAll(); }
             return Results.Ok(new SuccessBoolean { Success = updated });
         }
 
