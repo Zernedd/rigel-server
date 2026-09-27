@@ -30,9 +30,11 @@ $stopped = @{}; $gone = [ordered]@{}
 foreach ($l in $lines) {
     if ($l -notmatch '^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) (.*)$') { continue }
     $t = $Matches[1]; $m = $Matches[2]
-    if ($m -match 'kill pid (\d+): stopped') { $stopped[$Matches[1]] = $t; continue }
-    if ($m -match '^pid (\d+) exited \(code (-?\d+)\)') { if (-not $gone.Contains($Matches[1])) { $gone[$Matches[1]] = @{ time = $t; code = $Matches[2]; how = 'exited' } }; continue }
-    if ($m -match 'pid (\d+) exited during init \(code (-?\d+)\)') { if (-not $gone.Contains($Matches[1])) { $gone[$Matches[1]] = @{ time = $t; code = $Matches[2]; how = 'exited during start-up' } }; continue }
+    # "stopped (process-exited)" is the watchdog cleaning up after a server that had ALREADY died -- not a stop on purpose
+    if ($m -match 'kill pid (\d+): stopped' -and $m -notmatch 'process-exited') { $stopped[$Matches[1]] = $t; continue }
+    # the agent often logs an empty exit code: "pid 4840 exited (code )"
+    if ($m -match '^pid (\d+) exited \(code (-?\d*)\)') { if (-not $gone.Contains($Matches[1])) { $gone[$Matches[1]] = @{ time = $t; code = $Matches[2]; how = 'exited' } }; continue }
+    if ($m -match 'pid (\d+) exited during init \(code (-?\d*)\)') { if (-not $gone.Contains($Matches[1])) { $gone[$Matches[1]] = @{ time = $t; code = $Matches[2]; how = 'exited during start-up' } }; continue }
     if ($m -match 'probe pid (\d+): alive=False') { if (-not $gone.Contains($Matches[1])) { $gone[$Matches[1]] = @{ time = $t; code = ''; how = 'found dead by the watchdog' } }; continue }
 }
 

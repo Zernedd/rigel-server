@@ -1843,6 +1843,7 @@ struct SbOwned
     std::vector<std::array<std::string, 3>> data;       // Game-data edits {path, kind, value}, replayed on load
     std::vector<std::pair<std::string, std::string>> scripts;   // custom Luau {name, source}
     std::vector<std::array<std::string, 4>> refs;                // script slots {script, slot, target idx, key}
+    std::vector<std::pair<std::string, std::vector<uint8_t>>> props;   // Properties leaves as shown (rendered text), written offline on every rebuild
 };
 static std::vector<SbOwned> g_sbOwned;
 static void SbOwnedForget(const std::string& idx)      // the object is gone: stop tracking (and saving) it
@@ -2895,6 +2896,7 @@ static void* g_sbLbClass = nullptr;    // ULuauBehavior (looked up outside the S
 struct SbLeafPod { bool inProps; uint64_t props, name; const uint8_t* blob; int len; bool inRefs; };
 static SbLeafPod g_sbLeafArr[16];      // POD view of g_sbPendingLeaves for the SEH core
 static size_t    g_sbLeafCount = 0;
+static int       g_sbLeafMiss = 0;     // pending leaves the last SbAddCore could not write (logged by the spawn)
 static int SbAddCore(void* lgmHandle, uint64_t objectsName, uint8_t* desc, uint64_t idxName)
 {
     int step = 0;
@@ -2916,10 +2918,12 @@ static int SbAddCore(void* lgmHandle, uint64_t objectsName, uint8_t* desc, uint6
         step = 5;
         g_sbDefResult = g_sbDefBp ? SbDefaultsCore(static_cast<uint8_t*>(node), g_sbDefBp, g_sbLbClass) : 0;
         if (g_sbDefBp && g_sbDefResult < 0) return -200 + g_sbDefResult;   // never attach a half-built object
+        g_sbLeafMiss = 0;
         for (size_t i = 0; i < g_sbLeafCount; ++i)
-            SbOfflineLeafCore(*reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(node) + (g_sbLeafArr[i].inRefs ? 616 : 552)),
-                              g_sbLeafArr[i].inRefs ? false : g_sbLeafArr[i].inProps,
-                              g_sbLeafArr[i].props, g_sbLeafArr[i].name, g_sbLeafArr[i].blob, g_sbLeafArr[i].len);
+            if (SbOfflineLeafCore(*reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(node) + (g_sbLeafArr[i].inRefs ? 616 : 552)),
+                                  g_sbLeafArr[i].inRefs ? false : g_sbLeafArr[i].inProps,
+                                  g_sbLeafArr[i].props, g_sbLeafArr[i].name, g_sbLeafArr[i].blob, g_sbLeafArr[i].len) != 1)
+                ++g_sbLeafMiss;
         void* nodeRef = node;
         reinterpret_cast<void(__fastcall*)(uint8_t*, void**)>(base + SeSb::AddChild)(iter, &nodeRef);
         step = 6;
@@ -3826,6 +3830,9 @@ static std::string SeSandboxSpawn(const std::string& uniqueId, const double* loc
     }
     HxLog("[HalcyonA2][SPECEDIT] sandbox spawn %s: defaults from %d template(s), %d default node(s)\n", idxA.c_str(),
           g_sbDefResult > 0 ? g_sbDefResult >> 8 : g_sbDefResult, g_sbDefResult > 0 ? g_sbDefResult & 0xFF : 0);
+    if (r == 6 && !leaves.empty())
+        HxLog("[HalcyonA2][SPECEDIT] sandbox spawn %s: %zu leaf(s) written offline%s\n", idxA.c_str(), leaves.size() - g_sbLeafMiss,
+              g_sbLeafMiss ? (" -- " + std::to_string(g_sbLeafMiss) + " could NOT be (missing container)").c_str() : "");
     if (r == 6 && slot) static_cast<SDK::AModuleSlot*>(slot)->PushNetVars();
     if (r == 6 && g_sbProps.count(idxA))                                  // requested values: the game's own sync
         if (SDK::AActor* mine = SbActorForIdx(idxA))
@@ -4324,6 +4331,28 @@ struct SbDeferredSet { std::string idx, path, kind, value; bool noRecord = false
 static std::vector<SbDeferredSet> g_sbDeferredSets;
 constexpr ULONGLONG kSbWriteGapMs = 400;
 static bool g_sbApplyingDeferred = false;
+// A Properties value (a sign's Text, a kiosk's quests ...). On an object WE placed the leaf is never replaced on
+// the live node: that NodeRemove + AddChild is what broke the node tree -- 2026-09-27 on the VPS, text signs being
+// placed and edited faulted in the game's node removal (+0x465C436), and the next text write overflowed the stack
+// in the id-cycle loop (+0x4665FAB) and killed the server (pids 3012, 4840). The deferral that used to hold these
+// writes 400 ms only made it rarer. Instead the object keeps the new blob and is rebuilt with it written offline,
+// before the node attaches (like a move: SbMoveFlush, debounced, the same id). The station's own objects, which
+// we can't rebuild, keep the live path.
+static bool SbPropWrite(SDK::AActor* a, const std::string& idx, const std::string& name, const std::vector<uint8_t>& blob)
+{
+    SbOwned* o = idx.empty() ? nullptr : SbOwnedByIdx(idx);
+    if (!o) return SbWriteLeaves(a, { { true, name, blob } });
+    bool found = false;
+    for (auto& p : o->props) if (p.first == name) { p.second = blob; found = true; }
+    if (!found) o->props.push_back({ name, blob });
+    // due kSbMoveSettleMs after the last write, and never before the new node has settled (kSbWriteGapMs)
+    ULONGLONG at = GetTickCount64();
+    if (auto sp = g_sbSpawnAt.find(idx); sp != g_sbSpawnAt.end() && sp->second + kSbWriteGapMs > at + kSbMoveSettleMs)
+        at = sp->second + kSbWriteGapMs - kSbMoveSettleMs;
+    g_sbMovePending[idx] = at;
+    return true;
+}
+
 static void SeSbSet(SDK::UObject* ctx, const std::string& ident, const std::string& path, const std::string& kind,
                     const std::string& value)
 {
@@ -4340,8 +4369,10 @@ static void SeSbSet(SDK::UObject* ctx, const std::string& ident, const std::stri
         bool queued = false;                                  // keep writes to one object in order
         for (const auto& d : g_sbDeferredSets) if (d.idx == widx) queued = true;
         // only props/ writes replace a leaf (the faulting operation); sd/ gd/ values are written in place and
-        // must land at once (a team changer's TeamIndex has to be there before clients build it)
-        if (!widx.empty() && path.rfind("props/", 0) == 0 && (young || recent || (queued && !g_sbApplyingDeferred)))
+        // must land at once (a team changer's TeamIndex has to be there before clients build it). Our own objects
+        // never replace it live (SbPropWrite), so only the station's objects still wait.
+        const bool ours = !widx.empty() && SbOwnedByIdx(widx) != nullptr;
+        if (!widx.empty() && !ours && path.rfind("props/", 0) == 0 && (young || recent || (queued && !g_sbApplyingDeferred)))
         {
             // the same path queued again: the newer value wins
             for (auto it = g_sbDeferredSets.begin(); it != g_sbDeferredSets.end(); ++it)
@@ -4358,6 +4389,7 @@ static void SeSbSet(SDK::UObject* ctx, const std::string& ident, const std::stri
     {
         // Rebuild the leaf: the current blob's prefix (02 01 <type desc>) + the new value.
         const std::string name = path.substr(6);
+        const std::string pidx = FStringToNarrow(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(pc) + 0x248));
         std::string raw;
         SbListCore(reinterpret_cast<uint8_t*>(SbNodeOf(handle)), &raw);
         const std::string key = "P\t" + name + "\t6\t";
@@ -4372,7 +4404,7 @@ static void SeSbSet(SDK::UObject* ctx, const std::string& ident, const std::stri
             {
                 std::vector<uint8_t> blob = g_sbPrefix[it->second];
                 blob.insert(blob.end(), val.begin(), val.end());
-                ok = SbWriteLeaves(a, { { true, name, blob } });
+                ok = SbPropWrite(a, pidx, name, blob);
             }
         }
         else if (at != std::string::npos && it != fields.end())
@@ -4387,7 +4419,7 @@ static void SeSbSet(SDK::UObject* ctx, const std::string& ident, const std::stri
             {
                 std::vector<uint8_t> blob(d.begin(), d.begin() + off);
                 blob.insert(blob.end(), val.begin(), val.end());
-                ok = SbWriteLeaves(a, { { true, name, blob } });
+                ok = SbPropWrite(a, pidx, name, blob);
             }
         }
     }
@@ -5013,6 +5045,26 @@ static bool SeLuauPutSource(SDK::UObject* lgm, const std::string& name, const st
 // Attach `name` (source already in the gamemode) to the object: rebuild it with the script component.
 // Rebuild one of our objects from `keep` (same id, same gamemode, same Game data): how a script change reaches
 // every machine. The old node goes first -- by actor, else directly by id, so two nodes never share an id.
+// A rebuilt (or copied) object's pending leaves: its script slots, and its Properties values written OFFLINE
+// (see SbPropWrite -- a Properties leaf is never replaced on a live node of ours).
+static std::vector<SbLeaf> SbKeepLeaves(const SbOwned& keep)
+{
+    std::vector<SbLeaf> v = SbRefLeaves(keep.refs);
+    for (const auto& p : keep.props) v.push_back({ true, p.first, p.second });
+    return v;
+}
+// Replay recorded Game data on a rebuilt copy -- except Properties values that went in offline with it (replaying
+// those would queue another rebuild, forever).
+static void SbReplayData(SDK::AActor* na, const SbOwned& keep)
+{
+    for (const auto& d : keep.data)
+    {
+        bool offline = false;
+        if (d[0].rfind("props/", 0) == 0) for (const auto& p : keep.props) if (p.first == d[0].substr(6)) offline = true;
+        if (!offline) SeSbSet(nullptr, SeLvIdent(na), d[0], d[1], d[2]);
+    }
+}
+
 static std::string SbRespawnKeep(SDK::AActor* a, const SbOwned& keep, const char* why)
 {
     const std::string oldIdx = keep.idx;
@@ -5026,7 +5078,7 @@ static std::string SbRespawnKeep(SDK::AActor* a, const SbOwned& keep, const char
     std::vector<std::string> names;
     for (const auto& s2 : keep.scripts) names.push_back(s2.first);
     g_sbPendingScripts = names;                             // Desc component entries for the scripts
-    g_sbPendingLeaves = SbRefLeaves(keep.refs);             // script slots -> references/<script> blobs
+    g_sbPendingLeaves = SbKeepLeaves(keep);                 // script slots -> references/<script> blobs, Properties values
     g_sbForceLgm = keep.lgm;                                // stay in the same slot (targets live there)
     g_sbForceIdx = oldIdx;                                  // and keep the id (slots that point at it)
     const std::string prevLoading = g_lvLoading;
@@ -5038,8 +5090,8 @@ static std::string SbRespawnKeep(SDK::AActor* a, const SbOwned& keep, const char
     g_sbPendingScripts.clear();
     g_sbForceLgm = nullptr;
     g_sbForceIdx.clear();
-    if (SbOwned* n = idx.empty() ? nullptr : SbOwnedByIdx(idx)) { n->data = keep.data; n->scripts = keep.scripts; n->refs = keep.refs; }
-    if (!idx.empty()) if (SDK::AActor* na = SbActorForIdx(idx)) for (const auto& d : keep.data) SeSbSet(nullptr, SeLvIdent(na), d[0], d[1], d[2]);
+    if (SbOwned* n = idx.empty() ? nullptr : SbOwnedByIdx(idx)) { n->data = keep.data; n->scripts = keep.scripts; n->refs = keep.refs; n->props = keep.props; }
+    if (!idx.empty()) if (SDK::AActor* na = SbActorForIdx(idx)) SbReplayData(na, keep);
     HxLog("[HalcyonA2][SPECEDIT] rebuild (%s): %s -> %s\n", why, oldIdx.c_str(), idx.empty() ? "FAILED" : idx.c_str());
     return idx;
 }
@@ -5233,7 +5285,7 @@ static std::string SbRehost(SbOwned& o, SDK::UObject* lgm)
     std::vector<std::string> names;
     for (const auto& s2 : keep.scripts) names.push_back(s2.first);
     g_sbPendingScripts = names;
-    g_sbPendingLeaves = SbRefLeaves(keep.refs);
+    g_sbPendingLeaves = SbKeepLeaves(keep);
     g_sbForceLgm = lgm;
     const std::string prevLoading = g_lvLoading;
     g_lvLoading = keep.level;
@@ -5243,8 +5295,8 @@ static std::string SbRehost(SbOwned& o, SDK::UObject* lgm)
     g_lvLoading = prevLoading;
     g_sbPendingScripts.clear();
     g_sbForceLgm = nullptr;
-    if (SbOwned* n = idx.empty() ? nullptr : SbOwnedByIdx(idx)) { n->data = keep.data; n->scripts = keep.scripts; n->refs = keep.refs; }
-    if (!idx.empty()) if (SDK::AActor* na = SbActorForIdx(idx)) for (const auto& d : keep.data) SeSbSet(nullptr, SeLvIdent(na), d[0], d[1], d[2]);
+    if (SbOwned* n = idx.empty() ? nullptr : SbOwnedByIdx(idx)) { n->data = keep.data; n->scripts = keep.scripts; n->refs = keep.refs; n->props = keep.props; }
+    if (!idx.empty()) if (SDK::AActor* na = SbActorForIdx(idx)) SbReplayData(na, keep);
     // anything that pointed at the old id now points at the new one
     for (auto& other : g_sbOwned) for (auto& r : other.refs) if (r[2] == keep.idx) r[2] = idx;
     if (auto ol = g_ownLocks.find(keep.idx); ol != g_ownLocks.end() && !idx.empty())
@@ -5278,7 +5330,7 @@ static void SeSandboxDuplicate(SDK::UObject* pawn, const std::string& name, cons
     std::vector<std::string> names;
     for (const auto& s2 : keep.scripts) names.push_back(s2.first);
     g_sbPendingScripts = names;
-    g_sbPendingLeaves = SbRefLeaves(keep.refs);
+    g_sbPendingLeaves = SbKeepLeaves(keep);
     g_sbForceLgm = keep.lgm && SeAlive(keep.lgm) ? keep.lgm : nullptr;   // its scripts' source lives there
     const std::string prevLoading = g_lvLoading;
     g_lvLoading = SeCallerScene();                       // the copy belongs to the duplicating editor's open level
@@ -5288,10 +5340,10 @@ static void SeSandboxDuplicate(SDK::UObject* pawn, const std::string& name, cons
     g_lvLoading = prevLoading;
     g_sbPendingScripts.clear();
     g_sbForceLgm = nullptr;
-    if (SbOwned* n = idx.empty() ? nullptr : SbOwnedByIdx(idx)) { n->data = keep.data; n->scripts = keep.scripts; n->refs = keep.refs; }
+    if (SbOwned* n = idx.empty() ? nullptr : SbOwnedByIdx(idx)) { n->data = keep.data; n->scripts = keep.scripts; n->refs = keep.refs; n->props = keep.props; }
     if (SDK::AActor* na = idx.empty() ? nullptr : SbActorForIdx(idx))
     {
-        for (const auto& d : keep.data) SeSbSet(nullptr, SeLvIdent(na), d[0], d[1], d[2]);
+        SbReplayData(na, keep);
         SeMarkProxyDirty(na);
     }
     HxLog("[HalcyonA2][SPECEDIT] duplicate %s (%s) -> %s\n", keep.idx.c_str(), keep.uniqueId.c_str(), idx.empty() ? "FAILED" : idx.c_str());

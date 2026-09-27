@@ -11592,15 +11592,29 @@ static void SafeLogRosterDrop(SDK::UFunction* f, SDK::UObject* c, int b, int a)
 // A player who has picked the Scrapper side (AAxPlayerState::TeamIndex@0x380 == 1) is not a runner:
 // never count them as one, and never hold back their clear -- the Luau's teamIndex == 1 branch is how
 // the RUNNERS win when the scrappers all leave, and swallowing it would break that too.
+// 1 = scrapper, 0 = not, -1 = the pawn can't be read (freed: its player left mid-round).
+// Plain field reads, deliberately. The authoritative resolver (AVRPawn::GetPawnTeamIndex) would be more accurate
+// but AVs on any pawn that is not provably live, and this runs off an RPC context we do not own. They are
+// SEH-fenced: 2026-09-27 a runner who left kept a dangling entry in g_scrapPawns, the next team clear read
+// PlayerState = -1 (+0x380 -> 0x37F) inside ProcessEvent_Hook, and the live server died (pid 2244).
+static int ScrapReadTeam(void* pw)
+{
+    __try
+    {
+        auto* ps = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(pw) + 0x2B8);
+        if (!ps) return 0;
+        return *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(ps) + 0x380) == 1 ? 1 : 0;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+}
+static int ScrapReadPlayerIndex(void* pw)
+{
+    __try { return *reinterpret_cast<unsigned char*>(reinterpret_cast<uintptr_t>(pw) + 0x1C22); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+}
 static bool ScrapIsScrapper(void* pw)
 {
-    if (!pw) return false;
-    // Plain field read, deliberately. The authoritative resolver (AVRPawn::GetPawnTeamIndex) would be
-    // more accurate but AVs on any pawn that is not provably live, and this runs off an RPC context we do
-    // not own. A wrong answer here mis-counts one runner; an AV takes the server down.
-    auto* ps = *reinterpret_cast<SDK::UObject**>(reinterpret_cast<uintptr_t>(pw) + 0x2B8);
-    if (!ps) return false;
-    return *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(ps) + 0x380) == 1;
+    return pw && ScrapReadTeam(pw) == 1;
 }
 // The clearer RPCs carry a PlayerIndex, not a pawn. Resolve it against the players we know are inside
 // ScrapRun (AVRPawn::PlayerIndex is the uint8 at 0x1C22).
@@ -11610,7 +11624,7 @@ static SDK::UObject* ScrapPawnByIndex(int pidx)
     for (int i = 0; i < g_scrapPawnN; ++i)
     {
         void* pw = g_scrapPawns[i];
-        if (pw && *reinterpret_cast<unsigned char*>(reinterpret_cast<uintptr_t>(pw) + 0x1C22) == pidx)
+        if (pw && ScrapReadPlayerIndex(pw) == pidx)
             return static_cast<SDK::UObject*>(pw);
     }
     return nullptr;
@@ -11619,12 +11633,14 @@ static SDK::UObject* ScrapPawnByIndex(int pidx)
 static int ScrapLiveRunnersOtherThan(void* except)
 {
     int n = 0;
-    for (int i = 0; i < g_scrapPawnN; ++i)
+    for (int i = 0; i < g_scrapPawnN; )
     {
         void* pw = g_scrapPawns[i];
-        if (!pw || pw == except) continue;
-        if (ScrapIsDead(pw) || ScrapIsScrapper(pw)) continue;
-        ++n;
+        if (!pw || pw == except) { ++i; continue; }
+        const int team = ScrapReadTeam(pw);
+        if (team < 0) { g_scrapPawns[i] = g_scrapPawns[--g_scrapPawnN]; continue; }   // gone: forget it
+        if (!ScrapIsDead(pw) && team == 0) ++n;
+        ++i;
     }
     return n;
 }
