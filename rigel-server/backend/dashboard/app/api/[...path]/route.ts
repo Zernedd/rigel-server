@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { validSession } from "@/lib/session";
 
 // Server-side proxy for /api/* -> AresDashboardServer on :8080.
 //
@@ -16,6 +17,9 @@ const DASHBOARD_PORT = process.env.DASHBOARD_API_PORT ?? "8080";
 const ADMIN_KEY = process.env.DASHBOARD_ADMIN_KEY ?? "";
 
 async function proxy(req: NextRequest, path: string[]) {
+  // [2026-09-27] The edge gate only checks that a session cookie is PRESENT, and this proxy attaches the admin key
+  // itself -- so without this check any made-up `rigel_dash` cookie was full admin. Verify its HMAC here.
+  if (!validSession(req)) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const search = req.nextUrl.search ?? "";
   const target = `http://${BACKEND_HOST}:${DASHBOARD_PORT}/api/${path.join("/")}${search}`;
 

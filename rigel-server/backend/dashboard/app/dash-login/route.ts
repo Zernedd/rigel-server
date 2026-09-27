@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createHmac, timingSafeEqual } from "crypto";
+import { COOKIE, constantTimeEquals, sessionValue } from "@/lib/session";
 
 // Validates the pasted admin key and mints the UI session cookie.
 //
@@ -8,21 +8,6 @@ import { createHmac, timingSafeEqual } from "crypto";
 // server-side session storage. httpOnly + sameSite=lax keeps it out of JavaScript's reach.
 
 const ADMIN_KEY = process.env.DASHBOARD_ADMIN_KEY ?? "";
-const SESSION_SECRET = process.env.DASHBOARD_SESSION_SECRET ?? "";
-export const COOKIE = "rigel_dash";
-
-export function sessionValue() {
-  return createHmac("sha256", SESSION_SECRET || ADMIN_KEY || "unset")
-    .update("rigel-dashboard-v1")
-    .digest("hex");
-}
-
-function constantTimeEquals(a: string, b: string) {
-  const ab = Buffer.from(a);
-  const bb = Buffer.from(b);
-  if (ab.length !== bb.length) return false;
-  return timingSafeEqual(ab, bb);
-}
 
 export async function POST(req: NextRequest) {
   if (!ADMIN_KEY) {

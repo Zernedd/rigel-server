@@ -28,6 +28,7 @@ namespace AUnrealFeatures.Ares.Servers
 
         public A2StationDbServer() : base(HOSTNAME, PORT)
         {
+            AddPreprocessor<StationApiGuard>();   // outside writes need the admin key (see StationApiGuard)
         }
 
         // ─── Helpers ─────────────────────────────────────────────────────────────
