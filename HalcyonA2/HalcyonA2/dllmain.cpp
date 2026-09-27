@@ -1413,8 +1413,13 @@ static LONG CALLBACK CrashReporterVeh(EXCEPTION_POINTERS* ep)
     const unsigned long long faultAddr =
         (code == EXCEPTION_ACCESS_VIOLATION || code == EXCEPTION_IN_PAGE_ERROR)
         ? (unsigned long long)ep->ExceptionRecord->ExceptionInformation[1] : 0ull;
-    HxLog("\n[HalcyonA2][CRASH] ***** FATAL code=0x%08X rip=0x%llX faultAddr=0x%llX gameBase=0x%llX selfBase=0x%llX *****\n",
-          code, (unsigned long long)rip, faultAddr, (unsigned long long)base, (unsigned long long)self);
+    // pid + UTC time: the crash watcher (tools/crashwatch) matches a dead server's pid to its fault blocks. Most blocks
+    // are first-chance faults our own SEH handles; the one that killed the process is the first in its last seconds.
+    SYSTEMTIME st{};
+    GetSystemTime(&st);
+    HxLog("\n[HalcyonA2][CRASH] ***** FATAL code=0x%08X rip=0x%llX faultAddr=0x%llX gameBase=0x%llX selfBase=0x%llX pid=%lu utc=%04u-%02u-%02uT%02u:%02u:%02u *****\n",
+          code, (unsigned long long)rip, faultAddr, (unsigned long long)base, (unsigned long long)self, GetCurrentProcessId(),
+          st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
     if (!inGame && !inSelf)
     {
         HMODULE hm = nullptr; char mn[MAX_PATH] = {0};
