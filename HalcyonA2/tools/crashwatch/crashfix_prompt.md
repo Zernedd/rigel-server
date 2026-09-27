@@ -14,15 +14,21 @@ Your job: find the crash point and fix it.
    chain: our payload code, game code reached through our payload (a call we make, an object we touch), or
    engine-internal damage (e.g. heap corruption detected in unrelated code -- see FIELD_NOTES "Live server crash
    2026-09-25").
-3. Fix it in the HalcyonA2 source (or the backend / editor if that is where it is). Build. Reproduce and verify on the
-   local test server (scratchpad gm_session.ps1 / full_setup.sh harness, mock player) wherever the crash can be
-   reproduced; say plainly when it can't be.
-4. Log it in SpecEditor/luau/mcp/FIELD_NOTES.md (what crashed, cause, fix, how verified), commit and push to main.
-5. Deploy: stage the DLL on the VPS as C:/Env/rigel-server/windows/HalcyonA2.dll.new. Swap it in
-   (C:/Env/vps_swap_now.ps1) ONLY if C:/Env/vps_players.ps1 reports 0 players online. With players on, leave it
+3. Fix it in the HalcyonA2 source (or the backend / editor if that is where it is). Build.
+4. TEST IT LOCALLY -- required, no exceptions: run
+     powershell -ExecutionPolicy Bypass -File HalcyonA2\tools\localtest\LocalSmoke.ps1 [-Repro <your repro script>]
+   It runs your build on a local server with a mock player on a MiniJakeball team, a kickoff and a goal, a stock
+   player joining, and a level reload, then checks no game process died and no crash report appeared (~10 min).
+   Write a repro for THIS crash where you can (a .py using lt.py's helpers, or a .ps1; print FAIL on failure) and
+   pass it with -Repro -- run it once on the OLD build to see it fail, then on the fixed build to see it pass. If the
+   crash can't be reproduced locally, say so plainly. The smoke run must print "LOCAL SMOKE: PASS" before step 6.
+5. Log it in SpecEditor/luau/mcp/FIELD_NOTES.md (what crashed, cause, fix, how verified -- paste the smoke result),
+   commit and push to main.
+6. Deploy (only after a local PASS): stage the DLL on the VPS as C:/Env/rigel-server/windows/HalcyonA2.dll.new. Swap
+   it in (C:/Env/vps_swap_now.ps1) ONLY if C:/Env/vps_players.ps1 reports 0 players online. With players on, leave it
    staged -- never restart a server with players on it.
-6. If you can't find the cause or a safe fix, don't guess and don't deploy: write what you found to FIELD_NOTES and stop.
-7. Finish with a PushNotification (one or two sentences: the crash, the cause, the fix, deployed or staged) and a short
+7. If you can't find the cause or a safe fix -- or the local test fails -- don't guess and don't deploy: write what you found to FIELD_NOTES and stop.
+8. Finish with a PushNotification (one or two sentences: the crash, the cause, the fix, local test result, deployed or staged) and a short
    summary as your last message.
 
 Rules that still apply (see memory): cap every wait; never kill the user's own Rigel editor (Meta Horizon install);
