@@ -41,8 +41,19 @@ foreach ($l in $lines) {
 $events = @()
 if ($gone.Count -gt 0) {
     $pay = (Read-From $payLog 0 40MB).text -split "`n"
+    # Payload deploys stop the server and swap HalcyonA2.dll, leaving HalcyonA2.dll.bak-<yyyyMMdd-HHmm[ss]> (VPS local
+    # time, like the agent log). An exit within 2 minutes of a swap is that deploy, not a crash (2026-09-28: the
+    # force-restart of Funhouse onto the text fix was reported as a crash of pid 2852).
+    $swaps = @(Get-ChildItem 'C:\Env\rigel-server\windows' -Filter 'HalcyonA2.dll.bak-*' -EA SilentlyContinue | ForEach-Object {
+        $s = $_.Name.Substring('HalcyonA2.dll.bak-'.Length)
+        foreach ($fmt in 'yyyyMMdd-HHmmss', 'yyyyMMdd-HHmm') {
+            try { [datetime]::ParseExact($s, $fmt, $null); break } catch {}
+        }
+    })
     foreach ($procId in $gone.Keys) {
         if ($stopped.ContainsKey($procId)) { continue }                 # stopped on purpose (dashboard / watchdog kill)
+        $exT = [datetime]::ParseExact($gone[$procId].time, 'yyyy-MM-dd HH:mm:ss', $null)
+        if (@($swaps | Where-Object { [Math]::Abs(($_ - $exT).TotalSeconds) -le 120 }).Count) { continue }   # a payload deploy
         $g = $gone[$procId]
         # the payload's fault blocks for this pid (first 3 blocks, 40 lines each)
         $blocks = @(); $cur = $null
@@ -56,8 +67,11 @@ if ($gone.Count -gt 0) {
         }
         # its UE log: the one that stopped being written around the exit
         $ex = [datetime]::ParseExact($g.time, 'yyyy-MM-dd HH:mm:ss', $null)
+        # The watchdog can notice minutes late, so look back 12 min -- but never past the exit: the replacement
+        # server starts in the same second and its A2.log is newer (a '|' after a '#' comment here used to end the
+        # pipeline early, so every log in the window was read and the bundle got the REPLACEMENT's log).
         $ue = Get-ChildItem $ueLogs -Filter 'A2*.log' -EA SilentlyContinue |
-              Where-Object { $_.LastWriteTime -gt $ex.AddMinutes(-12) -and $_.LastWriteTime -lt $ex.AddMinutes(2) }   # the watchdog can notice minutes late |
+              Where-Object { $_.LastWriteTime -gt $ex.AddMinutes(-12) -and $_.LastWriteTime -le $ex.AddSeconds(5) } |
               Sort-Object { [Math]::Abs(($_.LastWriteTime - $ex).TotalSeconds) } | Select-Object -First 1
         $ueTail = ''
         if ($ue) {
