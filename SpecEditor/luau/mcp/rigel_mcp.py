@@ -414,7 +414,9 @@ def parse_mode(rec: str):
             "rules": {k: v for k, v in sets.items() if not k.startswith(("role.", "custom.")) and k != "controller"},
             "custom": {k[7:]: v for k, v in sets.items() if k.startswith("custom.")},
             "roles": {k[5:]: v for k, v in sets.items() if k.startswith("role.")},
-            "controller": sets.get("controller", ""), "halfSize": [3881, 4733, 950]}
+            "controller": sets.get("controller", ""), "halfSize": [3881, 4733, 950],
+            # the gravity up its area stands on (halfSize[2] is along it); older servers don't send it
+            "up": [float(x) for x in f[14].split(",")] if len(f) > 14 and f[14].count(",") == 2 else [0.0, 0.0, 1.0]}
 
 
 def find_mode(mode: str):

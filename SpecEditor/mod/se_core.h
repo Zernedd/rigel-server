@@ -201,6 +201,9 @@ struct Command
     std::string str5;               // QuestCompile: child quest ids, ';'-separated (a quest group)
     float       snap = 0.0f;
     double      fallback = 400.0;   // SpawnTraced: distance to use when the ray hits nothing
+    int         align = 0;          // SpawnItem / SpawnTraced / PlaceTraced: 0 = rot is a world rotation; 1 = stand upright
+                                    // on the gravity where it lands (rot relative to that floor); 2 = the same, facing
+                                    // the camera (snapped to 90 degrees). On a plain +Z floor rot is used as it is.
     double      radius = 250.0;     // QuestCompile: checkpoint touch distance, cm
     int         timeLimit = 0;      // QuestCompile: seconds from the first checkpoint, 0 = none
 };

@@ -3193,17 +3193,133 @@ static const double kSlotBoxOffset[3] = { -38.0, 340.0, 434.0 };   // default bo
 // The station is a cylinder spinning about the world Y axis (x = 0, z = 0): its floor is the inside of the hull, and
 // "up" anywhere on it points at the axis -- +Z on the bottom floor (x ~ 0), +X on the wall at x ~ -28600. Game mode
 // areas and team doors are turned to that up, so a mode can sit on any part of the floor, walls included.
+// The districts' gravity is not all the cylinder: gravity volumes (GravityVolumeActor / GravityBoxActor) set their
+// own up inside them. "Up" is read from the zones exactly as the Spec Editor camera reads it (se_game.cpp
+// GravityUpAt): the smallest non-additive volume the point is inside, else the O'Neill cylinder around it, else +Z.
+// Game mode areas, team doors and the editor's placing all use this one answer.
+struct SeGravZone
+{
+    SDK::AActor* actor = nullptr;
+    bool   cylinder = false, invert = false;
+    double lo[3]{}, hi[3]{};
+    double centre[3]{}, axis[3]{ 0, 1, 0 }, maxDist = 0;
+    SDK::FTransform box{};
+    double extent[3]{}, up[3]{ 0, 0, 1 }, size = 0;
+};
+static std::vector<SeGravZone> g_seGravZones;
+static ULONGLONG g_seGravAt = 0;
+static void SeGravZonesRefresh()
+{
+    g_seGravZones.clear();
+    static SDK::UClass* ocls = nullptr; static SDK::UClass* vcls = nullptr; static SDK::UClass* bcls = nullptr;
+    if (!ocls) ocls = SDK::UObject::FindClassFast("OneillGravityActor");
+    if (!vcls) vcls = SDK::UObject::FindClassFast("GravityVolumeActor");
+    if (!bcls) bcls = SDK::UObject::FindClassFast("GravityBoxActor");
+    for (SDK::UClass* cls : { ocls, vcls, bcls })
+    {
+        if (!cls) continue;
+        for (SDK::UObject* ob : ClassObjects(cls))
+        {
+            if (!ob || !SeAlive(ob)) continue;
+            auto* a = static_cast<SDK::AActor*>(ob);
+            const uintptr_t b = reinterpret_cast<uintptr_t>(ob);
+            const bool isO = cls == ocls, isV = cls == vcls, isB = cls == bcls;
+            SeGravZone z;
+            z.actor = a;
+            SDK::FVector o{}, e{};
+            a->GetActorBounds(true, &o, &e, false);
+            if (e.X + e.Y + e.Z < 1.0) { a->GetActorBounds(false, &o, &e, false); if (e.X + e.Y + e.Z < 1.0) continue; }
+            z.lo[0] = o.X - e.X; z.lo[1] = o.Y - e.Y; z.lo[2] = o.Z - e.Z;
+            z.hi[0] = o.X + e.X; z.hi[1] = o.Y + e.Y; z.hi[2] = o.Z + e.Z;
+            if (isO)
+            {
+                z.cylinder = true;
+                const SDK::FVector l = a->K2_GetActorLocation();
+                z.centre[0] = l.X; z.centre[1] = l.Y; z.centre[2] = l.Z;
+                const double* ax = reinterpret_cast<const double*>(b + 0x308);           // RotationAxis
+                const double an = sqrt(ax[0] * ax[0] + ax[1] * ax[1] + ax[2] * ax[2]);
+                if (an > 0.5) { z.axis[0] = ax[0] / an; z.axis[1] = ax[1] / an; z.axis[2] = ax[2] / an; }
+                z.maxDist = *reinterpret_cast<float*>(b + 0x29C);                         // MaxGravityDistance
+                z.invert = *reinterpret_cast<bool*>(b + 0x302);                           // InvertGravity
+                z.size = 1e30;                                                             // volumes inside it win
+            }
+            else
+            {
+                if (isV && *reinterpret_cast<bool*>(b + 0x298)) continue;                // bIsAdditive: a nudge, not a floor
+                auto* boxc = *reinterpret_cast<SDK::USceneComponent**>(b + (isV ? 0x2A0 : 0x2B0));   // boxTrigger
+                if (!boxc || !SeAlive(boxc)) continue;
+                z.box = boxc->K2_GetComponentToWorld();
+                const double* ext = reinterpret_cast<const double*>(reinterpret_cast<uintptr_t>(boxc) + 0x540);   // BoxExtent
+                z.extent[0] = ext[0]; z.extent[1] = ext[1]; z.extent[2] = ext[2];
+                const SDK::FVector u = a->GetActorUpVector();
+                z.up[0] = u.X; z.up[1] = u.Y; z.up[2] = u.Z;
+                if (isB && *reinterpret_cast<bool*>(b + 0x2A6)) { z.up[0] = -z.up[0]; z.up[1] = -z.up[1]; z.up[2] = -z.up[2]; }
+                z.size = (z.hi[0] - z.lo[0]) * (z.hi[1] - z.lo[1]) * (z.hi[2] - z.lo[2]);
+            }
+            g_seGravZones.push_back(z);
+        }
+    }
+}
+static bool SeGravityUpAt(const double* pt, double out[3])
+{
+    const ULONGLONG now = GetTickCount64();
+    if (g_seGravZones.empty() ? now - g_seGravAt > 500 : now - g_seGravAt > 3000) { g_seGravAt = now; SeGravZonesRefresh(); }
+    const SeGravZone* best = nullptr;
+    double bestUp[3] = { 0, 0, 1 };
+    for (const SeGravZone& z : g_seGravZones)
+    {
+        if (best && z.size >= best->size) continue;
+        if (!SeAlive(z.actor)) continue;
+        bool in = true;
+        for (int k = 0; k < 3; ++k) if (pt[k] < z.lo[k] - 1.0 || pt[k] > z.hi[k] + 1.0) in = false;
+        if (!in) continue;
+        double up[3];
+        if (z.cylinder)
+        {
+            double d[3] = { pt[0] - z.centre[0], pt[1] - z.centre[1], pt[2] - z.centre[2] };
+            const double along = d[0] * z.axis[0] + d[1] * z.axis[1] + d[2] * z.axis[2];
+            for (int k = 0; k < 3; ++k) d[k] -= along * z.axis[k];
+            const double r = sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+            if (r < 50.0 || (z.maxDist > 0 && r > z.maxDist)) continue;              // on the axis: no floor
+            const double sgn = z.invert ? 1.0 : -1.0;                                 // up is toward the axis
+            for (int k = 0; k < 3; ++k) up[k] = sgn * d[k] / r;
+        }
+        else
+        {
+            const SDK::FVector l = SDK::UKismetMathLibrary::InverseTransformLocation(z.box, SDK::FVector{ pt[0], pt[1], pt[2] });
+            if (fabs(l.X) > z.extent[0] || fabs(l.Y) > z.extent[1] || fabs(l.Z) > z.extent[2]) continue;
+            for (int k = 0; k < 3; ++k) up[k] = z.up[k];
+        }
+        best = &z;
+        for (int k = 0; k < 3; ++k) bestUp[k] = up[k];
+    }
+    if (!best) return false;
+    const double n = sqrt(bestUp[0] * bestUp[0] + bestUp[1] * bestUp[1] + bestUp[2] * bestUp[2]);
+    if (n < 1e-6) return false;
+    for (int k = 0; k < 3; ++k) out[k] = bestUp[k] / n;
+    return true;
+}
 static void SeStationUp(const double* at, double up[3])
 {
+    if (SeGravityUpAt(at, up)) return;
+    // no zone loaded here (yet): the station is a cylinder about the world Y axis
     const double r = sqrt(at[0] * at[0] + at[2] * at[2]);
     if (r < 1000.0) { up[0] = 0; up[1] = 0; up[2] = 1; return; }   // near the axis: no floor to stand on, keep +Z
     up[0] = -at[0] / r; up[1] = 0; up[2] = -at[2] / r;
 }
-static SDK::FQuat SeStationUpQuat(const double* at)       // turns +Z to the local up (about the world Y axis)
+// +Z turned onto `up` the shortest way (FindBetweenNormals). For the cylinder's up (no Y part) this is the same turn
+// about the world Y axis as before. The editor rebuilds the same turn from the up in the mode list (se_ui GmFrame).
+static SDK::FQuat SeUpQuat(const double up[3])
+{
+    if (up[2] < -0.9999) return SDK::FQuat{ 1.0, 0.0, 0.0, 0.0 };   // upside down: half a turn about X
+    double q[4] = { -up[1], up[0], 0.0, 1.0 + up[2] };
+    const double n = sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+    return SDK::FQuat{ q[0] / n, q[1] / n, q[2] / n, q[3] / n };
+}
+static SDK::FQuat SeStationUpQuat(const double* at)       // turns +Z to the local up
 {
     double up[3]; SeStationUp(at, up);
-    const double a = atan2(up[0], up[2]);
-    return SDK::FQuat{ 0.0, sin(a * 0.5), 0.0, cos(a * 0.5) };
+    return SeUpQuat(up);
 }
 static SDK::FRotator SeStationUpRot(const double* at) { return SDK::UKismetMathLibrary::Quat_Rotator(SeStationUpQuat(at)); }
 static SDK::UObject* SbGamemodesManager()
@@ -5963,6 +6079,7 @@ struct SeGameMode
 {
     std::string id, name, level;
     double at[3]{};
+    double up[3]{ 0, 0, 1 };      // the gravity up its area was stood on (SeStationUp at creation)
     int nTeams = 2;
     int teamMax[8]{};
     std::string teamName[8];
@@ -6166,7 +6283,7 @@ static void SeModePushAll(SeGameMode& m)
 }
 static std::string SeModeRecord(const SeGameMode& m)
 {
-    // id~name~x,y,z~teams~names~maxes~k=v;k=v~state~level~round~time~sizes~scores~winner
+    // id~name~x,y,z~teams~names~maxes~k=v;k=v~state~level~round~time~sizes~scores~winner~ux,uy,uz
     std::string names, maxes, sets, sizes, scores;
     for (int t = 0; t < m.nTeams; ++t)
     {
@@ -6179,7 +6296,8 @@ static std::string SeModeRecord(const SeGameMode& m)
     char at[96];
     snprintf(at, sizeof(at), "%.0f,%.0f,%.0f", m.at[0], m.at[1], m.at[2]);
     return m.id + "~" + m.name + "~" + at + "~" + std::to_string(m.nTeams) + "~" + names + "~" + maxes + "~" + sets + "~" + m.state + "~" +
-           m.level + "~" + std::to_string(m.round) + "~" + std::to_string(m.timeLeft) + "~" + sizes + "~" + scores + "~" + std::to_string(m.winner);
+           m.level + "~" + std::to_string(m.round) + "~" + std::to_string(m.timeLeft) + "~" + sizes + "~" + scores + "~" + std::to_string(m.winner) +
+           "~" + [&] { char u[80]; snprintf(u, sizeof(u), "%.5f,%.5f,%.5f", m.up[0], m.up[1], m.up[2]); return std::string(u); }();
 }
 static void SeModeListTo(SDK::UObject* pc)
 {
@@ -6544,6 +6662,7 @@ static SeGameMode* SeModeCreate(const std::string& rawName, const double* at, in
     SeGameMode m;
     m.id = id; m.name = name; m.level = level; m.slot = slot; m.nTeams = nTeams;
     for (int i = 0; i < 3; ++i) m.at[i] = at[i];
+    SeStationUp(at, m.up);
     static const char* kDefaultNames[] = { "Blue", "Red", "Green", "Yellow", "Purple", "Orange", "Pink", "White" };
     for (int t = 0; t < nTeams; ++t) { m.teamMax[t] = sizes[t]; m.teamName[t] = names && !names[t].empty() ? SeModeClean(names[t], 20) : kDefaultNames[t]; }
     m.stateAt = GetTickCount64();

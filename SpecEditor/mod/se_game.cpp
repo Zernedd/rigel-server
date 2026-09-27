@@ -991,6 +991,8 @@ std::vector<Vec3> g_clickPlaced;                         // PlaceTraced results 
 std::string g_slotCandType;                             // SlotScan result (see Snapshot::slotCands)
 std::vector<Snapshot::SlotCand> g_slotCands;
 
+static Rot PlaceRotation(const Vec3& at, const Rot& local, int align);   // below (gravity)
+static Vec3 GravityLift(const Vec3& at, double cm);                        // below
 void HandleCommands()
 {
     for (const Command& c : State().Drain())
@@ -1002,7 +1004,7 @@ void HandleCommands()
             break;
 
         case CmdType::SpawnItem:
-            SendToServer("SE|SPAWN|" + c.str + "|" + Fmt3(c.loc) + "|" + Fmt3(c.rot) + "|" + Fmt3(c.scale));
+            SendToServer("SE|SPAWN|" + c.str + "|" + Fmt3(c.loc) + "|" + Fmt3(c.align ? PlaceRotation(c.loc, c.rot, c.align) : c.rot) + "|" + Fmt3(c.scale));
             Log("[game] spawn request: %s", c.str.c_str());
             break;
 
@@ -1260,11 +1262,12 @@ void HandleCommands()
             // Construction mode: on the surface the click hit, lifted so the coin floats at pickup height.
             // A red coin's box (its pickup trigger, what the selection box shows) starts at its origin and reaches
             // 1 m up, so the origin goes on the surface: the box rests on the ground, the coin floats in its middle.
+            // (lifted along the gravity there, and stood upright for it: the floor may be a wall)
             const double lift = 2.0;
             Vec3 at;
-            if (TraceWorld(c.loc, c.dir, 50000.0, at)) at.z += lift;
+            if (TraceWorld(c.loc, c.dir, 50000.0, at)) at = GravityLift(at, lift);
             else at = { c.loc.x + c.dir.x * 1500.0, c.loc.y + c.dir.y * 1500.0, c.loc.z + c.dir.z * 1500.0 };
-            SendToServer("SE|SPAWN|" + c.str + "|" + Fmt3(at) + "|0,0,0");
+            SendToServer("SE|SPAWN|" + c.str + "|" + Fmt3(at) + "|" + Fmt3(PlaceRotation(at, Rot{}, 1)));
             g_clickPlaced.push_back(at);
             Log("[game] construction: placed at (%.0f, %.0f, %.0f), lift %.0f", at.x, at.y, at.z, lift);
             break;
@@ -1277,12 +1280,15 @@ void HandleCommands()
             Vec3 at;
             if (!TraceWorld(c.loc, c.dir, 50000.0, at))
                 at = { c.loc.x + c.dir.x * c.fallback, c.loc.y + c.dir.y * c.fallback, c.loc.z + c.dir.z * c.fallback };
-            if (c.snap > 0.0f)
+            if (c.snap > 0.0f)                                   // along the floor only (a wall's floor is X/Z or Y/Z)
             {
-                at.x = std::round(at.x / c.snap) * c.snap;
-                at.y = std::round(at.y / c.snap) * c.snap;
+                const Vec3 lifted = GravityLift(at, 1.0);
+                const double up[3] = { lifted.x - at.x, lifted.y - at.y, lifted.z - at.z };
+                if (std::fabs(up[0]) < 0.5) at.x = std::round(at.x / c.snap) * c.snap;
+                if (std::fabs(up[1]) < 0.5) at.y = std::round(at.y / c.snap) * c.snap;
+                if (std::fabs(up[2]) < 0.5) at.z = std::round(at.z / c.snap) * c.snap;
             }
-            SendToServer("SE|SPAWN|" + c.str + "|" + Fmt3(at) + "|" + Fmt3(c.rot));
+            SendToServer("SE|SPAWN|" + c.str + "|" + Fmt3(at) + "|" + Fmt3(c.align ? PlaceRotation(at, c.rot, c.align) : c.rot));
             Log("[game] placed %s at (%.0f, %.0f, %.0f)", c.str.c_str(), at.x, at.y, at.z);
             break;
         }
@@ -1466,13 +1472,14 @@ static void GravZonesRefresh()
     }
 }
 
-// The way up where the camera is (world Z outside every zone). Returns the zone that decided it, if any.
-static const GravZone* CameraGravityUp(double out[3])
+// The way up at a point (world Z outside every zone): the smallest non-additive gravity volume it is inside, else
+// the station cylinder around it. Returns the zone that decided it, if any. The camera turns to this; placing
+// uses it exactly (the camera only eases toward it).
+static const GravZone* GravityUpAt(const double pt[3], double out[3])
 {
     out[0] = 0; out[1] = 0; out[2] = 1;
     const ULONGLONG now = GetTickCount64();
     if (now - g_gravZonesAt > 3000) { g_gravZonesAt = now; GravZonesRefresh(); }   // streaming levels come and go
-    const double pt[3] = { g_cam.x, g_cam.y, g_cam.z };
     const GravZone* best = nullptr;
     double bestUp[3] = { 0, 0, 1 };
     for (const GravZone& z : g_gravZones)
@@ -1508,6 +1515,11 @@ static const GravZone* CameraGravityUp(double out[3])
     }
     if (best) for (int k = 0; k < 3; ++k) out[k] = bestUp[k];
     return best;
+}
+static const GravZone* CameraGravityUp(double out[3])
+{
+    const double pt[3] = { g_cam.x, g_cam.y, g_cam.z };
+    return GravityUpAt(pt, out);
 }
 static void Normalize3(double v[3], const double fallback[3])
 {
@@ -1563,6 +1575,47 @@ static void CameraFrame(double right[3] = nullptr)
     {
         g_cam.rp = m.ReturnValue.Pitch; g_cam.ry = m.ReturnValue.Yaw; g_cam.rr = m.ReturnValue.Roll;
     }
+}
+
+// A placed object's world rotation: upright for the gravity where it lands, `local` relative to that floor. The
+// floor frame is the camera's own (its reference tangent laid onto this floor, as CameraFrame does), built on the
+// exact gravity up -- not the camera's eased, slightly tilted up. align 2 = face the camera, snapped to 90 degrees
+// in that frame. On a plain +Z floor the rotation is returned unchanged, so the bottom floor places as it always did.
+static Rot PlaceRotation(const Vec3& at, const Rot& local, int align)
+{
+    double up[3];
+    const double pt[3] = { at.x, at.y, at.z };
+    GravityUpAt(pt, up);
+    if (up[2] > 0.99999) return local;
+    static const double wx[3] = { 1, 0, 0 }, wy[3] = { 0, 1, 0 };
+    double t[3] = { g_cam.tan[0], g_cam.tan[1], g_cam.tan[2] };
+    const double tu = t[0] * up[0] + t[1] * up[1] + t[2] * up[2];
+    for (int i = 0; i < 3; ++i) t[i] -= tu * up[i];
+    if (std::sqrt(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]) < 1e-3)
+    {
+        const double* w = std::fabs(up[0]) < 0.9 ? wx : wy;
+        const double wu = w[0] * up[0] + w[1] * up[1] + w[2] * up[2];
+        for (int i = 0; i < 3; ++i) t[i] = w[i] - wu * up[i];
+    }
+    Normalize3(t, wy);
+    Rot lr = local;
+    if (align == 2) lr = { 0.0, std::round((g_cam.yaw + 180.0) / 90.0) * 90.0, 0.0 };
+    SDK::Params::KismetMathLibrary_MakeRotFromXZ fr{};
+    fr.X = SDK::FVector{ t[0], t[1], t[2] };
+    fr.Z = SDK::FVector{ up[0], up[1], up[2] };
+    if (!CallStatic("KismetMathLibrary", "MakeRotFromXZ", fr)) return local;
+    SDK::Params::KismetMathLibrary_ComposeRotators cr{};          // A then B: the local turn, then the floor frame
+    cr.A = SDK::FRotator{ lr.pitch, lr.yaw, lr.roll };
+    cr.B = fr.ReturnValue;
+    if (!CallStatic("KismetMathLibrary", "ComposeRotators", cr)) return local;
+    return Rot{ cr.ReturnValue.Pitch, cr.ReturnValue.Yaw, cr.ReturnValue.Roll };
+}
+static Vec3 GravityLift(const Vec3& at, double cm)                // `cm` along the gravity up there
+{
+    double up[3];
+    const double pt[3] = { at.x, at.y, at.z };
+    GravityUpAt(pt, up);
+    return { at.x + up[0] * cm, at.y + up[1] * cm, at.z + up[2] * cm };
 }
 
 void CameraApply();   // below
@@ -2225,6 +2278,7 @@ void ScriptOp(const Snapshot& snap, const std::string& line)
         c.loc = { snap.cameraPos.x + cp * cy * 400.0, snap.cameraPos.y + cp * sy * 400.0, snap.cameraPos.z + sp * 400.0 };
         c.rot = { 0.0, snap.cameraRot.yaw + 180.0, 0.0 };   // facing the camera, as the UI places things
         if (fixed) { c.loc = { fx, fy, fz }; c.rot = { 0.0, fyaw, 0.0 }; }
+        c.align = 1;                                          // upright on the gravity there, as the UI places
         g_lastSpawnClass = pick->name;
         g_lastSpawnLoc = c.loc;
         g_lastRot = c.rot;

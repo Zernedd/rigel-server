@@ -838,6 +838,24 @@ void DrawBox(ImDrawList* dl, const View& v, const Vec3& c, const Vec3& h, ImU32 
     }
 }
 
+// The same, turned: centre c, half-sizes h along the axes ax[0..2] (unit vectors).
+void DrawBoxAxes(ImDrawList* dl, const View& v, const Vec3& c, const Vec3& h, const Vec3 ax[3], ImU32 col, float th)
+{
+    Vec3 p[8];
+    for (int i = 0; i < 8; ++i)
+    {
+        const double sx = (i & 1) ? h.x : -h.x, sy = (i & 2) ? h.y : -h.y, sz = (i & 4) ? h.z : -h.z;
+        p[i] = { c.x + ax[0].x * sx + ax[1].x * sy + ax[2].x * sz, c.y + ax[0].y * sx + ax[1].y * sy + ax[2].y * sz,
+                 c.z + ax[0].z * sx + ax[1].z * sy + ax[2].z * sz };
+    }
+    static const int e[12][2] = { {0,1},{2,3},{4,5},{6,7},{0,2},{1,3},{4,6},{5,7},{0,4},{1,5},{2,6},{3,7} };
+    for (const auto& ed : e)
+    {
+        ImVec2 a, b;
+        if (W2S(v, p[ed[0]], a) && W2S(v, p[ed[1]], b)) dl->AddLine(a, b, col, th);
+    }
+}
+
 std::string PrettyName(const std::string& cls);
 
 bool SlotPickTake(const std::string& h);   // below (Outliner)
@@ -1258,6 +1276,7 @@ void SpawnAt(const PaletteItem& it, const Vec3& loc, double yaw)
         c.loc = { Snap(static_cast<float>(loc.x), g_gridSnap, true), Snap(static_cast<float>(loc.y), g_gridSnap, true),
                   Snap(static_cast<float>(loc.z), g_gridSnap, true) };
     c.rot = { 0.0, yaw, 0.0 };
+    c.align = 1;                         // upright for the district's gravity (yaw kept as-is on a +Z floor)
     State().Push(c);
     UndoExpectNew(1, "Place");
     g_recent.erase(std::remove(g_recent.begin(), g_recent.end(), it.path), g_recent.end());
@@ -1347,6 +1366,7 @@ void SpawnTraced(const PaletteItem& it, const Vec3& from, const Vec3& dir, doubl
     c.dir = dir;
     c.fallback = fallback;
     c.rot = { 0.0, yaw, 0.0 };
+    c.align = 2;                         // upright for the district's gravity, facing the camera
     c.snap = g_snapEnabled ? g_gridSnap : 0.0f;
     State().Push(c);
     UndoExpectNew(1, "Place");
@@ -3785,8 +3805,27 @@ struct GmInfo
     std::string names[8];
     int maxes[8]{}, sizes[8]{}, scores[8]{};
     std::map<std::string, std::string> sets;
+    double up[3]{ 0, 0, 1 };             // the gravity up its area stands on (the server turns the slot to it)
 };
 const double kGmHalf[3] = { 3881.0, 4733.0, 950.0 };     // a mode's area (the slot class's box), half-size in cm
+// The area's axes: +Z turned onto the mode's up the shortest way -- the same turn the server gives its slot
+// (specedit.h SeUpQuat), so the box drawn here is the box the game uses.
+void GmFrame(const GmInfo& g, Vec3 ax[3])
+{
+    const double* u = g.up;
+    double x, y, z, w;
+    if (u[2] < -0.9999) { x = 1; y = 0; z = 0; w = 0; }
+    else
+    {
+        x = -u[1]; y = u[0]; z = 0; w = 1.0 + u[2];
+        const double n = std::sqrt(x * x + y * y + z * z + w * w);
+        x /= n; y /= n; z /= n; w /= n;
+    }
+    // the rotation matrix's columns = the rotated X, Y, Z axes
+    ax[0] = { 1 - 2 * (y * y + z * z), 2 * (x * y + w * z), 2 * (x * z - w * y) };
+    ax[1] = { 2 * (x * y - w * z), 1 - 2 * (x * x + z * z), 2 * (y * z + w * x) };
+    ax[2] = { 2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y) };
+}
 std::vector<std::string> GmSplit(const std::string& s, char sep)
 {
     std::vector<std::string> v;
@@ -3815,6 +3854,15 @@ GmInfo GmParse(const std::string& rec)
         if (e != std::string::npos && e > 0) g.sets[kv.substr(0, e)] = kv.substr(e + 1);
     }
     g.state = f[7]; g.level = f[8]; g.round = atoi(f[9].c_str()); g.time = atoi(f[10].c_str()); g.winner = atoi(f[13].c_str());
+    if (f.size() >= 15)                   // older servers don't send it: +Z
+    {
+        double u[3] = { 0, 0, 1 };
+        if (sscanf_s(f[14].c_str(), "%lf,%lf,%lf", &u[0], &u[1], &u[2]) == 3)
+        {
+            const double n = std::sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+            if (n > 0.5) for (int k = 0; k < 3; ++k) g.up[k] = u[k] / n;
+        }
+    }
     return g;
 }
 std::string GmSetting(const GmInfo& g, const std::string& k, const char* def)
@@ -3824,7 +3872,12 @@ std::string GmSetting(const GmInfo& g, const std::string& k, const char* def)
 }
 bool GmInside(const GmInfo& g, const Vec3& p, double margin = 0.0)
 {
-    return fabs(p.x - g.at[0]) <= kGmHalf[0] + margin && fabs(p.y - g.at[1]) <= kGmHalf[1] + margin && fabs(p.z - g.at[2]) <= kGmHalf[2] + margin;
+    Vec3 ax[3];
+    GmFrame(g, ax);
+    const double d[3] = { p.x - g.at[0], p.y - g.at[1], p.z - g.at[2] };
+    for (int k = 0; k < 3; ++k)
+        if (fabs(d[0] * ax[k].x + d[1] * ax[k].y + d[2] * ax[k].z) > kGmHalf[k] + margin) return false;
+    return true;
 }
 std::string GmGuid(const std::string& handle) { return handle.substr(0, handle.find('_')); }
 // A number field that reports once the edit is finished: typing commits when the field is left (or Enter), the
@@ -4331,9 +4384,11 @@ void DrawGameModeBoxes(const Snapshot& snap)
         if (g.id.empty()) continue;
         const bool sel = g.id == g_gmSel;
         const ImU32 col = g.state == "running" ? IM_COL32(80, 220, 120, sel ? 230 : 140) : IM_COL32(240, 160, 40, sel ? 230 : 120);
-        DrawBox(dl, v, Vec3{ g.at[0], g.at[1], g.at[2] }, Vec3{ kGmHalf[0], kGmHalf[1], kGmHalf[2] }, col, sel ? 2.0f : 1.2f);
+        Vec3 gax[3];
+        GmFrame(g, gax);
+        DrawBoxAxes(dl, v, Vec3{ g.at[0], g.at[1], g.at[2] }, Vec3{ kGmHalf[0], kGmHalf[1], kGmHalf[2] }, gax, col, sel ? 2.0f : 1.2f);
         ImVec2 sp;
-        if (W2S(v, Vec3{ g.at[0], g.at[1], g.at[2] + kGmHalf[2] }, sp))
+        if (W2S(v, Vec3{ g.at[0] + g.up[0] * kGmHalf[2], g.at[1] + g.up[1] * kGmHalf[2], g.at[2] + g.up[2] * kGmHalf[2] }, sp))   // over its top
         {
             const std::string label = g.name + "  [" + g.state + "]";
             dl->AddText(ImVec2(sp.x - ImGui::CalcTextSize(label.c_str()).x * 0.5f, sp.y - 16), col, label.c_str());
