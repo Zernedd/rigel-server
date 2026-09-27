@@ -46,8 +46,9 @@ function Load-State {
     return [pscustomobject]@{ offset = -1; probeHash = ''; lastCheck = ''; crashes = @() }
 }
 function Save-State($s) { $s | ConvertTo-Json -Depth 6 | Set-Content $StateFile }
-function Ssh([string]$cmd) {
-    & ssh -i $cfg.sshKey -o BatchMode=yes -o ConnectTimeout=20 $cfg.vps $cmd 2>&1 | Where-Object { $_ -notmatch 'post-quantum|store now, decrypt later|may need to be upgraded' }
+# NOT named Ssh: function names ignore case, so `& ssh` inside it called itself (call depth overflow on every check)
+function Invoke-Vps([string]$cmd) {
+    & ssh.exe -i $cfg.sshKey -o BatchMode=yes -o ConnectTimeout=20 $cfg.vps $cmd 2>&1 | Where-Object { $_ -notmatch 'post-quantum|store now, decrypt later|may need to be upgraded' }
 }
 
 switch ($Command) {
@@ -87,10 +88,10 @@ switch ($Command) {
     $probe = Join-Path $Here 'vps_probe.ps1'
     $hash = (Get-FileHash $probe -Algorithm SHA256).Hash
     if ($s.probeHash -ne $hash) {
-        & scp -i $cfg.sshKey -o BatchMode=yes -o ConnectTimeout=20 $probe "$($cfg.vps):C:/Env/crashwatch_probe.ps1" 2>&1 | Out-Null
+        & scp.exe -i $cfg.sshKey -o BatchMode=yes -o ConnectTimeout=20 $probe "$($cfg.vps):C:/Env/crashwatch_probe.ps1" 2>&1 | Out-Null
         if ($LASTEXITCODE -eq 0) { $s.probeHash = $hash } else { Log "could not copy the probe to the VPS"; return }
     }
-    $out = Ssh "powershell -NoProfile -File C:/Env/crashwatch_probe.ps1 -Since $($s.offset)"
+    $out = Invoke-Vps "powershell -NoProfile -File C:/Env/crashwatch_probe.ps1 -Since $($s.offset)"
     $json = @($out) | Where-Object { $_ -like '{*' } | Select-Object -Last 1
     if (-not $json) { Log "probe gave no answer: $((@($out) | Select-Object -Last 2) -join ' | ')"; return }
     $r = $json | ConvertFrom-Json
