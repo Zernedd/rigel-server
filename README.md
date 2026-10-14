@@ -8,4 +8,4 @@ Drifter (drycheetah) - V1 code
 
 Zern - Game server rewrite and Rollback reimplementation 
 
-Claude - Helping reverse the Android and spec builds to find how things tick
+Claude - Helping reverse the Android and spec builds to find how things tick.
